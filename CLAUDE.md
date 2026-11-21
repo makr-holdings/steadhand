@@ -17,9 +17,15 @@ This is a **security product**. When convenience and safety conflict, choose saf
 ```
 steadhand.php            # bootstrap only: header, constants, autoload, hooks
 uninstall.php
+README.md                # GitHub-facing docs; not shipped in release zips
+SECURITY.md              # disclosure policy (ships in release zips)
+CHANGELOG.md             # ships in release zips
 includes/
   Plugin.php             # wiring
   Server.php             # MCP server registration + transport gate
+  Capabilities.php       # Steadhand capability names and agent-role defaults
+  Roles.php              # steadhand_agent role: install and uninstall
+  Requirements.php       # dependency checks and the missing-dependency notice
   Abilities/             # one class per ability
   Pipeline/              # validate → authorize → guardrails → snapshot → execute → log
   Guardrails/            # engine + rules + presets
@@ -27,7 +33,7 @@ includes/
   Admin/                 # settings screens (agents, guardrails, log)
   Dev/                   # dev-only updater (Updater.php) and its Plugin Update Checker library; excluded from the WordPress.org build
 tests/
-bin/                     # build.sh (release zips), check-wporg-build.sh (leak check), create-agent.sh (local agent user)
+bin/                     # build.sh (release zips), check-wporg-build.sh (leak check), test-wporg-gate.sh (gate self-test), create-agent.sh (local agent user)
 .github/workflows/       # ci.yml (PHPCS, tests, Plugin Check, build) and release.yml (vX.Y.Z tags)
 docs/SPEC.md
 docs/HOOKS.md            # public extension points (the API Pro builds on)
@@ -37,15 +43,17 @@ docs/HOOKS.md            # public extension points (the API Pro builds on)
 
 ```
 composer install
+npm ci                   # installs wp-env (@wordpress/env)
 composer phpcs           # WordPress Coding Standards; must pass
 composer test            # PHPUnit, run inside wp-env's tests environment (tests-cli container)
 npx wp-env start         # local WordPress with the MCP Adapter
 composer dev-updater:install  # installs the dev-only updater library into includes/Dev/vendor (needed for the tests)
-bin/build.sh <dev|wporg>      # release zip into build/ (dev: with the updater; wporg: checked for update-checker code)
+bin/build.sh <dev|wporg> [version]  # release zip into build/ (dev: with the updater; wporg: checked for update-checker code)
 bin/check-wporg-build.sh <zip-or-dir>  # fails if a WordPress.org build contains update-checker or dev/test code
-bin/create-agent.sh           # local wp-env only: agent user + Application Password (password printed once)
+bin/test-wporg-gate.sh        # self-test: plants each known violation and checks the gate catches it (needs composer dev-updater:install)
+bin/create-agent.sh [username] [label]  # local wp-env only: agent user + Application Password (password printed once)
 ```
-(Scripts are created in M0. Update this section if they change.)
+Update this section if they change.
 
 ## Hard rules
 

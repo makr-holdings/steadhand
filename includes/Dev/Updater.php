@@ -5,8 +5,10 @@
  * This file and the whole includes/Dev/ directory (including its vendor/ library) are excluded from the
  * WordPress.org build. Nothing else may reference this class; steadhand.php loads it with one guarded require.
  *
- * The token is read only from the STEADHAND_DEV_GITHUB_TOKEN constant. It is never stored, logged, displayed
- * or passed through a filter. With no token, nothing is hooked, loaded or printed.
+ * The token is read only from the STEADHAND_DEV_GITHUB_TOKEN constant. Steadhand never stores, logs or displays it.
+ * The update library sends it as an Authorization header on requests to this repository's GitHub API endpoints,
+ * where other code on the site can observe it through the library's and WordPress's HTTP filters.
+ * With no token, nothing is hooked, loaded or printed.
  *
  * @package Steadhand
  */
