@@ -60,7 +60,7 @@ final class Server {
 			self::ROUTE_NAMESPACE,
 			self::ROUTE,
 			'Steadhand',
-			__( 'Safe, least-privilege WordPress tools for AI agents. Every call is permission-checked and logged.', 'steadhand' ),
+			__( 'Safe, least-privilege WordPress tools for AI agents. Every call is permission-checked.', 'steadhand' ),
 			STEADHAND_VERSION,
 			array( \WP\MCP\Transport\HttpTransport::class ),
 			null,

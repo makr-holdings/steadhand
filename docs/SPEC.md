@@ -1,6 +1,6 @@
 # Steadhand — Product & Technical Spec
 
-**Status:** Draft v0.2 (2026-11-21)
+**Status:** Draft v0.3 (2026-11-21)
 **Owner:** MAKR Holdings LLC
 **Repo:** `makr-holdings/steadhand`: the free plugin, private during development, made public at the WordPress.org launch. Pro (M5) will be a separate add-on plugin in its own private repo; see §9.1.
 
@@ -64,7 +64,7 @@ Steadhand
 - Steadhand registers its **own** server on `mcp_adapter_init` using `$adapter->create_server(...)`, with an **explicit tool list**. Agents see each tool directly in `tools/list` with its full schema, with no discover/execute indirection through the default server.
 - Server ID `steadhand`, REST namespace `steadhand`, route `mcp`, so the endpoint is `/wp-json/steadhand/mcp`.
 - The **transport permission callback** checks the request user's own resolved capabilities directly (`WP_User::$allcaps`, role defaults merged with user-level overrides) for `steadhand_connect`. It does not call `current_user_can()`: on multisite that returns true for super admins for any capability, and `user_has_cap` filters from other plugins could grant Steadhand capabilities. Steadhand access must only ever come from a deliberate grant. Every Steadhand capability check works this way. Admins do *not* get this capability automatically. Only users deliberately set up as agents connect. Trade-off: a `user_has_cap` filter that revokes capabilities (for example a security plugin's lockdown mode) is not honoured by this check, so to cut off an agent, revoke its capability or its application password instead.
-- Steadhand's abilities are **not** marked `meta.public = true`, so they don't leak into the adapter's default server or other consumers. They are exposed only through the Steadhand server. Abilities also set `meta.mcp.public = false` and `show_in_rest = false` explicitly. (Verify during M1 that this works as expected.)
+- Steadhand's abilities are **not** marked `meta.public = true`, so they don't leak into the adapter's default server or other consumers. They are exposed only through the Steadhand server. Abilities also set `meta.mcp.public = false` and `show_in_rest = false` explicitly.
 
 ### 3.3 Abilities
 - Category `steadhand`, registered on `wp_abilities_api_categories_init`. Abilities are registered on `wp_abilities_api_init`. (If the category isn't registered, the ability fails *silently* when `WP_DEBUG` is off. Add a self-check in the admin UI.)
@@ -203,12 +203,12 @@ Principle: **Free must be genuinely safe on its own.** Pro adds control and conv
 - SSRF protection on any URL fetch (`wp_safe_remote_get`, block private/reserved ranges, size and type limits).
 - No `eval`, no dynamic includes, no shell calls, no unserialize of untrusted input.
 - Uninstall (`uninstall.php`): remove our tables, options and the `steadhand_agent` role, strip every Steadhand capability from every user, and revoke the application passwords of users whose only role was the agent role (those credentials exist only for agent access). Users are never deleted, and users who also hold another role keep their application passwords. No orphans are left behind.
-- `SECURITY.md` with a disclosure policy; GitHub private vulnerability reporting enabled; security fixes released within 7 days of a confirmed report.
+- `SECURITY.md` with a disclosure policy. GitHub private vulnerability reporting is available only once the repository is public (M4); until then reports go privately to the maintainers. Security fixes are released within 7 days of a confirmed report.
 - Before each release: PHPCS (WordPress Coding Standards + security sniffs), Plugin Check, the test suite, and a MAKR pentest pass against a staging site (auth bypass, capability escalation, guardrail bypass, injection, SSRF).
 
 ## 11. Distribution and updates
 
-- **Free:** WordPress.org. Tag a `vX.Y.Z` GitHub release, which produces the two zips in D10 (`steadhand-dev-X.Y.Z.zip` and `steadhand-X.Y.Z.zip`). GitHub Action (`10up/action-wordpress-plugin-deploy`) pushes to SVN.
+- **Free:** WordPress.org. Push a `vX.Y.Z` tag on a commit on `main`; the release workflow builds and checks both zips (D10: `steadhand-dev-X.Y.Z.zip` and `steadhand-X.Y.Z.zip`) and publishes the GitHub Release. GitHub Action (`10up/action-wordpress-plugin-deploy`) pushes to SVN.
 - **Before WordPress.org approval (dogfooding), decided (D4):** builds include Plugin Update Checker, pointed at this repo's GitHub releases, so makrholdings.com and rickearley.me auto-update during development and internal testing. The updater (`includes/Dev/Updater.php`) and its Plugin Update Checker library (`includes/Dev/vendor/`, pinned by `includes/Dev/composer.lock`) live in the dev-only directory `includes/Dev/`. The WordPress.org zip must contain no update-checker code at all, including the Plugin Update Checker library files, and CI fails if it finds any (D10). (WordPress.org doesn't allow external updaters.) The updater reads its token from the `STEADHAND_DEV_GITHUB_TOKEN` constant (D7) and does nothing when that constant is not set. It takes release assets only (the dev zip); a release without one is skipped, never replaced by GitHub's source zipball, which has no `vendor/`.
 - **Pro:** licensing/update service TBD (Freemius, Lemon Squeezy, or similar). *Open decision D5.*
 
@@ -216,8 +216,8 @@ Principle: **Free must be genuinely safe on its own.** Pro adds control and conv
 
 - Branches: `main` is always releasable; feature branches → PR → review → merge. Nobody pushes to `main` directly (enforce with branch protection once the repo is public).
 - Local dev: `@wordpress/env` (wp-env), with the MCP Adapter installed in the environment. Integration tests run in wp-env's isolated tests environment (`tests-cli` container, its own database), never against the development site.
-- CI (GitHub Actions on GitHub-hosted `ubuntu-latest` runners, per D8; the runner label is a single variable): PHPCS, PHPUnit (integration tests via wp-env), Plugin Check, building the release zip.
-- Issues: GitHub Issue Forms (bug, feature, guardrail request). Security reports go to private vulnerability reporting only.
+- CI (GitHub Actions, per D8): `ci.yml` jobs take their runner from the repository variable `STEADHAND_RUNNER` (default `ubuntu-latest`). `release.yml` jobs are fixed to `ubuntu-latest` on purpose, so the job that can publish releases cannot be moved by editing a repository variable. Jobs: PHPCS, PHPUnit (integration tests via wp-env), Plugin Check, building the release zip.
+- Issues: GitHub Issue Forms (bug, feature, guardrail request). Security reports never go to issues: they go privately to the maintainers, and through GitHub private vulnerability reporting once the repository is public (M4).
 - Coding agent: the Claude Code GitHub Action runs **only** on issues or PRs where a maintainer applied the `agent-ready` label. It works on a branch, opens a PR, and cannot merge. Issue text is untrusted input. It is not part of M0 and is added only when the owner asks.
 
 ## 13. Milestones
@@ -225,10 +225,10 @@ Principle: **Free must be genuinely safe on its own.** Pro adds control and conv
 | # | Milestone | Done when |
 |---|---|---|
 | M0 | Scaffold | See §13.1 |
-| M1 | Read-only | Agent user + Application Password connects from Claude; all read tools work; agent credentials refused outside the Steadhand MCP endpoint (D6); installed on rickearley.me |
+| M1 | Read-only | Agent user + Application Password connects from Claude; all read tools work; agent credentials refused on core REST, XML-RPC, wp-admin and the MCP Adapter's default server, everywhere except the Steadhand MCP endpoint (D6); installed on rickearley.me |
 | M2 | Safe writes | Draft/update/blocks/terms/media tools; guardrail engine with built-ins; change log |
 | M3 | Undo + admin UI | Log screen, undo, agent management UI; **AI Engine MCP turned off on both MAKR sites** |
-| M4 | WordPress.org | Readme, assets, Plugin Check clean, pentest pass, submitted; repo made public, with branch protection and required checks turned on |
+| M4 | WordPress.org | Readme, assets, Plugin Check clean, pentest pass, submitted; repo made public, with branch protection, required checks and private vulnerability reporting turned on |
 | M5 | Pro | Approvals, custom rules, retention/export, licensing |
 
 ### 13.1 M0 — Scaffold (done when all of these are true)
@@ -241,7 +241,7 @@ No user-facing tools yet. M0 builds the foundation every later milestone sits on
 6. **CI:** GitHub Actions running phpcs, tests and Plugin Check on every PR, and building a release zip (two variants: a dev build *with* `includes/Dev/Updater.php`, and a WordPress.org build with no update-checker code at all, including the PUC library files, with a check that fails if any appears).
 7. **Dev updater (D4):** `includes/Dev/Updater.php` using Plugin Update Checker against this repo's GitHub releases, loaded only by a guarded `require` when the file exists.
 8. **Docs:** `README.md` (what it is, local dev setup, how to connect Claude to a local site), `docs/HOOKS.md` (stub listing any extension points created so far), `uninstall.php`, and the `CLAUDE.md` Commands section updated to match reality.
-9. **Repo hygiene:** `.gitignore`, `.distignore` (what's excluded from release zips), and `SECURITY.md` (disclosure policy pointing to GitHub private vulnerability reporting).
+9. **Repo hygiene:** `.gitignore`, `.distignore` (what's excluded from release zips), and `SECURITY.md` (disclosure policy: private reports to the maintainers now, GitHub private vulnerability reporting once the repository is public).
 
 ## 14. Decisions
 
@@ -254,7 +254,7 @@ No user-facing tools yet. M0 builds the foundation every later milestone sits on
 | D5 | Pro licensing service | Open, decide at M4 |
 | D6 | What an agent can edit | **Decided:** the post's status decides, not its author. Detail in §14.1 |
 | D7 | How the dev updater authenticates | **Decided:** `STEADHAND_DEV_GITHUB_TOKEN` constant in `wp-config.php`, holding a fine-grained token limited to `makr-holdings/steadhand`, Contents read-only, expiry 90 days or less. Never stored in the database, logged or displayed. No constant set, no updater (no errors, no notices). Uses the dev zip from release assets. The README explains how to create the token |
-| D8 | CI runner | **Decided:** GitHub-hosted `ubuntu-latest`, not the EX44: Docker works for wp-env and runners are fresh per job. Runner label is one variable. If billing blocks a run, say so in the PR and stop |
+| D8 | CI runner | **Decided:** GitHub-hosted `ubuntu-latest`, not the EX44: Docker works for wp-env and runners are fresh per job. `ci.yml` takes its runner from the repository variable `STEADHAND_RUNNER`; `release.yml` is fixed to `ubuntu-latest`. If billing blocks a run, say so in the PR and stop |
 | D9 | Review and merge | **Decided:** Rick reviews and merges every PR. GitHub Free has no branch protection for private repos, so `CLAUDE.md` enforces this until M4, when branch protection and required checks are turned on |
 | D10 | Versioning and releases | **Decided:** SemVer from `0.1.0`. A `vX.Y.Z` tag creates a GitHub Release with `steadhand-dev-X.Y.Z.zip` (with the updater) and `steadhand-X.Y.Z.zip` (WordPress.org build, no update-checker code at all; CI fails if it finds any). `CHANGELOG.md` from the start; `readme.txt` at M4 |
 | D11 | Test matrix and standards | **Decided:** PHP 8.1 and 8.4; WordPress 6.9 and latest; WPCS 3.x and PHPCompatibilityWP (8.1+) |
@@ -270,4 +270,4 @@ Edit rights depend on the post's status, not on who wrote it.
 - **`steadhand_write_drafts`:** create posts, always saved as `draft`. Edit existing posts of any author while their status is `draft`, `pending` or `auto-draft`. May change a draft to pending, never to publish, future or private. May never change `post_author`.
 - **`steadhand_publish`:** edit posts that are published, scheduled (`future`) or private, and set those statuses.
 - **How:** a `map_meta_cap` filter maps `read_post`, `edit_post`, `publish_post` and `delete_post` to Steadhand capabilities for agent users. The role never gets WordPress's general editing capabilities (`edit_posts`, `edit_others_posts` and so on).
-- **Security requirement:** the mapping applies only while a Steadhand pipeline request is running (a context flag the pipeline sets and clears). Application Passwords also work against WordPress's own REST API; if the mapping applied everywhere, an agent could edit posts through `/wp/v2/posts` and skip the guardrails and the log. So in M1 agent users' credentials are refused everywhere except the Steadhand MCP endpoint (core REST, XML-RPC, wp-admin). Negative tests cover both the mapping and the block.
+- **Security requirement:** the mapping applies only while a Steadhand pipeline request is running (a context flag the pipeline sets and clears). Application Passwords also work against WordPress's own REST API; if the mapping applied everywhere, an agent could edit posts through `/wp/v2/posts` and skip the guardrails and the log. So in M1 agent users' credentials are refused everywhere except the Steadhand MCP endpoint (core REST, XML-RPC, wp-admin, and the MCP Adapter's default server at `/wp-json/mcp/mcp-adapter-default-server`). Negative tests cover both the mapping and the block.
