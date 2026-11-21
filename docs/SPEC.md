@@ -269,6 +269,7 @@ No user-facing tools yet. M0 builds the foundation every later milestone sits on
 | D12 | Comments tools in v1 or v1.1 | v1.1 |
 | D13 | Multisite (network) support in v1 | Single-site only in v1; network-activate untested. Roles are per site while Application Passwords work network-wide, and super admins pass every capability check in core, so agent identity must become network-aware before multisite is supported |
 | D14 | Which users may connect to Steadhand | **Decided:** only dedicated agent users (sole role `steadhand_agent`) can connect; mixed-role users are not agents and cannot connect. Lockdown (§4.1) applies to dedicated agents. For a mixed-role user it refuses its Application Passwords everywhere, and leaves its cookie sessions and account-password login alone |
+| D15 | Should deactivating Steadhand revoke agents' application passwords | **Decided:** no. Deactivation leaves agent users and their application passwords in place, and the lockdown stops while Steadhand is inactive; this is documented (§4.1, README). Revoke the passwords first, or uninstall, to take a site out of service. Revoking on deactivate would force every agent credential to be re-issued after a routine troubleshooting deactivate. |
 
 ### 14.1 D6 — what an agent can edit
 
