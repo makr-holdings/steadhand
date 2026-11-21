@@ -1,0 +1,148 @@
+# Release for Steadhand (SPEC §11, D10).
+#
+# Pushing a tag vX.Y.Z builds both zips and publishes a GitHub Release with them:
+#   steadhand-dev-X.Y.Z.zip  (dev build, includes the dev-only updater)
+#   steadhand-X.Y.Z.zip      (WordPress.org build, no update-checker code)
+#
+# Two jobs, on purpose:
+#   build    contents: read. Checks out the tag, proves it is on main, builds and gates both
+#            zips, runs the gate self-test, and uploads the zips as an artifact. It may run
+#            Composer and the build scripts.
+#   publish  contents: write. Downloads the artifact and creates the release. It does NOT check
+#            out the repository and does NOT run setup-php, Composer or any build script.
+#            Reason: shivammathur/setup-php writes the job token into Composer's auth.json, so
+#            a job that holds contents: write must never run setup-php, composer or repo scripts.
+#
+# Runner: both jobs use ubuntu-latest, hard-coded. Do not make these runs-on values a repository
+# variable: the job that can publish releases must not be movable onto another runner by
+# anyone who can edit repository variables. (ci.yml keeps vars.STEADHAND_RUNNER for its jobs.)
+#
+# The checkout directory must be named "steadhand" (same as ci.yml).
+#
+# Not yet: the WordPress.org SVN deploy. That lands with M4 (SPEC §13, D10).
+
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build and check release zips
+    # Hard-coded on purpose; see the header.
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: steadhand
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Derive version from tag
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Tag '$TAG' is not vX.Y.Z." >&2
+            exit 1
+          fi
+          VERSION="${TAG#v}"
+          echo "VERSION=${VERSION}" >> "$GITHUB_ENV"
+
+      - name: Verify the tagged commit is on main
+        working-directory: steadhand
+        env:
+          # Used for this one fetch only. persist-credentials is false, so no token stays in the
+          # git config, and the header is passed on this command line.
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          auth=$(printf '%s' "x-access-token:${GH_TOKEN}" | base64 | tr -d '\n')
+          git -c "http.extraheader=AUTHORIZATION: basic ${auth}" fetch --no-tags origin main:refs/remotes/origin/main
+          if git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+            echo "Tagged commit ${GITHUB_SHA} is on main."
+          else
+            echo "::error::Tag ${GITHUB_REF_NAME} points at ${GITHUB_SHA}, which is not on main. Release only from commits merged to main." >&2
+            exit 1
+          fi
+
+      - name: Set up PHP 8.4
+        uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # 2.40.0
+        with:
+          php-version: '8.4'
+          tools: composer
+          coverage: none
+
+      - name: Install dev-only updater (planted material for the gate self-test)
+        working-directory: steadhand
+        run: composer dev-updater:install
+
+      - name: Gate self-test (planted violations must fail the gate)
+        working-directory: steadhand
+        run: bash bin/test-wporg-gate.sh
+
+      - name: Build dev zip (with updater)
+        working-directory: steadhand
+        run: bash bin/build.sh dev "$VERSION"
+
+      - name: Build WordPress.org zip
+        working-directory: steadhand
+        run: bash bin/build.sh wporg "$VERSION"
+
+      - name: Check WordPress.org zip has no update-checker code
+        working-directory: steadhand
+        run: bash bin/check-wporg-build.sh "build/steadhand-${VERSION}.zip"
+
+      - name: Upload release zips
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: steadhand-release
+          path: |
+            steadhand/build/steadhand-dev-${{ env.VERSION }}.zip
+            steadhand/build/steadhand-${{ env.VERSION }}.zip
+          if-no-files-found: error
+          retention-days: 14
+
+  publish:
+    name: Publish GitHub Release
+    needs: build
+    # Hard-coded on purpose; see the header.
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      # No checkout, no setup-php, no Composer, no repository scripts in this job.
+      - name: Download release zips
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: steadhand-release
+          path: dist
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Tag '$TAG' is not vX.Y.Z." >&2
+            exit 1
+          fi
+          VERSION="${TAG#v}"
+          dev_zip="dist/steadhand-dev-${VERSION}.zip"
+          wp_zip="dist/steadhand-${VERSION}.zip"
+          test -f "$dev_zip" && test -f "$wp_zip" || { echo "Expected $dev_zip and $wp_zip in the artifact." >&2; exit 1; }
+          gh release create "$TAG" "$dev_zip" "$wp_zip" \
+            --verify-tag --generate-notes --repo "$GITHUB_REPOSITORY"

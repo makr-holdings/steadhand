@@ -75,6 +75,11 @@ if ( ! is_readable( STEADHAND_DIR . 'vendor/autoload.php' ) ) {
 
 require_once STEADHAND_DIR . 'vendor/autoload.php';
 
+// Dev builds only: the dev updater exists in includes/Dev/ and is absent from the WordPress.org zip.
+if ( is_readable( STEADHAND_DIR . 'includes/Dev/Updater.php' ) ) {
+	require_once STEADHAND_DIR . 'includes/Dev/Updater.php';
+}
+
 register_activation_hook( __FILE__, array( \Steadhand\Roles::class, 'install' ) );
 
 add_action(

@@ -1,0 +1,33 @@
+# Files excluded from every release zip (both the dev and WordPress.org variants).
+# Format: rsync --exclude-from. Root-level entries are anchored with a leading slash
+# so that same-named files deeper in the tree (e.g. includes/Dev/composer.lock) are kept.
+# Used by bin/build.sh. Keep in step with bin/check-wporg-build.sh.
+
+# Version control and CI
+/.git
+/.github
+/.gitignore
+/.distignore
+
+# Local dev environment and tooling
+/.wp-env.json
+/.wp-env.override.json
+/node_modules
+/package.json
+/package-lock.json
+/tests
+/bin
+/build
+/phpunit.xml.dist
+/phpcs.xml.dist
+/.phpunit.result.cache
+/.phpcs.cache
+
+# Dependencies: rebuilt without dev packages by bin/build.sh
+/composer.lock
+/vendor
+/includes/Dev/vendor
+
+# Internal documentation
+/CLAUDE.md
+/docs

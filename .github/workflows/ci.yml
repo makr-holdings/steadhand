@@ -1,0 +1,260 @@
+# CI for Steadhand (SPEC §12, §13.1 item 6, D8, D10, D11).
+#
+# Runner: every job uses runs-on: ${{ vars.STEADHAND_RUNNER || 'ubuntu-latest' }}.
+# To move all jobs to another runner, set the repository variable STEADHAND_RUNNER
+# (Settings > Secrets and variables > Actions > Variables). Unset means ubuntu-latest.
+#
+# The checkout directory must be named "steadhand": wp-env mounts the plugin under
+# its folder name, and composer test expects wp-content/plugins/steadhand.
+
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+# Runs on main are never cancelled: each merge keeps its own complete record. PR runs are
+# superseded by newer pushes to the same branch.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+jobs:
+  phpcs:
+    name: PHPCS
+    runs-on: ${{ vars.STEADHAND_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 15
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: steadhand
+          persist-credentials: false
+
+      - name: Set up PHP 8.4
+        uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # 2.40.0
+        with:
+          php-version: '8.4'
+          tools: composer
+          coverage: none
+
+      - name: Find Composer cache directory
+        id: composer-cache
+        working-directory: steadhand
+        run: echo "dir=$(composer config cache-files-dir)" >> "$GITHUB_OUTPUT"
+
+      - name: Cache Composer packages
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ steps.composer-cache.outputs.dir }}
+          key: ${{ runner.os }}-composer-php8.4-${{ hashFiles('steadhand/composer.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-composer-php8.4-
+
+      - name: Install Composer dependencies
+        working-directory: steadhand
+        run: composer install --no-interaction --prefer-dist
+
+      - name: Run PHPCS
+        working-directory: steadhand
+        run: composer phpcs
+
+  test:
+    name: Tests (PHP ${{ matrix.php }}, WordPress ${{ matrix.wp }})
+    runs-on: ${{ vars.STEADHAND_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        php: ['8.1', '8.4']
+        wp: ['6.9', 'latest']
+    env:
+      # wp-env reads these from the environment and overrides .wp-env.json.
+      WP_ENV_PHP_VERSION: ${{ matrix.php }}
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: steadhand
+          persist-credentials: false
+
+      - name: Set up Node LTS
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 'lts/*'
+          cache: npm
+          cache-dependency-path: steadhand/package-lock.json
+
+      # Host PHP is only needed to run Composer. Tests run inside wp-env's PHP.
+      - name: Set up PHP 8.4 (host, for Composer only)
+        uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # 2.40.0
+        with:
+          php-version: '8.4'
+          tools: composer
+          coverage: none
+
+      - name: Find Composer cache directory
+        id: composer-cache
+        working-directory: steadhand
+        run: echo "dir=$(composer config cache-files-dir)" >> "$GITHUB_OUTPUT"
+
+      - name: Cache Composer packages
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ steps.composer-cache.outputs.dir }}
+          key: ${{ runner.os }}-composer-php8.4-${{ hashFiles('steadhand/composer.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-composer-php8.4-
+
+      - name: Install Composer dependencies
+        working-directory: steadhand
+        run: composer install --no-interaction --prefer-dist
+
+      - name: Install npm dependencies
+        working-directory: steadhand
+        run: npm ci
+
+      - name: Install dev-only updater (for includes/Dev)
+        working-directory: steadhand
+        run: composer dev-updater:install
+
+      - name: Select WordPress core for wp-env
+        env:
+          WP_MATRIX: ${{ matrix.wp }}
+        run: |
+          # WP_ENV_CORE unset or empty means wp-env uses the latest production release.
+          # 6.9 means the latest 6.9.x: the 6.9-branch ref, not the 6.9.0 tag.
+          if [ "$WP_MATRIX" = "latest" ]; then
+            core=""
+          elif [ "$WP_MATRIX" = "6.9" ]; then
+            core="WordPress/WordPress#6.9-branch"
+          else
+            echo "No WordPress core ref is defined for matrix value '$WP_MATRIX'." >&2
+            exit 1
+          fi
+          echo "WP_ENV_CORE=${core}" >> "$GITHUB_ENV"
+
+      - name: Start wp-env
+        working-directory: steadhand
+        run: npx wp-env start
+
+      - name: Run PHPUnit in wp-env
+        working-directory: steadhand
+        run: composer test
+
+      - name: wp-env logs (diagnostic, on failure)
+        if: failure()
+        working-directory: steadhand
+        run: npx wp-env logs --no-watch
+
+  build:
+    name: Build release zips
+    runs-on: ${{ vars.STEADHAND_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 20
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: steadhand
+          persist-credentials: false
+
+      - name: Set up PHP 8.4
+        uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # 2.40.0
+        with:
+          php-version: '8.4'
+          tools: composer
+          coverage: none
+
+      # bin/build.sh builds the autoloader and the updater's library inside the stage. The gate
+      # self-test below needs the updater's library in the working tree, so install it here.
+      - name: Install dev-only updater (planted material for the gate self-test)
+        working-directory: steadhand
+        run: composer dev-updater:install
+
+      - name: Build dev zip (with updater)
+        working-directory: steadhand
+        run: bash bin/build.sh dev
+
+      - name: Build WordPress.org zip
+        working-directory: steadhand
+        run: bash bin/build.sh wporg
+
+      - name: Check WordPress.org zip has no update-checker code
+        working-directory: steadhand
+        run: |
+          shopt -s nullglob
+          zips=(build/steadhand-[0-9]*.zip)
+          if [ "${#zips[@]}" -ne 1 ]; then
+            echo "Expected exactly one WordPress.org zip in build/, found ${#zips[@]}." >&2
+            exit 1
+          fi
+          bash bin/check-wporg-build.sh "${zips[0]}"
+
+      # The gate must catch every known way of smuggling the updater into the WordPress.org zip.
+      - name: Gate self-test (planted violations must fail the gate)
+        working-directory: steadhand
+        run: bash bin/test-wporg-gate.sh
+
+      - name: Upload dev zip
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: steadhand-dev
+          path: steadhand/build/steadhand-dev-*.zip
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload WordPress.org zip
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: steadhand-wporg
+          path: steadhand/build/steadhand-[0-9]*.zip
+          if-no-files-found: error
+          retention-days: 14
+
+  plugin-check:
+    name: Plugin Check
+    needs: build
+    runs-on: ${{ vars.STEADHAND_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 30
+    steps:
+      - name: Download WordPress.org zip
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: steadhand-wporg
+          path: dist
+
+      - name: Unpack plugin
+        run: |
+          shopt -s nullglob
+          zips=(dist/steadhand-[0-9]*.zip)
+          if [ "${#zips[@]}" -ne 1 ]; then
+            echo "Expected exactly one WordPress.org zip, found ${#zips[@]}." >&2
+            exit 1
+          fi
+          unzip -q "${zips[0]}" -d unpacked
+          test -f unpacked/steadhand/steadhand.php
+
+      - name: Run Plugin Check
+        uses: WordPress/plugin-check-action@10857da14b6c2246d15402b3e69f777edcf8c12e # v1.1.9
+        with:
+          build-dir: ./unpacked/steadhand
+          # Empty repo-token: the action skips its pull request comment (its dist code logs
+          # "No GitHub token provided, skipping PR comment" and does not fail). Results are in the
+          # job log and the uploaded plugin-check-results artifact.
+          repo-token: ''
+          # strict is not set (the action default is false), so warnings do not fail this job.
+          # Errors still fail it. Do not set strict here without a decision recorded in SPEC.
+          # KNOWN OPEN QUESTION FOR THE OWNER: Plugin Check reports a trademarked_term warning
+          # for the plugin name ("Steadhand"). It is left visible on purpose and is not excluded or
+          # ignored here. The naming decision belongs to Rick, not to CI.
+          # TODO(M4, D10): remove this exclusion when readme.txt is added. Until then the
+          # plugin_readme check (Plugin_Readme_Check, registered as "plugin_readme" in
+          # Plugin Check's Default_Check_Repository) fails because readme.txt is intentionally absent.
+          # Do not add other exclusions without a reason written here.
+          exclude-checks: |
+            plugin_readme
