@@ -78,6 +78,7 @@ npx wp-env start         # local WordPress with the MCP Adapter
 ## How to work
 
 - Branch from `main`; open a PR; **never merge your own PR** and never push to `main`.
+- Rick reviews and merges every PR (SPEC §14, D9). Agents never merge, even when checks pass.
 - One concern per PR. Include tests for new abilities, guardrail rules and permission checks, especially **negative tests** (the agent *can't* do X).
 - If a task conflicts with the spec or these rules, stop and say so in the PR or issue instead of working around it.
 - Update `docs/SPEC.md` in the same PR when behavior changes.
