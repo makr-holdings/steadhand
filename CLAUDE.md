@@ -25,8 +25,10 @@ includes/
   Guardrails/            # engine + rules + presets
   Log/                   # change log, snapshots, undo
   Admin/                 # settings screens (agents, guardrails, log)
-  Dev/Updater.php        # dev-only update checker; excluded from the WordPress.org build
+  Dev/                   # dev-only updater (Updater.php) and its Plugin Update Checker library; excluded from the WordPress.org build
 tests/
+bin/                     # build.sh (release zips), check-wporg-build.sh (leak check), create-agent.sh (local agent user)
+.github/workflows/       # ci.yml (PHPCS, tests, Plugin Check, build) and release.yml (vX.Y.Z tags)
 docs/SPEC.md
 docs/HOOKS.md            # public extension points (the API Pro builds on)
 ```
@@ -36,8 +38,12 @@ docs/HOOKS.md            # public extension points (the API Pro builds on)
 ```
 composer install
 composer phpcs           # WordPress Coding Standards; must pass
-composer test            # PHPUnit (integration tests run in wp-env)
+composer test            # PHPUnit, run inside wp-env's tests environment (tests-cli container)
 npx wp-env start         # local WordPress with the MCP Adapter
+composer dev-updater:install  # installs the dev-only updater library into includes/Dev/vendor (needed for the tests)
+bin/build.sh <dev|wporg>      # release zip into build/ (dev: with the updater; wporg: checked for update-checker code)
+bin/check-wporg-build.sh <zip-or-dir>  # fails if a WordPress.org build contains update-checker or dev/test code
+bin/create-agent.sh           # local wp-env only: agent user + Application Password (password printed once)
 ```
 (Scripts are created in M0. Update this section if they change.)
 

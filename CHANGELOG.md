@@ -14,3 +14,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). The
 - Admin notice instead of a fatal error on PHP older than 8.1 or when the Composer autoloader is missing.
 - Refused calls will be logged as `blocked` once the change log lands in M2; until then the log step is a no-op.
 - PHPCS and PHPUnit integration tests.
+- CI workflow (`.github/workflows/ci.yml`): PHPCS, PHPUnit integration tests on PHP 8.1 and 8.4 against WordPress 6.9 and latest, Plugin Check on the WordPress.org build, and the release-zip build.
+- Two release zips from `bin/build.sh`: `steadhand-dev-X.Y.Z.zip` (with the dev-only updater) and `steadhand-X.Y.Z.zip` (WordPress.org build). A `vX.Y.Z` tag publishes both as a GitHub release (`.github/workflows/release.yml`).
+- WordPress.org build check (`bin/check-wporg-build.sh`) that fails if the build contains any update-checker code or dev/test tooling. CI runs it on every build.
+- Dev-only updater for internal builds. It serves updates from this repository's release assets only (never the source archive) and does nothing unless a token is configured in `wp-config.php`. It is not part of the WordPress.org build.
+- `bin/create-agent.sh`: creates a local agent user and an Application Password on the wp-env development site. Local development only.
