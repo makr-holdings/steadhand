@@ -32,7 +32,11 @@ final class RequirementsTest extends TestCase {
 		$this->assertSame( array( 'Abilities API (WordPress 6.9+)' ), ( new Requirements( false, true ) )->missing() );
 	}
 
-	public function test_plugin_registers_nothing_but_a_notice_when_requirements_are_missing(): void {
+	/**
+	 * The notice is shown and no ability or server hook is added. The lockdown is registered separately, before this
+	 * check (see LockdownAdminTest::test_lockdown_is_registered_even_when_requirements_are_not_met).
+	 */
+	public function test_plugin_registers_no_ability_or_server_hook_when_requirements_are_missing(): void {
 		$plugin = new Plugin();
 
 		$booted = $plugin->boot( new Requirements( false, false ) );

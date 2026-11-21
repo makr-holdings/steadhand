@@ -31,12 +31,20 @@ final class Plugin {
 	private Server $server;
 
 	/**
+	 * Agent lockdown: keeps agent credentials to the Steadhand endpoint.
+	 *
+	 * @var Lockdown
+	 */
+	private Lockdown $lockdown;
+
+	/**
 	 * Constructor. Builds the service graph; registers no hooks.
 	 */
 	public function __construct() {
 		$pipeline       = new Pipeline\Pipeline( new Log\NullLogger() );
 		$this->registry = new Abilities\Registry( $pipeline );
 		$this->server   = new Server( $this->registry );
+		$this->lockdown = new Lockdown();
 	}
 
 	/**
@@ -60,10 +68,16 @@ final class Plugin {
 	/**
 	 * Hooks Steadhand into WordPress, or shows a notice if a dependency is missing.
 	 *
+	 * The lockdown is registered first and whatever the requirements, because it depends only on WordPress core.
+	 * Without it, an agent's application password would work on core REST and wp-login while the MCP Adapter is
+	 * missing. Only the ability and server wiring needs the dependencies.
+	 *
 	 * @param Requirements $requirements The detected dependency state.
-	 * @return bool True when Steadhand's hooks were registered.
+	 * @return bool True when the ability and server hooks were registered.
 	 */
 	public function boot( Requirements $requirements ): bool {
+		$this->lockdown->register();
+
 		if ( ! $requirements->are_met() ) {
 			add_action( 'admin_notices', array( $requirements, 'render_notice' ) );
 			return false;

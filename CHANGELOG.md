@@ -20,3 +20,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). The
 - Dev-only updater for internal builds. It serves updates from this repository's release assets only (never the source archive) and does nothing unless a token is set as a constant in the site's configuration. It is not part of the WordPress.org build.
 - Local development script that creates an agent user and an Application Password on the wp-env development site. Local development only.
 - Documentation: disclosure policy (`SECURITY.md`); developer documentation in the repository.
+
+### Security
+- The agent lockdown is registered even when the MCP Adapter or the Abilities API is missing, and a later `rest_pre_dispatch` filter can no longer lift it.
+- A user that holds the agent role and another role can no longer use its Application Passwords anywhere. Its cookie sign-in is unchanged.
+- Agent credentials are refused everywhere except the Steadhand MCP endpoint: core REST routes, the batch endpoint, the abilities API, the MCP Adapter's default server, XML-RPC, `wp-login.php` and wp-admin. An agent's Application Password no longer works outside Steadhand, and an agent cannot sign in with its account password.
+- Only a dedicated agent can connect: a user whose sole role is `steadhand_agent`. A user who also holds another role, such as an administrator given the agent role, is refused at the endpoint and in the pipeline, even if it holds the Steadhand capabilities.

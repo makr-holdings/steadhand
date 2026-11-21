@@ -10,6 +10,7 @@ declare( strict_types=1 );
 namespace Steadhand\Pipeline;
 
 use Steadhand\Abilities\Ability;
+use Steadhand\Agents;
 use Steadhand\Capabilities;
 use Steadhand\Log\Entry;
 use Steadhand\Log\Logger;
@@ -57,6 +58,12 @@ final class Pipeline {
 		$user = wp_get_current_user();
 		if ( ! $user->exists() ) {
 			return $this->forbidden( __( 'You must be signed in as an agent user to use Steadhand.', 'steadhand' ) );
+		}
+
+		if ( ! Agents::is_agent( $user ) ) {
+			return $this->forbidden(
+				__( 'This user is not a dedicated Steadhand agent. Only a user whose sole role is steadhand_agent can use Steadhand.', 'steadhand' )
+			);
 		}
 
 		if ( ! Capabilities::user_has( $user, Capabilities::CONNECT ) ) {
