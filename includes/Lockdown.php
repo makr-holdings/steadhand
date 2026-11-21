@@ -18,12 +18,12 @@ defined( 'ABSPATH' ) || exit;
  * is the agent role (Agents::is_agent()). A mixed-role user also holds another role, such as an administrator who
  * was given the agent role. A mixed-role user is not an agent: it cannot connect to Steadhand (Server::can_connect()
  * and Pipeline::authorize() refuse it). The rules below still stop its application passwords from working as a
- * general REST credential, but leave its cookie sessions and account-password login alone, so an administrator
- * is not locked out of wp-admin by having the agent role added.
+ * general credential (REST and XML-RPC), but leave its cookie sessions and account-password login alone, so an
+ * administrator is not locked out of wp-admin by having the agent role added.
  *
  * | Rule (hook, priority)                                        | Pure agent                                   | Mixed role (agent role + another role)                        |
  * |--------------------------------------------------------------|----------------------------------------------|---------------------------------------------------------------|
- * | a. refuse_agent_login (authenticate, PHP_INT_MAX)            | password sign-in refused                     | not affected                                                  |
+ * | a. refuse_agent_login (authenticate, PHP_INT_MAX)            | password sign-in refused                     | application password sign-in (XML-RPC) refused; account password not affected |
  * | b. refuse_non_application_password_identity (determine_current_user, PHP_INT_MAX) | application password works only on the Steadhand REST route; otherwise resolves to no user | application password resolves to no user; cookie not affected |
  * | c. restrict_agent_routes (rest_pre_dispatch, PHP_INT_MIN)    | only the Steadhand route; everything else 403 | every route but the Steadhand route 403, while the request carries an application password (the transport gate then refuses the Steadhand route) |
  * | c2. restrict_agent_callbacks (rest_request_before_callbacks, PHP_INT_MAX) | same as c; runs after every rest_pre_dispatch filter, so a later filter cannot lift it | same as c |
@@ -54,17 +54,29 @@ final class Lockdown {
 	}
 
 	/**
-	 * Refuses a password sign-in for an agent, whatever the password was.
+	 * Refuses a password sign-in for an agent, and an application-password sign-in for a mixed-role user.
 	 *
 	 * Core's authenticate handlers run first (priorities 20 and 99). This runs last, so it sees the WP_User
 	 * that core produced, and replaces it. A WP_Error from core is passed through unchanged, so a wrong
 	 * password still gets core's own error.
 	 *
+	 * A pure agent is refused whatever the password was. A mixed-role user is refused only when the sign-in was
+	 * done with its own application password. Core's wp_authenticate_application_password() (priority 20) records
+	 * that password in rest_get_authenticated_app_password() via application_password_did_authenticate, before this
+	 * runs. That record is set only by a successful application-password authentication, and it is cleared by a
+	 * failed one (application_password_failed_authentication). wp-login.php never engages core's application-password
+	 * handler, so an account-password sign-in there is not affected.
+	 *
 	 * @param mixed $user WP_User, WP_Error or null, from the earlier handlers.
-	 * @return mixed The refusal for an agent, otherwise $user unchanged.
+	 * @return mixed The refusal for a blocked sign-in, otherwise $user unchanged.
 	 */
 	public function refuse_agent_login( $user ) {
-		if ( $user instanceof \WP_User && Agents::is_agent( $user ) ) {
+		if ( ! $user instanceof \WP_User ) {
+			return $user;
+		}
+
+		$is_agent = Agents::is_agent( $user );
+		if ( $is_agent || ( Agents::holds_agent_role( $user ) && self::authenticated_with_own_application_password( $user->ID ) ) ) {
 			return new \WP_Error(
 				'steadhand_agent_login_blocked',
 				__( 'This account cannot sign in here.', 'steadhand' )

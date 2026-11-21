@@ -168,6 +168,92 @@ final class LockdownLoginTest extends TestCase {
 	}
 
 	/**
+	 * Runs wp_authenticate() with XML-RPC semantics: core accepts an application password on this path (XMLRPC_REQUEST
+	 * is defined in xmlrpc.php, and core checks it through application_password_is_api_request).
+	 *
+	 * @param \WP_User $user     User logging in.
+	 * @param string   $password Account password or application password.
+	 * @return mixed The chain's result.
+	 */
+	private function authenticate_as_xmlrpc( \WP_User $user, string $password ): mixed {
+		add_filter( 'application_password_is_api_request', '__return_true' );
+		add_filter( 'wp_is_application_passwords_available', '__return_true' );
+
+		return wp_authenticate( $user->user_login, $password );
+	}
+
+	/**
+	 * Guards the mixed-role case of refuse_agent_login() on XML-RPC: an administrator who also holds the agent role must
+	 * not sign in with its own application password, or it would keep the administrator's capabilities on a path the
+	 * REST rules do not cover. The rule is for the application password only, so the next two tests check the rest.
+	 */
+	public function test_mixed_role_admin_application_password_is_refused_through_the_xmlrpc_authenticate_chain(): void {
+		$admin_id = self::factory()->user->create(
+			array(
+				'role'      => 'administrator',
+				'user_pass' => self::ACCOUNT_PASSWORD,
+			)
+		);
+		$admin    = new \WP_User( $admin_id );
+		$admin->add_role( Roles::ROLE );
+		list( $app_password ) = \WP_Application_Passwords::create_new_application_password( $admin_id, array( 'name' => 'XML-RPC mixed' ) );
+
+		$result = $this->authenticate_as_xmlrpc( $admin, $app_password );
+
+		$this->assertWPError( $result );
+		$this->assertSame( 'steadhand_agent_login_blocked', $result->get_error_code() );
+	}
+
+	/**
+	 * Guards the mixed-role account login: a wp-login.php style sign-in (not an API request) with the account password
+	 * still returns the administrator. Lockdown must not refuse an account login for a user with the agent role.
+	 */
+	public function test_mixed_role_admin_account_password_still_signs_in(): void {
+		$admin_id = self::factory()->user->create(
+			array(
+				'role'      => 'administrator',
+				'user_pass' => self::ACCOUNT_PASSWORD,
+			)
+		);
+		$admin    = new \WP_User( $admin_id );
+		$admin->add_role( Roles::ROLE );
+
+		$result = wp_authenticate( $admin->user_login, self::ACCOUNT_PASSWORD );
+
+		$this->assertInstanceOf( \WP_User::class, $result );
+		$this->assertSame( $admin_id, $result->ID );
+	}
+
+	/**
+	 * Negative control for the mixed-role rule: a plain administrator (no agent role) keeps its application password on
+	 * XML-RPC semantics.
+	 */
+	public function test_plain_administrator_application_password_still_signs_in_through_xmlrpc(): void {
+		$admin_id             = self::factory()->user->create( array( 'role' => 'administrator' ) );
+		$admin                = new \WP_User( $admin_id );
+		list( $app_password ) = \WP_Application_Passwords::create_new_application_password( $admin_id, array( 'name' => 'XML-RPC plain' ) );
+
+		$result = $this->authenticate_as_xmlrpc( $admin, $app_password );
+
+		$this->assertInstanceOf( \WP_User::class, $result );
+		$this->assertSame( $admin_id, $result->ID );
+	}
+
+	/**
+	 * Guards the pure-agent case on XML-RPC with the same semantics as the mixed-role test: a pure agent is refused on
+	 * its application password, as before.
+	 */
+	public function test_pure_agent_application_password_is_refused_through_xmlrpc(): void {
+		$agent                = $this->agent_with_account_password();
+		list( $app_password ) = \WP_Application_Passwords::create_new_application_password( $agent->ID, array( 'name' => 'XML-RPC pure' ) );
+
+		$result = $this->authenticate_as_xmlrpc( $agent, $app_password );
+
+		$this->assertWPError( $result );
+		$this->assertSame( 'steadhand_agent_login_blocked', $result->get_error_code() );
+	}
+
+	/**
 	 * Guards refuse_non_application_password_identity() for a session that was not opened with an application
 	 * password: a cookie minted before the account became an agent must not make it the current user.
 	 */
