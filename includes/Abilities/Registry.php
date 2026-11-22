@@ -50,6 +50,7 @@ final class Registry {
 			new GetMenu(),
 			new ListMedia(),
 			new GetMedia(),
+			new GetDiagnostics(),
 		);
 	}
 
