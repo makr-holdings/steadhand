@@ -245,16 +245,16 @@ Principle: **Free must be genuinely safe on its own.** Pro adds control and conv
 
 ## 13. Milestones
 
-| # | Milestone | Done when |
-|---|---|---|
-| M0 | Scaffold | See §13.1 |
-| M1 | Read-only | Agent user + Application Password connects from Claude; all read tools work; agent credentials refused on core REST, XML-RPC, wp-admin and the MCP Adapter's default server, everywhere except the Steadhand MCP endpoint (D6); installed on rickearley.me |
-| M2 | Safe writes | Draft/update/blocks/terms/media tools; guardrail engine with built-ins; change log |
-| M3 | Undo + admin UI | Log screen, undo, agent management UI; **AI Engine MCP turned off on both MAKR sites** |
-| M4 | WordPress.org | Readme, assets, Plugin Check clean, pentest pass, submitted; repo made public, with branch protection, required checks and private vulnerability reporting turned on |
-| M5 | Pro | Approvals, custom rules, retention/export, licensing |
+| # | Milestone | Done when | Status |
+|---|---|---|---|
+| M0 | Scaffold | See §13.1 | **Done** (2026-11-21) |
+| M1 | Read-only | Agent user + Application Password connects from Claude; all read tools work; agent credentials refused on core REST, XML-RPC, wp-admin and the MCP Adapter's default server, everywhere except the Steadhand MCP endpoint (D6); installed on rickearley.me | **Done** (2026-11-22, `v0.1.0`). All twelve tools were called from Claude against rickearley.me and returned correctly, and the self-check there reported twelve tools, the server and the lockdown registered |
+| M2 | Safe writes | Draft/update/blocks/terms/media tools; guardrail engine with built-ins; change log | Not started |
+| M3 | Undo + admin UI | Log screen, undo, agent management UI; **AI Engine MCP turned off on both MAKR sites** | Not started |
+| M4 | WordPress.org | Readme, assets, Plugin Check clean, pentest pass, submitted; repo made public, with branch protection, required checks and private vulnerability reporting turned on | Not started |
+| M5 | Pro | Approvals, custom rules, retention/export, licensing | Not started |
 
-### 13.1 M0 — Scaffold (done when all of these are true)
+### 13.1 M0 — Scaffold (done; it was done when all of these were true)
 No user-facing tools yet. M0 builds the foundation every later milestone sits on.
 1. **Bootstrap:** `steadhand.php` with a full plugin header (Requires at least 6.9, Requires PHP 8.1, `Requires Plugins: mcp-adapter` (the MCP Adapter's WordPress.org slug), GPL-2.0-or-later, text domain), constants, a Composer PSR-4 autoloader for `Steadhand\`, and `includes/Plugin.php` wiring. If the Abilities API or the MCP Adapter is missing at runtime, show an admin notice and do nothing else; never fatal.
 2. **Registration:** the `steadhand` ability category; the Steadhand MCP server (`create_server`, endpoint `/wp-json/steadhand/mcp`, transport gate requiring `steadhand_connect`); the `steadhand_agent` role and Steadhand capabilities created on activation and removed on uninstall.
