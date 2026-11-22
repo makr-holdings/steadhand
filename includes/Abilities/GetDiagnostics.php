@@ -256,8 +256,8 @@ final class GetDiagnostics extends Ability {
 	 */
 	public function execute( array $input ): array {
 		// No request leaves while the report is built, whatever a section reads. A reader can trigger a hook that a
-		// third party uses to check for updates (site_transient_update_plugins, under a persistent object cache, for
-		// one). The guard is attached for this call only and removed in finally, on every exit path.
+		// third party uses to check for updates (the filter on the plugin-updates site transient, under a persistent
+		// object cache, for one). The guard is attached for this call only and removed in finally, on every exit path.
 		$guard = static fn(): \WP_Error => new \WP_Error( 'steadhand_diagnostics_no_http', __( 'Steadhand does not make HTTP requests while it reports diagnostics.', 'steadhand' ) );
 
 		add_filter( 'pre_http_request', $guard, PHP_INT_MAX - 1, 3 ); // phpcs:ignore WordPress.NamingConventions.PrefixAllGlobals.NonPrefixedHooknameFound -- Core filter, attached for this call only.
