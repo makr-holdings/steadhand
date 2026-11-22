@@ -153,4 +153,18 @@ final class WriteCallScopeTest extends PostWriteTestCase {
 		$this->assertFalse( Pipeline::is_write_call(), 'A write probe leaves nothing behind.' );
 		$this->assertFalse( current_user_can( 'publish_post', $draft ) );
 	}
+
+
+	public function test_a_read_ability_checked_through_the_permission_path_is_not_a_write_call_and_edit_post_is_not_mapped(): void {
+		$draft = $this->admin_post( array( 'post_status' => 'draft' ) );
+		$this->act_as_agent( array( Capabilities::WRITE_DRAFTS => true ) );
+		$probe        = new ReadCheckProbe();
+		$probe->draft = $draft;
+
+		$allowed = ( new Pipeline( new SpyLogger() ) )->check( $probe, array() );
+
+		$this->assertTrue( $allowed, 'The probe must reach its object check.' );
+		$this->assertFalse( $probe->write_call, 'A read call is not a write call, however it is checked.' );
+		$this->assertFalse( $probe->edit_answer, 'edit_post is not mapped for a read call.' );
+	}
 }

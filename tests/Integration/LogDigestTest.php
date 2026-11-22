@@ -96,4 +96,91 @@ final class LogDigestTest extends PostWriteTestCase {
 		$this->assertSame( 'ok', $row['result'] );
 		$this->assertSame( '{}', $row['input'], 'A throwing log_input stores the empty input.' );
 	}
+
+
+	public function test_a_short_content_is_stored_as_a_digest_and_its_text_is_never_logged(): void {
+		$agent   = $this->act_as_agent();
+		$content = 'Twenty bytes of text';
+		$this->assertSame( 20, strlen( $content ) );
+
+		$this->execute_ability(
+			'steadhand/create-post',
+			array(
+				'title'   => 'Short content',
+				'content' => $content,
+			)
+		);
+		$row   = $this->latest_row( $agent );
+		$input = json_decode( (string) $row['input'], true );
+
+		$this->assertSame(
+			array(
+				'bytes'  => 20,
+				'sha256' => self::digest( $content ),
+			),
+			$input['content']
+		);
+		$this->assertStringNotContainsString( 'Twenty bytes', (string) $row['input'] );
+	}
+
+	public function test_an_update_that_fails_validation_logs_no_content_text_through_either_entry_point(): void {
+		$post   = $this->admin_post(
+			array(
+				'post_status'  => 'draft',
+				'post_content' => 'c',
+			)
+		);
+		$agent  = $this->act_as_agent();
+		$secret = 'CONFIDENTIAL-DRAFT-BODY merger with Acme next week';
+		$input  = array(
+			'id'      => $post,
+			'content' => $secret,
+			'slug'    => 'Bad Slug',
+		);
+
+		$result = $this->execute_ability( 'steadhand/update-post', $input );
+		$this->assertWPError( $result );
+		$row = $this->latest_row( $agent );
+		$this->assertStringNotContainsString( 'CONFIDENTIAL', (string) $row['input'], 'The check path logs no content text.' );
+		$this->assertSame(
+			array(
+				'bytes'  => strlen( $secret ),
+				'sha256' => self::digest( $secret ),
+			),
+			json_decode( (string) $row['input'], true )['content']
+		);
+
+		$result = ( new Pipeline( new DbLogger() ) )->run( new \Steadhand\Abilities\UpdatePost(), $input );
+		$this->assertWPError( $result );
+		$row = $this->latest_row( $agent );
+		$this->assertStringNotContainsString( 'CONFIDENTIAL', (string) $row['input'], 'The run path logs no content text.' );
+	}
+
+	public function test_a_content_that_is_not_text_is_logged_as_its_type_with_no_bytes(): void {
+		$post  = $this->admin_post(
+			array(
+				'post_status'  => 'draft',
+				'post_content' => 'c',
+			)
+		);
+		$agent = $this->act_as_agent();
+
+		$result = ( new Pipeline( new DbLogger() ) )->run(
+			new \Steadhand\Abilities\UpdatePost(),
+			array(
+				'id'      => $post,
+				'content' => 12345,
+			)
+		);
+
+		$this->assertWPError( $result );
+		$row = $this->latest_row( $agent );
+		$this->assertSame(
+			array(
+				'bytes' => 0,
+				'type'  => 'integer',
+			),
+			json_decode( (string) $row['input'], true )['content']
+		);
+	}
 }

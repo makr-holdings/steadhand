@@ -310,7 +310,7 @@ final class Pipeline {
 	public function check( Ability $ability, array $input ): bool|\WP_Error {
 		$prepared = $this->prepare( $ability, $input );
 		if ( is_wp_error( $prepared ) ) {
-			$this->write_entry( $ability, Entry::RESULT_BLOCKED, $prepared->get_error_message(), $input );
+			$this->write_entry( $ability, Entry::RESULT_BLOCKED, $prepared->get_error_message(), $this->loggable( $ability, $input ) );
 			return $prepared;
 		}
 
@@ -349,7 +349,7 @@ final class Pipeline {
 
 		$prepared = $this->prepare( $ability, $input );
 		if ( is_wp_error( $prepared ) ) {
-			return $this->finish( $ability, Entry::RESULT_BLOCKED, $prepared, $input );
+			return $this->finish( $ability, Entry::RESULT_BLOCKED, $prepared, $this->loggable( $ability, $input ) );
 		}
 
 		$target = $this->target_for( $ability, $prepared );

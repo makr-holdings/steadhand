@@ -201,4 +201,25 @@ final class EditLockRuleTest extends TestCase {
 
 		$this->assertSame( Result::MODE_ALLOW, $this->evaluate( $post, $agent )->mode() );
 	}
+
+
+	public function test_a_lock_with_a_leading_space_is_read_as_core_reads_it_and_blocks_another_users_lock(): void {
+		$agent = $this->make_agent();
+		$human = self::factory()->user->create( array( 'role' => 'editor' ) );
+		$post  = self::factory()->post->create();
+		update_post_meta( $post, '_edit_lock', ' ' . time() . ':' . $human );
+
+		$this->assertSame( $human, (int) wp_check_post_lock( $post ), 'Core reads the leading-space lock as held by the human.' );
+		$this->assertSame( Result::MODE_BLOCK, $this->evaluate( $post, $agent )->mode() );
+	}
+
+	public function test_a_lock_with_a_trailing_newline_is_read_as_core_reads_it_and_blocks_another_users_lock(): void {
+		$agent = $this->make_agent();
+		$human = self::factory()->user->create( array( 'role' => 'editor' ) );
+		$post  = self::factory()->post->create();
+		update_post_meta( $post, '_edit_lock', time() . ':' . $human . "\n" );
+
+		$this->assertSame( $human, (int) wp_check_post_lock( $post ), 'Core reads the trailing-newline lock as held by the human.' );
+		$this->assertSame( Result::MODE_BLOCK, $this->evaluate( $post, $agent )->mode() );
+	}
 }

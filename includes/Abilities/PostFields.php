@@ -154,37 +154,71 @@ final class PostFields {
 
 	/**
 	 * The copy of a write's input that the change log keeps. The content is always a digest, because revisions hold the
-	 * text and the log is not a second copy of it: its byte count and its SHA-256, so an operator can match it to a
-	 * revision. An excerpt over LOG_EXCERPT_BYTES is replaced by a digest too. Everything else is kept as sent.
+	 * text and the log is not a second copy of it. An excerpt over LOG_EXCERPT_BYTES is a digest too. Everything else is
+	 * kept as sent.
+	 *
+	 * A digest is the byte count and the SHA-256 of the SUBMITTED text, before WordPress filters it on save. It matches the
+	 * stored content only when content_modified_on_save is false. A value that is not text (an input that failed
+	 * validation can hold one) is stored as 0 bytes and its type, so the text of such a value is never kept.
 	 *
 	 * The SHA-256 is written as eight groups of eight hex digits, separated by spaces. The log redactor masks any run of 32
 	 * or more letters and digits as a token, and a bare 64-character hex digest would be masked. Removing the spaces gives
 	 * the digest back.
 	 *
-	 * @param array<string, mixed> $input Prepared input.
+	 * @param array<string, mixed> $input Input: prepared, or as sent when it did not pass prepare().
 	 * @return array<string, mixed>
 	 */
 	public static function log_copy( array $input ): array {
-		foreach ( array(
-			'content' => 0,
-			'excerpt' => self::LOG_EXCERPT_BYTES,
-		) as $field => $limit ) {
-			if ( ! isset( $input[ $field ] ) || ! is_string( $input[ $field ] ) ) {
-				continue;
-			}
+		if ( array_key_exists( 'content', $input ) ) {
+			$input['content'] = self::digest( $input['content'] );
+		}
 
-			$text = $input[ $field ];
-			if ( 'content' !== $field && strlen( $text ) <= $limit ) {
-				continue;
-			}
-
-			$input[ $field ] = array(
-				'bytes'  => strlen( $text ),
-				'sha256' => implode( ' ', str_split( hash( 'sha256', $text ), 8 ) ),
-			);
+		if ( array_key_exists( 'excerpt', $input ) && ( ! is_string( $input['excerpt'] ) || strlen( $input['excerpt'] ) > self::LOG_EXCERPT_BYTES ) ) {
+			$input['excerpt'] = self::digest( $input['excerpt'] );
 		}
 
 		return $input;
+	}
+
+	/**
+	 * The change-log form of one text field: its size and digest, or for a value that is not text, its type.
+	 *
+	 * @param mixed $value The field as sent.
+	 * @return array{bytes: int, sha256?: string, type?: string}
+	 */
+	private static function digest( mixed $value ): array {
+		if ( ! is_string( $value ) ) {
+			return array(
+				'bytes' => 0,
+				'type'  => gettype( $value ),
+			);
+		}
+
+		return array(
+			'bytes'  => strlen( $value ),
+			'sha256' => implode( ' ', str_split( hash( 'sha256', $value ), 8 ) ),
+		);
+	}
+
+	/**
+	 * The warning for a status that WordPress did not store as asked, or null when it stored the status asked for. Core
+	 * changes a publish to future when the date is in the future, for one.
+	 *
+	 * @param string $stored    The status as stored after the write.
+	 * @param string $requested The status the caller asked for.
+	 * @return string|null
+	 */
+	public static function status_warning( string $stored, string $requested ): ?string {
+		if ( $stored === $requested ) {
+			return null;
+		}
+
+		return sprintf(
+			/* translators: 1: the status WordPress stored. 2: the status the agent asked for. */
+			__( 'WordPress stored the status "%1$s" instead of "%2$s".', 'steadhand' ),
+			$stored,
+			$requested
+		);
 	}
 
 	/**

@@ -24,10 +24,9 @@ defined( 'ABSPATH' ) || exit;
  *   update.
  * - post_type must be allowed (PostTypes::is_allowed()). An update to a post whose stored type is not allowed, or to a
  *   trashed post, is refused.
- * - Content is filtered by KSES. Agents do not hold unfiltered_html, but this does not rely on that: the KSES filters
- *   for post fields are added for the write where they are missing, and only those are removed afterwards.
- * - wp_update_post() re-saves every stored field through the same filters, including the fields the call did not send.
- *   would_alter_unsent() finds the fields whose stored value the save would change. UpdatePost refuses such a call.
+ * - On insert, every post-field KSES filter is in place for the write, so everything the agent sends is filtered.
+ * - On update, the KSES filters are in place for the fields the call sends, and removed for the fields it does not send.
+ *   See update() for why an unsent field is saved as it is stored.
  */
 final class PostWriter {
 
@@ -41,14 +40,24 @@ final class PostWriter {
 	private const ZERO_DATE = '0000-00-00 00:00:00';
 
 	/**
-	 * The KSES filters core adds for post fields (kses_init_filters() in wp-includes/kses.php): the hook and the function.
-	 * Only the title, content, excerpt and content_filtered pairs are used. Each is added at priority 10, as core does.
+	 * The save filters core adds for post fields (kses_init_filters() in wp-includes/kses.php), by post field. Each is
+	 * added at priority 10, as core adds it. Each entry is the hook and the function.
 	 */
 	private const KSES_FILTERS = array(
-		array( 'title_save_pre', 'wp_filter_kses' ),
-		array( 'content_save_pre', 'wp_filter_post_kses' ),
-		array( 'excerpt_save_pre', 'wp_filter_post_kses' ),
-		array( 'content_filtered_save_pre', 'wp_filter_post_kses' ),
+		'post_title'            => array( 'title_save_pre', 'wp_filter_kses' ),
+		'post_content'          => array( 'content_save_pre', 'wp_filter_post_kses' ),
+		'post_excerpt'          => array( 'excerpt_save_pre', 'wp_filter_post_kses' ),
+		'post_content_filtered' => array( 'content_filtered_save_pre', 'wp_filter_post_kses' ),
+	);
+
+	/**
+	 * Core's Global Styles filter for the two content fields. kses_init_filters() adds it at priority 9, next to the KSES
+	 * filters. It changes only a value that holds Global Styles JSON. For an unsent field it is removed with the KSES
+	 * filters, so the stored bytes are saved as they are.
+	 */
+	private const GLOBAL_STYLES_FILTERS = array(
+		'post_content'          => array( 'content_save_pre', 'wp_filter_global_styles_post', 9 ),
+		'post_content_filtered' => array( 'content_filtered_save_pre', 'wp_filter_global_styles_post', 9 ),
 	);
 
 	/**
@@ -72,13 +81,23 @@ final class PostWriter {
 		$data['post_type']   = $type;
 		$data['post_author'] = get_current_user_id();
 
-		return self::with_kses(
+		return self::with_filters_added(
+			array_values( self::KSES_FILTERS ),
 			static fn(): int|\WP_Error => wp_insert_post( wp_slash( $data ), true )
 		);
 	}
 
 	/**
 	 * Updates a post as the current user. The author and type stay as they are.
+	 *
+	 * Core's wp_update_post() saves every stored field again, through the save filters, not only the fields the call sends.
+	 * So for each of the title, content, excerpt and filtered content the call does not send, the KSES filters (and the
+	 * Global Styles filter on the content fields) are removed for the save, and restored afterwards. The stored bytes are
+	 * saved unchanged. The agent cannot change those values: UPDATE_FIELDS does not allow them, and every value the agent
+	 * has ever sent was filtered when it was stored. A stored value that a non-core filter on this site would change is
+	 * refused before the write (would_alter_unsent()).
+	 *
+	 * The fields the call does send keep their KSES filters, which are added for the save where they are missing.
 	 *
 	 * @param int                   $post_id Post ID.
 	 * @param array<string, string> $fields  Fields to set.
@@ -106,20 +125,41 @@ final class PostWriter {
 			$data['edit_date'] = true;
 		}
 
-		return self::with_kses(
-			static fn(): int|\WP_Error => wp_update_post( wp_slash( $data ), true )
+		$sent   = array();
+		$unsent = array();
+		foreach ( self::KSES_FILTERS as $field => $pair ) {
+			if ( array_key_exists( $field, $fields ) ) {
+				$sent[] = $pair;
+				continue;
+			}
+
+			$unsent[] = $pair;
+			if ( isset( self::GLOBAL_STYLES_FILTERS[ $field ] ) ) {
+				$unsent[] = self::GLOBAL_STYLES_FILTERS[ $field ];
+			}
+		}
+
+		return self::with_filters_added(
+			$sent,
+			static fn(): int|\WP_Error => self::without_filters(
+				$unsent,
+				static fn(): int|\WP_Error => wp_update_post( wp_slash( $data ), true )
+			)
 		);
 	}
 
 	/**
-	 * The fields of a stored post that WordPress would store differently on its next save. wp_update_post() runs every
-	 * stored field through the save filters, so a title, content or excerpt that the call does not send can change: for
-	 * example, a post an administrator wrote with an iframe, which KSES removes for an agent. Only the title, content and
-	 * excerpt are checked. Those in $fields are not, because the call replaces them.
+	 * The fields of a stored post that WordPress would store differently on its next save, because of a save filter that is
+	 * not core's KSES filter. The KSES filters are not run here: as update() does, they are removed for every field the call
+	 * does not send. So core alone reports nothing for any stored value, whatever markup it holds.
+	 *
+	 * A field that a non-core filter (for example, a plugin's content_save_pre filter) would rewrite is refused by UpdatePost
+	 * before anything is written. The title, content, excerpt and filtered content are checked, and those in $fields are not:
+	 * the call replaces them.
 	 *
 	 * @param int                   $post_id Post ID.
 	 * @param array<string, string> $fields  Fields the update will set, keyed by post field name.
-	 * @return string[] The field names (post_title, post_content, post_excerpt) that would change. Empty when none would.
+	 * @return string[] The post field names that would change, such as post_title. Empty when none would.
 	 */
 	public static function would_alter_unsent( int $post_id, array $fields ): array {
 		$post = get_post( $post_id );
@@ -127,21 +167,36 @@ final class PostWriter {
 			return array();
 		}
 
-		$altered = array();
-		foreach ( array( 'post_title', 'post_content', 'post_excerpt' ) as $field ) {
+		$unsent = array();
+		$strip  = array();
+		foreach ( self::KSES_FILTERS as $field => $pair ) {
 			if ( array_key_exists( $field, $fields ) ) {
 				continue;
 			}
 
-			$stored = (string) $post->$field;
-			$saved  = self::with_kses(
-				static fn(): string => self::as_saved( $field, $stored )
-			);
-
-			if ( $saved !== $stored ) {
-				$altered[] = $field;
+			$unsent[] = $field;
+			$strip[]  = $pair;
+			if ( isset( self::GLOBAL_STYLES_FILTERS[ $field ] ) ) {
+				$strip[] = self::GLOBAL_STYLES_FILTERS[ $field ];
 			}
 		}
+
+		$altered = array();
+		if ( array() === $unsent ) {
+			return $altered;
+		}
+
+		self::without_filters(
+			$strip,
+			static function () use ( $post, $unsent, &$altered ): void {
+				foreach ( $unsent as $field ) {
+					$stored = (string) $post->$field;
+					if ( self::as_saved( $field, $stored ) !== $stored ) {
+						$altered[] = $field;
+					}
+				}
+			}
+		);
 
 		return $altered;
 	}
@@ -203,19 +258,18 @@ final class PostWriter {
 	}
 
 	/**
-	 * Runs one step with the post-field KSES filters in place. Each KSES filter is added only where it is missing, and
-	 * afterwards only the ones this call added are removed, so a filter another component added stays as it was. The
-	 * filters are not added or removed with kses_init_filters() and kses_remove_filters(), which touch every KSES hook.
+	 * Runs one step with the given filters added where they are missing, and afterwards removes only the ones this call
+	 * added, so a filter another component added stays as it was. Each pair is hook and function, at priority 10.
 	 *
-	 * @param callable $step The step: a write, or a check.
+	 * @param array<int, array{0: string, 1: string}> $pairs Filters to have in place.
+	 * @param callable                                $step  The step, a write.
 	 * @return mixed What the step returned.
 	 */
-	private static function with_kses( callable $step ): mixed {
+	private static function with_filters_added( array $pairs, callable $step ): mixed {
 		$added = array();
-		foreach ( self::KSES_FILTERS as $pair ) {
-			list( $hook, $function ) = $pair;
-			if ( false === has_filter( $hook, $function ) ) {
-				add_filter( $hook, $function );
+		foreach ( $pairs as $pair ) {
+			if ( false === has_filter( $pair[0], $pair[1] ) ) {
+				add_filter( $pair[0], $pair[1] );
 				$added[] = $pair;
 			}
 		}
@@ -223,8 +277,39 @@ final class PostWriter {
 		try {
 			return $step();
 		} finally {
-			foreach ( $added as $pair ) {
+			foreach ( array_reverse( $added ) as $pair ) {
 				remove_filter( $pair[0], $pair[1] );
+			}
+		}
+	}
+
+	/**
+	 * Runs one step with the given filters removed, and afterwards restores each one that was removed, at the priority it
+	 * had. A filter that was not there is not added. Removed filters are restored in finally, so a write that throws
+	 * leaves them as they were.
+	 *
+	 * @param array<int, array{0: string, 1: string, 2?: int}> $pairs Filters to remove: hook, function and, optionally, priority.
+	 * @param callable                                         $step  The step, a write or a check.
+	 * @return mixed What the step returned.
+	 */
+	private static function without_filters( array $pairs, callable $step ): mixed {
+		$removed = array();
+		foreach ( $pairs as $pair ) {
+			do {
+				$priority = has_filter( $pair[0], $pair[1] );
+				if ( false === $priority || ! remove_filter( $pair[0], $pair[1], $priority ) ) {
+					break;
+				}
+
+				$removed[] = array( $pair[0], $pair[1], $priority );
+			} while ( true );
+		}
+
+		try {
+			return $step();
+		} finally {
+			foreach ( array_reverse( $removed ) as $item ) {
+				add_filter( $item[0], $item[1], $item[2] );
 			}
 		}
 	}

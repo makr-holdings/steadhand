@@ -54,18 +54,22 @@ final class EditLock implements Rule {
 			return Result::allow();
 		}
 
+		// Parsed as core's wp_check_post_lock() does (wp-admin/includes/post.php): the text before the first colon is the
+		// time, and the text after it is the user. Numeric casts make " 1700000000:5" and "1700000000:5\n" mean what core
+		// makes of them. A lock that is not a number gives 0, which is not live.
 		$lock = get_post_meta( $context->object_id, '_edit_lock', true );
-		if ( ! is_string( $lock ) || 1 !== preg_match( '/^(\d+)(?::(\d+))?\z/', $lock, $parts ) ) {
+		if ( ! is_string( $lock ) || '' === $lock ) {
 			return Result::allow();
 		}
 
-		$since = (int) $parts[1];
+		$parts = explode( ':', $lock );
+		$since = (int) $parts[0];
 		if ( $since <= time() - $this->window() ) {
 			return Result::allow();
 		}
 
-		if ( isset( $parts[2] ) ) {
-			$holder = (int) $parts[2];
+		if ( isset( $parts[1] ) ) {
+			$holder = (int) $parts[1];
 			if ( $holder > 0 && $holder !== $context->user_id ) {
 				return $this->refuse();
 			}

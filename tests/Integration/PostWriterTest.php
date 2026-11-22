@@ -15,6 +15,7 @@ use Steadhand\Log\DbLogger;
 use Steadhand\Pipeline\PostWriter;
 use Steadhand\Pipeline\Pipeline;
 use Steadhand\Pipeline\Snapshots;
+use Steadhand\Roles;
 
 /**
  * Covers SPEC §7 (post snapshots) and §14.1 (what an agent may write). Every write runs inside a real write ability,
@@ -469,5 +470,45 @@ final class PostWriterTest extends LogTestCase {
 		$this->assertSame( array_keys( $fields ), $refused, 'Every field must be refused by name, whatever its type.' );
 		$this->assertSame( 'draft', get_post( $post_id )->post_status );
 		$this->assertSame( 'page' === get_post( $post_id )->post_type ? 'page' : 'post', get_post( $post_id )->post_type );
+	}
+
+
+	public function test_post_revision_returns_the_newest_matching_revision_and_never_an_older_one(): void {
+		// Revisions are off, so the lookup is the only thing that runs: no revision is saved for the current state.
+		add_filter( 'wp_revisions_to_keep', '__return_zero' );
+		$author   = self::factory()->user->create( array( 'role' => 'administrator' ) );
+		$post     = self::factory()->post->create(
+			array(
+				'post_author'  => $author,
+				'post_status'  => 'draft',
+				'post_title'   => 'Revised',
+				'post_excerpt' => '',
+				'post_content' => 'current',
+			)
+		);
+		$revision = static fn( string $content, string $date ): int => (int) wp_insert_post(
+			array(
+				'post_type'     => 'revision',
+				'post_status'   => 'inherit',
+				'post_parent'   => $post,
+				'post_author'   => $author,
+				'post_title'    => 'Revised',
+				'post_content'  => $content,
+				'post_excerpt'  => '',
+				'post_date'     => $date,
+				'post_date_gmt' => $date,
+			)
+		);
+
+		wp_set_current_user( self::factory()->user->create( array( 'role' => Roles::ROLE ) ) );
+
+		// The older revision matches the current content. The newest does not, so the answer is 0.
+		$revision( 'current', '2020-01-01 10:00:00' );
+		$revision( 'other', '2020-01-02 10:00:00' );
+		$this->assertSame( 0, $this->in_write( static fn(): int => Snapshots::post_revision( $post ) ) );
+
+		// Control: a newer revision that matches is the one returned.
+		$newest = $revision( 'current', '2020-01-03 10:00:00' );
+		$this->assertSame( $newest, $this->in_write( static fn(): int => Snapshots::post_revision( $post ) ) );
 	}
 }

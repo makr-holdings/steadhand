@@ -189,6 +189,66 @@ final class SnapshotRulesTest extends PostWriteTestCase {
 		$this->assertIsArray( $out );
 		$this->assertSame( 0, $this->snapshot_of_last_row()['snapshot_id'], 'The only revision holds different content, so it is not the snapshot.' );
 		$this->assertSame( 0, $this->snapshot_of_last_row()['undoable'] );
-		$this->assertContains( 'No revision could be saved, so Steadhand cannot undo this change.', $out['warnings'] );
+		$this->assertContains( 'This site keeps too few revisions for Steadhand to undo this change.', $out['warnings'] );
+	}
+
+
+	public function test_with_one_revision_kept_the_change_is_not_undoable_and_the_site_is_told_why(): void {
+		add_filter( 'wp_revisions_to_keep', static fn(): int => 1 );
+		$post = $this->draft_and_agent( 'old' );
+
+		$out = $this->execute_ability(
+			'steadhand/update-post',
+			array(
+				'id'      => $post,
+				'content' => 'new',
+			)
+		);
+
+		$this->assertIsArray( $out );
+		$this->assertSame( 'new', get_post( $post )->post_content );
+		$this->assertSame(
+			array(
+				'snapshot_id' => 0,
+				'undoable'    => 0,
+			),
+			$this->snapshot_of_last_row()
+		);
+		$this->assertContains( 'This site keeps too few revisions for Steadhand to undo this change.', $out['warnings'] );
+	}
+
+	public function test_with_two_revisions_kept_the_change_is_undoable_and_the_snapshot_holds_the_old_content(): void {
+		add_filter( 'wp_revisions_to_keep', static fn(): int => 2 );
+		$post = $this->draft_and_agent( 'old' );
+
+		$out = $this->execute_ability(
+			'steadhand/update-post',
+			array(
+				'id'      => $post,
+				'content' => 'new',
+			)
+		);
+
+		$this->assertIsArray( $out );
+		$snapshot = $this->snapshot_of_last_row();
+		$this->assertGreaterThan( 0, $snapshot['snapshot_id'] );
+		$this->assertSame( 1, $snapshot['undoable'] );
+		$this->assertSame( 'old', get_post( $snapshot['snapshot_id'] )->post_content );
+		$this->assertNotContains( 'This site keeps too few revisions for Steadhand to undo this change.', $out['warnings'] );
+	}
+
+	public function test_with_unlimited_revisions_kept_the_change_is_undoable(): void {
+		add_filter( 'wp_revisions_to_keep', static fn(): int => -1 );
+		$post = $this->draft_and_agent( 'old' );
+
+		$this->execute_ability(
+			'steadhand/update-post',
+			array(
+				'id'      => $post,
+				'content' => 'new',
+			)
+		);
+
+		$this->assertSame( 1, $this->snapshot_of_last_row()['undoable'] );
 	}
 }

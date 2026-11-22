@@ -472,7 +472,7 @@ final class UpdatePostTest extends PostWriteTestCase {
 		$this->assertSame( 'After', get_post( $post )->post_content );
 		$this->assertTrue( $out['changed'] );
 		$this->assertCount( 1, $out['warnings'] );
-		$this->assertStringContainsString( 'cannot undo', $out['warnings'][0] );
+		$this->assertSame( 'This site keeps too few revisions for Steadhand to undo this change.', $out['warnings'][0] );
 		$row = $this->latest_row( $agent );
 		$this->assertSame( 'ok', $row['result'] );
 		$this->assertSame( 0, (int) $row['undoable'] );

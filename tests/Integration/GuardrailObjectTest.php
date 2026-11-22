@@ -12,6 +12,9 @@ namespace Steadhand\Tests\Integration;
 use Steadhand\Guardrails\Context;
 use Steadhand\Guardrails\Registry;
 use Steadhand\Guardrails\Result;
+use Steadhand\Capabilities;
+use Steadhand\Pipeline\Pipeline;
+use Steadhand\Log\DbLogger;
 
 /**
  * Integration tests for guardrail fixes: object changes and schema checks (S5, S6).
@@ -155,5 +158,30 @@ final class GuardrailObjectTest extends PostWriteTestCase {
 
 		$this->assertSame( 'steadhand_guardrail_blocked', $this->refusal_code( $result ) );
 		$this->assertSame( $before, $this->row( $post ) );
+	}
+
+
+	public function test_a_fix_that_keeps_the_object_id_but_changes_its_type_is_refused(): void {
+		$this->act_as_agent( array( Capabilities::WRITE_DRAFTS => true ) );
+		$this->register(
+			new FakeRule(
+				'zz/kind',
+				static function ( Context $context ): Result {
+					if ( 'post' !== ( $context->input['kind'] ?? '' ) ) {
+						return Result::allow();
+					}
+
+					$input         = $context->input;
+					$input['kind'] = 'page';
+
+					return Result::fix( $input, 'moved to a page' );
+				}
+			)
+		);
+
+		$result = ( new Pipeline( new DbLogger() ) )->run( new KindWriteProbe(), array( 'kind' => 'post' ) );
+
+		$this->assertSame( 'steadhand_guardrail_blocked', $this->refusal_code( $result ) );
+		$this->assertSame( 'A guardrail changed which object this call is about, so it was refused.', $result->get_error_message() );
 	}
 }
