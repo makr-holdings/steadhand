@@ -677,7 +677,9 @@ final class UpdatePostTest extends PostWriteTestCase {
 
 		$this->assertSame( 'steadhand-update-taken-2', get_post( $post )->post_name );
 		$this->assertSame( 'steadhand-update-taken-2', $out['slug'] );
-		$this->assertCount( 1, $out['warnings'] );
+		// The slug warning, and the status, slug or date warning: a revision cannot restore a slug (S4).
+		$this->assertCount( 2, $out['warnings'] );
+		$this->assertContains( 'This change includes status, slug or date, which Steadhand cannot undo yet.', $out['warnings'] );
 	}
 
 	public function test_a_call_with_no_field_to_change_is_refused(): void {

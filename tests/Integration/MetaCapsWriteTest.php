@@ -56,7 +56,8 @@ final class MetaCapsWriteTest extends TestCase {
 	}
 
 	/**
-	 * Runs a check inside a real read-level probe call and returns its answer.
+	 * Runs a check inside a real write-call probe and returns its answer. The probe is not read-only, so edit_post and
+	 * publish_post are mapped inside it (the write-call rule, MetaCaps). A read tool is covered in WriteCallScopeTest.
 	 *
 	 * @param Closure              $check Receives the sanitized input, returns a bool.
 	 * @param array<string, mixed> $input Input.
@@ -65,7 +66,12 @@ final class MetaCapsWriteTest extends TestCase {
 		$result = ( new \Steadhand\Pipeline\Pipeline( new SpyLogger() ) )->run(
 			new ProbeAbility(
 				Capabilities::READ,
-				static fn( array $sanitised ): array => array( 'can' => (bool) $check( $sanitised ) )
+				static fn( array $sanitised ): array => array( 'can' => (bool) $check( $sanitised ) ),
+				array(
+					'readonly'    => false,
+					'destructive' => false,
+					'idempotent'  => false,
+				)
 			),
 			$input
 		);

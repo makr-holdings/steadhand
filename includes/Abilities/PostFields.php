@@ -148,6 +148,46 @@ final class PostFields {
 	}
 
 	/**
+	 * Excerpts longer than this many bytes are kept in the change log as a digest.
+	 */
+	public const LOG_EXCERPT_BYTES = 500;
+
+	/**
+	 * The copy of a write's input that the change log keeps. The content is always a digest, because revisions hold the
+	 * text and the log is not a second copy of it: its byte count and its SHA-256, so an operator can match it to a
+	 * revision. An excerpt over LOG_EXCERPT_BYTES is replaced by a digest too. Everything else is kept as sent.
+	 *
+	 * The SHA-256 is written as eight groups of eight hex digits, separated by spaces. The log redactor masks any run of 32
+	 * or more letters and digits as a token, and a bare 64-character hex digest would be masked. Removing the spaces gives
+	 * the digest back.
+	 *
+	 * @param array<string, mixed> $input Prepared input.
+	 * @return array<string, mixed>
+	 */
+	public static function log_copy( array $input ): array {
+		foreach ( array(
+			'content' => 0,
+			'excerpt' => self::LOG_EXCERPT_BYTES,
+		) as $field => $limit ) {
+			if ( ! isset( $input[ $field ] ) || ! is_string( $input[ $field ] ) ) {
+				continue;
+			}
+
+			$text = $input[ $field ];
+			if ( 'content' !== $field && strlen( $text ) <= $limit ) {
+				continue;
+			}
+
+			$input[ $field ] = array(
+				'bytes'  => strlen( $text ),
+				'sha256' => implode( ' ', str_split( hash( 'sha256', $text ), 8 ) ),
+			);
+		}
+
+		return $input;
+	}
+
+	/**
 	 * A refusal for input that is not allowed.
 	 *
 	 * @param string $message Message for the caller. It says what is allowed.

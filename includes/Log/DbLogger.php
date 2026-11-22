@@ -349,7 +349,7 @@ final class DbLogger implements Logger {
 		}
 
 		if ( 1 === (int) $updated ) {
-			$this->announce( $id, $stored );
+			$this->announce( $id, $this->typed( $id, $stored ) );
 		}
 
 		return true;
@@ -432,6 +432,25 @@ final class DbLogger implements Logger {
 			// Deliberately ignored: the entry is stored, and a listener cannot change that.
 			return;
 		}
+	}
+
+	/**
+	 * The stored row with the same PHP types that row() gives a new entry, so a listener sees one shape from log() and
+	 * from complete(). The database returns every column as a string.
+	 *
+	 * @param int                  $id     Row ID.
+	 * @param array<string, mixed> $stored The row as read back from the database.
+	 * @return array<string, mixed>
+	 */
+	private function typed( int $id, array $stored ): array {
+		$row = array( 'id' => $id ) + $stored;
+		foreach ( array( 'user_id', 'object_id', 'snapshot_id', 'undoable', 'undone_by' ) as $column ) {
+			if ( isset( $row[ $column ] ) ) {
+				$row[ $column ] = (int) $row[ $column ];
+			}
+		}
+
+		return $row;
 	}
 
 	/**

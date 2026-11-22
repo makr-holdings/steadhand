@@ -149,4 +149,56 @@ final class EditLockRuleTest extends TestCase {
 
 		$this->assertSame( Result::MODE_ALLOW, $this->evaluate( $post, $agent )->mode() );
 	}
+
+
+	/**
+	 * Gives a post the legacy lock format, a timestamp with no user, and an optional _edit_last holder.
+	 *
+	 * @param int      $seconds Age of the lock.
+	 * @param int|null $last    The _edit_last user, or null for none.
+	 */
+	private function legacy_locked_post( int $seconds, ?int $last ): int {
+		$post_id = self::factory()->post->create();
+		update_post_meta( $post_id, '_edit_lock', (string) ( time() - $seconds ) );
+		if ( null !== $last ) {
+			update_post_meta( $post_id, '_edit_last', (string) $last );
+		}
+
+		return $post_id;
+	}
+
+	public function test_a_fresh_legacy_lock_with_no_last_editor_blocks_because_the_holder_is_unknown(): void {
+		$post = $this->legacy_locked_post( 0, null );
+
+		$this->assertSame( Result::MODE_BLOCK, $this->evaluate( $post, self::factory()->user->create() )->mode() );
+	}
+
+	public function test_a_fresh_legacy_lock_whose_last_editor_is_zero_blocks(): void {
+		$post = $this->legacy_locked_post( 0, 0 );
+
+		$this->assertSame( Result::MODE_BLOCK, $this->evaluate( $post, self::factory()->user->create() )->mode() );
+	}
+
+	public function test_a_fresh_legacy_lock_held_by_another_user_blocks(): void {
+		$other = self::factory()->user->create();
+		$agent = self::factory()->user->create();
+		$post  = $this->legacy_locked_post( 0, $other );
+
+		$this->assertSame( Result::MODE_BLOCK, $this->evaluate( $post, $agent )->mode() );
+	}
+
+	public function test_a_fresh_legacy_lock_the_agent_itself_holds_passes(): void {
+		$agent = self::factory()->user->create();
+		$post  = $this->legacy_locked_post( 0, $agent );
+
+		$this->assertSame( Result::MODE_ALLOW, $this->evaluate( $post, $agent )->mode() );
+	}
+
+	public function test_a_stale_legacy_lock_passes_whoever_it_names(): void {
+		$other = self::factory()->user->create();
+		$agent = self::factory()->user->create();
+		$post  = $this->legacy_locked_post( 3600, $other );
+
+		$this->assertSame( Result::MODE_ALLOW, $this->evaluate( $post, $agent )->mode() );
+	}
 }

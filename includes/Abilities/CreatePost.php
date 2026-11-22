@@ -155,6 +155,16 @@ final class CreatePost extends Ability {
 	}
 
 	/**
+	 * The copy of the input kept in the change log: content and long excerpts are digests, not text (see PostFields::log_copy()).
+	 *
+	 * @param array<string, mixed> $input Prepared input.
+	 * @return array<string, mixed>
+	 */
+	public function log_input( array $input ): array {
+		return PostFields::log_copy( $input );
+	}
+
+	/**
 	 * Names the content that will be stored, so the content guardrails can check it.
 	 *
 	 * @param array<string, mixed> $input Validated, sanitized input.

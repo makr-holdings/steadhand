@@ -67,12 +67,14 @@ final class Pipeline {
 	);
 
 	/**
-	 * How many Steadhand calls are inside authorize() or execute() right now. A counter, not a flag, so a nested
-	 * call cannot clear the outer call's context. Changed only by enter() and leave().
+	 * One entry per Steadhand call that is inside authorize() or execute() right now: true for a write call, false for a
+	 * read call. Changed only by enter() and leave(), which always pair in a finally block, so a nested call cannot
+	 * clear the outer call's entry. The innermost call decides: is_write_call() reads the last entry (see the class
+	 * comment for the rule).
 	 *
-	 * @var int
+	 * @var bool[]
 	 */
-	private static int $depth = 0;
+	private static array $calls = array();
 
 	/**
 	 * How many write snapshot() or execute() calls are running right now. Changed only by enter_write() and leave_write().
@@ -90,9 +92,22 @@ final class Pipeline {
 	 * @return bool
 	 */
 	public static function is_running(): bool {
-		// A wp_die() or exit inside an ability can leave the depth set while shutdown hooks run. Those hooks must not
+		// A wp_die() or exit inside an ability can leave a call entered while shutdown hooks run. Those hooks must not
 		// see a Steadhand call in progress, so the mapping is off once shutdown has begun.
-		return self::$depth > 0 && ! self::shutting_down();
+		return array() !== self::$calls && ! self::shutting_down();
+	}
+
+	/**
+	 * Whether the innermost Steadhand call is a write call, and is authorizing or executing right now.
+	 *
+	 * The mapping of edit_post and publish_post (MetaCaps) applies only while this is true. It follows the innermost call:
+	 * a read call nested in a write call answers false, and a write call nested in a read call answers true. It is false
+	 * after every exit path, and once shutdown has begun, as is_running().
+	 *
+	 * @return bool
+	 */
+	public static function is_write_call(): bool {
+		return array() !== self::$calls && true === end( self::$calls ) && ! self::shutting_down();
 	}
 
 	/**
@@ -129,18 +144,18 @@ final class Pipeline {
 
 	/**
 	 * Marks the start of a call's authorize or execute step.
+	 *
+	 * @param bool $write True when the call is a write (not a read-only ability).
 	 */
-	private static function enter(): void {
-		++self::$depth;
+	private static function enter( bool $write ): void {
+		self::$calls[] = $write;
 	}
 
 	/**
 	 * Marks the end of a call's authorize or execute step. Always paired with enter() in a finally block.
 	 */
 	private static function leave(): void {
-		if ( self::$depth > 0 ) {
-			--self::$depth;
-		}
+		array_pop( self::$calls );
 	}
 
 	/**
@@ -299,7 +314,7 @@ final class Pipeline {
 			return $prepared;
 		}
 
-		self::enter();
+		self::enter( ! self::is_read_only_ability( $ability ) );
 		try {
 			$authorized = $this->authorize( $ability, $prepared );
 		} finally {
@@ -307,7 +322,7 @@ final class Pipeline {
 		}
 
 		if ( is_wp_error( $authorized ) ) {
-			$this->write_entry( $ability, Entry::RESULT_BLOCKED, $authorized->get_error_message(), $prepared, $this->target_for( $ability, $prepared ) );
+			$this->write_entry( $ability, Entry::RESULT_BLOCKED, $authorized->get_error_message(), $this->loggable( $ability, $prepared ), $this->target_for( $ability, $prepared ) );
 			return $authorized;
 		}
 
@@ -341,12 +356,12 @@ final class Pipeline {
 
 		// The context flag is set from authorize() to the end of execute(), including the log write. It is cleared on
 		// every exit path.
-		self::enter();
+		self::enter( ! self::is_read_only_ability( $ability ) );
 		try {
 			// (c) Authorize.
 			$authorized = $this->authorize( $ability, $prepared );
 			if ( is_wp_error( $authorized ) ) {
-				return $this->finish( $ability, Entry::RESULT_BLOCKED, $authorized, $prepared, $target );
+				return $this->finish( $ability, Entry::RESULT_BLOCKED, $authorized, $this->loggable( $ability, $prepared ), $target );
 			}
 
 			if ( ! self::is_read_only_ability( $ability ) ) {
@@ -361,17 +376,17 @@ final class Pipeline {
 					$ability,
 					Entry::RESULT_ERROR,
 					$this->generic_error(),
-					$prepared,
+					$this->loggable( $ability, $prepared ),
 					$target
 				);
 			}
 
 			if ( is_wp_error( $output ) ) {
-				return $this->finish( $ability, Entry::RESULT_ERROR, $output, $prepared, $target );
+				return $this->finish( $ability, Entry::RESULT_ERROR, $output, $this->loggable( $ability, $prepared ), $target );
 			}
 
 			// (e) and (f) Log exactly once, then return the outcome only if it was logged.
-			return $this->finish( $ability, Entry::RESULT_OK, $output, $prepared, $target );
+			return $this->finish( $ability, Entry::RESULT_OK, $output, $this->loggable( $ability, $prepared ), $target );
 		} finally {
 			self::leave();
 		}
@@ -421,16 +436,8 @@ final class Pipeline {
 
 		$verdict = $this->engine->evaluate( $context, $revalidate );
 		if ( $verdict->blocked ) {
-			return $this->refuse_write(
-				$ability,
-				$input,
-				array(
-					'type' => $latest->object_type,
-					'id'   => $latest->object_id,
-				),
-				$verdict->message,
-				$verdict->notes
-			);
+			// The object the caller named. A guardrail rewrite that moved the call is refused, and logged under the caller's object.
+			return $this->refuse_write( $ability, $input, $this->target_for( $ability, $input ), $verdict->message, $verdict->notes );
 		}
 
 		$final_input = $verdict->input;
@@ -442,7 +449,8 @@ final class Pipeline {
 		$outcome     = $verdict->fixed ? Entry::RESULT_FIXED : Entry::RESULT_OK;
 
 		// (2) Reserve the log row. No row, no write.
-		$id = $this->reserve( $this->entry_for( $ability, Entry::RESULT_ERROR, '', $final_input, $target, $this->join_notes( $notes ) ) );
+		$logged = $this->loggable( $ability, $final_input );
+		$id     = $this->reserve( $this->entry_for( $ability, Entry::RESULT_ERROR, '', $logged, $target, $this->join_notes( $notes ) ) );
 		if ( 0 === $id ) {
 			return $this->log_failed();
 		}
@@ -455,7 +463,7 @@ final class Pipeline {
 			);
 		} catch ( \Throwable ) {
 			$error = $this->generic_error();
-			return $this->complete_write( $id, $ability, Entry::RESULT_ERROR, $error, $final_input, $target, $notes, 0, false )
+			return $this->complete_write( $id, $ability, Entry::RESULT_ERROR, $error, $logged, $target, $notes, 0, false )
 				? $error
 				: $this->log_incomplete();
 		}
@@ -466,21 +474,21 @@ final class Pipeline {
 				fn(): mixed => $ability->execute( $final_input )
 			);
 		} catch ( \Throwable ) {
-			$error = $this->generic_error();
-			return $this->complete_write( $id, $ability, Entry::RESULT_ERROR, $error, $final_input, $target, $notes, $snapshot['id'], false )
+			$error = $this->write_error();
+			return $this->complete_write( $id, $ability, Entry::RESULT_ERROR, $error, $logged, $target, $notes, $snapshot['id'], false )
 				? $error
 				: $this->log_incomplete();
 		}
 
 		// (5) Complete the row with the outcome.
 		if ( is_wp_error( $output ) ) {
-			return $this->complete_write( $id, $ability, Entry::RESULT_ERROR, $output, $final_input, $target, $notes, $snapshot['id'], false )
+			return $this->complete_write( $id, $ability, Entry::RESULT_ERROR, $output, $logged, $target, $notes, $snapshot['id'], false )
 				? $output
 				: $this->log_incomplete();
 		}
 
 		$object = $this->object_after( $ability, $final_input, $output, $target );
-		if ( ! $this->complete_write( $id, $ability, $outcome, null, $final_input, $object, $notes, $snapshot['id'], $snapshot['undoable'] ) ) {
+		if ( ! $this->complete_write( $id, $ability, $outcome, null, $logged, $object, $notes, $snapshot['id'], $snapshot['undoable'] ) ) {
 			return $this->log_incomplete();
 		}
 
@@ -616,7 +624,7 @@ final class Pipeline {
 	 * @return \WP_Error
 	 */
 	private function refuse_write( Ability $ability, array $input, array $target, string $message, array $notes ): \WP_Error {
-		$entry = $this->entry_for( $ability, Entry::RESULT_BLOCKED, $message, $input, $target, $this->join_notes( $notes ) );
+		$entry = $this->entry_for( $ability, Entry::RESULT_BLOCKED, $message, $this->loggable( $ability, $input ), $target, $this->join_notes( $notes ) );
 		if ( ! $this->store( $entry ) ) {
 			return $this->log_failed();
 		}
@@ -855,6 +863,38 @@ final class Pipeline {
 	 */
 	private function object_refusal(): \WP_Error {
 		return $this->forbidden( __( 'Not found, or this agent may not access it.', 'steadhand' ) );
+	}
+
+	/**
+	 * The input to store in the change log for a call whose input passed prepare(). An ability may replace large fields
+	 * (see Ability::log_input()). A throw, or a value that is not an array, stores the empty input instead, so the entry is
+	 * still written.
+	 *
+	 * @param Ability              $ability Ability that was called.
+	 * @param array<string, mixed> $input   Prepared input.
+	 * @return array<string, mixed>
+	 */
+	private function loggable( Ability $ability, array $input ): array {
+		try {
+			$logged = $ability->log_input( $input );
+		} catch ( \Throwable ) {
+			return array();
+		}
+
+		return is_array( $logged ) ? $logged : array();
+	}
+
+	/**
+	 * The error for a write whose execute() threw. The post may have been partly changed, so the caller must check it.
+	 *
+	 * @return \WP_Error
+	 */
+	private function write_error(): \WP_Error {
+		return new \WP_Error(
+			'steadhand_error',
+			__( 'The change could not be completed and may have been partly applied. Check the result before you continue.', 'steadhand' ),
+			array( 'status' => 500 )
+		);
 	}
 
 	/**

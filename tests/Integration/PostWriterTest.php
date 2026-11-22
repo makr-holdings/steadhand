@@ -441,4 +441,33 @@ final class PostWriterTest extends LogTestCase {
 
 		$this->assertSame( 'publish', get_post( $post_id )->post_status );
 	}
+
+	public function test_update_refuses_a_string_value_for_every_field_that_is_not_on_the_update_allowlist(): void {
+		wp_set_current_user( $this->make_agent() );
+		$post_id = self::factory()->post->create( array( 'post_status' => 'draft' ) );
+		$refused = array();
+		$fields  = array(
+			'post_author'   => '1',
+			'post_password' => 'secret',
+			'post_parent'   => '0',
+			'ID'            => '5',
+			'post_type'     => 'page',
+		);
+
+		$this->in_write(
+			function () use ( $post_id, $fields, &$refused ): void {
+				foreach ( $fields as $key => $value ) {
+					try {
+						PostWriter::update( $post_id, array( $key => $value ) );
+					} catch ( \InvalidArgumentException ) {
+						$refused[] = $key;
+					}
+				}
+			}
+		);
+
+		$this->assertSame( array_keys( $fields ), $refused, 'Every field must be refused by name, whatever its type.' );
+		$this->assertSame( 'draft', get_post( $post_id )->post_status );
+		$this->assertSame( 'page' === get_post( $post_id )->post_type ? 'page' : 'post', get_post( $post_id )->post_type );
+	}
 }

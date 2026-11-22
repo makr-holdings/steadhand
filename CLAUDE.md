@@ -29,8 +29,8 @@ includes/
   Requirements.php       # dependency checks and the missing-dependency notice
   Abilities/             # one class per ability
   Diagnostics/           # get-diagnostics helpers: PHP error log reader and parser, cron, Site Health, plugins, environment, self-check
-  Pipeline/              # validate → authorize → guardrails → snapshot → execute → log
-  Guardrails/            # engine + rules + presets
+  Pipeline/              # validate → authorize → guardrails → log reservation → snapshot → execute → log completion (writes); Pipeline.php, PostWriter.php (the only post writes), Snapshots.php (core revisions)
+  Guardrails/            # Engine, Verdict, the public Rule, Context, Result and Registry classes, Rules/ (ContentLimits, BlockMarkup, RateLimit, EditLock); presets are not built yet
   Log/                   # change log (Schema, DbLogger, Logger), snapshots, undo
   Admin/                 # settings screens (agents, guardrails, log)
   Dev/                   # dev-only updater (Updater.php) and its Plugin Update Checker library; excluded from the WordPress.org build

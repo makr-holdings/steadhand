@@ -105,6 +105,19 @@ final class Engine {
 						);
 					}
 
+					// A rewrite may change the input, but not the object it is about. A rule that moved the call to another
+					// post would skip the object checks that ran before it (EditLock, for one), so the call is refused.
+					if ( $revised->object_type !== $context->object_type || $revised->object_id !== $context->object_id ) {
+						return $this->blocked(
+							/* translators: Refusal text when a guardrail's rewrite changes the object a call is about. */
+							__( 'A guardrail changed which object this call is about, so it was refused.', 'steadhand' ),
+							$this->note_for( $id, 'blocked' ),
+							$context->input,
+							$notes,
+							$fixed
+						);
+					}
+
 					$context = $revised;
 					$fixed   = true;
 					$this->add_note( $notes, $this->note_for( $id, $result->note() ) );

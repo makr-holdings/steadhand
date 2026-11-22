@@ -22,14 +22,23 @@ defined( 'ABSPATH' ) || exit;
  * Anything else returns the capabilities core chose. The agent role never holds WordPress's general editing capabilities,
  * so outside a Steadhand call the answers are core's own.
  *
+ * edit_post and publish_post are mapped only inside a write call (Pipeline::is_write_call()). A read tool, such as
+ * get-rendered, runs shortcodes and other code that may ask these questions, so inside a read they keep core's answer.
+ * read_post is mapped in every Steadhand call.
+ *
  * For a post that is missing or in the trash, every mapped capability is refused. A post whose type is not allowed is
  * refused too. An attachment is handled by the media rule for read_post and refused for the other three.
  *
  * - read_post: steadhand_read.
  * - edit_post: steadhand_write_drafts for a draft, pending or auto-draft; steadhand_publish for a published, scheduled
- *   or private post; refused for any other status.
+ *   or private post; refused for any other status (see edit_capability()).
  * - publish_post: steadhand_publish, whatever the status.
  * - delete_post: not mapped. Core's answer stands, and the agent role holds nothing that grants it, so it is refused.
+ *
+ * Core's extra requirements survive. The mapping replaces the post type's own capabilities (every value in
+ * get_post_type_object()->cap), and never anything stricter. If core asks for anything else as well, for example
+ * manage_privacy_options for the privacy policy page, or a capability another plugin added, edit_post and publish_post
+ * are refused.
  */
 final class MetaCaps {
 
@@ -45,7 +54,7 @@ final class MetaCaps {
 	 * This name is held by no user, so the check fails exactly as it does for do_not_allow, and read_post still gets
 	 * the answer its own rule gives.
 	 */
-	private const NO_GRANT = 'steadhand_no_grant';
+	private const NO_GRANT = Capabilities::NO_GRANT;
 
 	/**
 	 * Statuses that edit_post maps to steadhand_write_drafts.
@@ -56,6 +65,30 @@ final class MetaCaps {
 	 * Statuses that edit_post maps to steadhand_publish.
 	 */
 	private const LIVE_STATUSES = array( 'publish', 'future', 'private' );
+
+	/**
+	 * The capabilities that only a write call may map (see the class comment).
+	 */
+	private const WRITE_ONLY = array( 'edit_post', 'publish_post' );
+
+	/**
+	 * The Steadhand capability edit_post needs for a post in this status, or null when no status rule covers it. This is the
+	 * one place where the status decision is made. UpdatePost uses it too, so the object check and the mapping cannot drift.
+	 *
+	 * @param string $status The post's status.
+	 * @return string|null One of the Capabilities constants, or null.
+	 */
+	public static function edit_capability( string $status ): ?string {
+		if ( in_array( $status, self::DRAFT_STATUSES, true ) ) {
+			return Capabilities::WRITE_DRAFTS;
+		}
+
+		if ( in_array( $status, self::LIVE_STATUSES, true ) ) {
+			return Capabilities::PUBLISH;
+		}
+
+		return null;
+	}
 
 	/**
 	 * Attaches the mapping to map_meta_cap.
@@ -87,6 +120,11 @@ final class MetaCaps {
 		}
 
 		if ( ! Pipeline::is_running() || ! in_array( $cap, self::MAPPED, true ) ) {
+			return $caps;
+		}
+
+		// Outside a write call, edit and publish keep core's answer (S1).
+		if ( in_array( $cap, self::WRITE_ONLY, true ) && ! Pipeline::is_write_call() ) {
 			return $caps;
 		}
 
@@ -128,6 +166,31 @@ final class MetaCaps {
 	}
 
 	/**
+	 * Whether core asks for anything beyond the post type's own capabilities. Core's list for edit_post on the privacy
+	 * policy page includes manage_privacy_options. The mapping replaces the type's own capabilities, so that extra
+	 * requirement must still hold for the agent, and it never does.
+	 *
+	 * @param \WP_Post $post The post.
+	 * @param array    $caps Core's answer for the capability.
+	 * @return bool True when core asks for a capability the post type does not own.
+	 */
+	private static function has_extra_requirement( \WP_Post $post, array $caps ): bool {
+		$type = get_post_type_object( (string) $post->post_type );
+		if ( ! $type instanceof \WP_Post_Type ) {
+			return true;
+		}
+
+		$own = array_values( (array) $type->cap );
+		foreach ( $caps as $required ) {
+			if ( ! in_array( $required, $own, true ) ) {
+				return true;
+			}
+		}
+
+		return false;
+	}
+
+	/**
 	 * Maps a capability for a post that is not an attachment, is not in the trash and has an allowed type.
 	 *
 	 * @param string   $cap   The meta capability.
@@ -141,18 +204,12 @@ final class MetaCaps {
 				return array( Capabilities::READ );
 
 			case 'edit_post':
-				if ( in_array( $post->post_status, self::DRAFT_STATUSES, true ) ) {
-					return array( Capabilities::WRITE_DRAFTS );
-				}
+				$needed = self::edit_capability( (string) $post->post_status );
 
-				if ( in_array( $post->post_status, self::LIVE_STATUSES, true ) ) {
-					return array( Capabilities::PUBLISH );
-				}
-
-				return array( self::NO_GRANT );
+				return null === $needed || self::has_extra_requirement( $post, $caps ) ? array( self::NO_GRANT ) : array( $needed );
 
 			case 'publish_post':
-				return array( Capabilities::PUBLISH );
+				return self::has_extra_requirement( $post, $caps ) ? array( self::NO_GRANT ) : array( Capabilities::PUBLISH );
 
 			default:
 				// delete_post: not mapped in M2. Core's answer stands.

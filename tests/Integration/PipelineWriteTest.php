@@ -29,6 +29,9 @@ final class PipelineWriteTest extends LogTestCase {
 
 	private const GENERIC = 'The ability failed to complete. Try again, or check the site error log.';
 
+	/** The text of a write whose execute() threw: it may have been partly applied (S7). */
+	private const WRITE_THROW = 'The change could not be completed and may have been partly applied. Check the result before you continue.';
+
 	private const PENDING = 'The call started, but no outcome was recorded.';
 
 	/**
@@ -157,12 +160,12 @@ final class PipelineWriteTest extends LogTestCase {
 
 		$this->assertWPError( $result );
 		$this->assertSame( 'steadhand_error', $result->get_error_code() );
-		$this->assertSame( self::GENERIC, $result->get_error_message() );
+		$this->assertSame( self::WRITE_THROW, $result->get_error_message() );
 		$this->assertStringNotContainsString( 'secret-probe-text', (string) wp_json_encode( $result->get_error_data() ) );
 
 		$row = $this->latest_row( $agent );
 		$this->assertSame( Entry::RESULT_ERROR, $row['result'] );
-		$this->assertSame( self::GENERIC, $row['message'] );
+		$this->assertSame( self::WRITE_THROW, $row['message'] );
 		$this->assertStringNotContainsString( 'secret-probe-text', $row['message'] );
 	}
 

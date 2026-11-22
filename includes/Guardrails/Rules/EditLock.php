@@ -22,6 +22,9 @@ defined( 'ABSPATH' ) || exit;
  * timestamp is within the wp_check_post_lock_window filter's window (core's filter, 150 seconds by default) and its
  * user is someone other than the agent. A lock held by the agent, a stale lock, a malformed lock and a lock with user
  * 0 do not block. The refusal does not name the other user.
+ *
+ * Older WordPress wrote a lock with the timestamp only. For that format the user is read from _edit_last. A fresh
+ * timestamp-only lock blocks unless _edit_last names the agent, so a missing holder fails safe.
  */
 final class EditLock implements Rule {
 
@@ -52,21 +55,42 @@ final class EditLock implements Rule {
 		}
 
 		$lock = get_post_meta( $context->object_id, '_edit_lock', true );
-		if ( ! is_string( $lock ) || 1 !== preg_match( '/^(\d+):(\d+)\z/', $lock, $parts ) ) {
+		if ( ! is_string( $lock ) || 1 !== preg_match( '/^(\d+)(?::(\d+))?\z/', $lock, $parts ) ) {
 			return Result::allow();
 		}
 
-		$since  = (int) $parts[1];
-		$holder = (int) $parts[2];
-		$live   = $since > time() - $this->window();
-
-		if ( $live && $holder > 0 && $holder !== $context->user_id ) {
-			return Result::block(
-				__( 'Someone is editing this post in WordPress right now. Try again after they finish.', 'steadhand' )
-			);
+		$since = (int) $parts[1];
+		if ( $since <= time() - $this->window() ) {
+			return Result::allow();
 		}
 
-		return Result::allow();
+		if ( isset( $parts[2] ) ) {
+			$holder = (int) $parts[2];
+			if ( $holder > 0 && $holder !== $context->user_id ) {
+				return $this->refuse();
+			}
+
+			return Result::allow();
+		}
+
+		// The legacy format, timestamp only: the user is in _edit_last. Missing, zero or another user blocks.
+		$holder = (int) get_post_meta( $context->object_id, '_edit_last', true );
+		if ( $holder > 0 && $holder === $context->user_id ) {
+			return Result::allow();
+		}
+
+		return $this->refuse();
+	}
+
+	/**
+	 * The refusal for a post that someone else holds a live lock on. It does not name that user.
+	 *
+	 * @return Result
+	 */
+	private function refuse(): Result {
+		return Result::block(
+			__( 'Someone is editing this post in WordPress right now. Try again after they finish.', 'steadhand' )
+		);
 	}
 
 	/**

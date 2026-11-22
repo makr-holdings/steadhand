@@ -1,12 +1,12 @@
 # Steadhand extension points
 
-**Status:** Steadhand defines three filters and one action so far (see [Filters](#filters) and [Actions](#actions)). This page is the reference for the public extension points that Steadhand Pro and third-party code will build on. It fills in as each extension point is built. The plan is in [SPEC.md](SPEC.md), section 9.1.
+**Status:** Steadhand defines four filters and two actions so far (see [Filters](#filters) and [Actions](#actions)), and the public guardrail classes in the [Guardrail API](#guardrail-api) section. This page is the reference for the public extension points that Steadhand Pro and third-party code will build on. It fills in as each extension point is built. The plan is in [SPEC.md](SPEC.md), section 9.1.
 
 ## Current extension points
 
-Steadhand defines three filters, documented in [Filters](#filters), and one action, documented in [Actions](#actions).
+Steadhand defines four filters, documented in [Filters](#filters), and two actions, documented in [Actions](#actions). The [Guardrail API](#guardrail-api) section documents the public classes that third-party guardrail rules use.
 
-To check, run this from the repository root. It lists Steadhand's own hooks: the filters `steadhand_allowed_post_types`, `steadhand_log_read_calls` and `steadhand_log_retention_days`, and the action `steadhand_log_entry_stored`. It also lists the WordPress hook that Steadhand invokes, `the_content`, which `get-rendered` runs on purpose. Today the output has five lines: one for each of the four Steadhand hooks, and one for `the_content`. Any other `apply_filters()` or `do_action()` call in this output is a mistake, or a new extension point that needs a section here:
+To check, run this from the repository root. It lists Steadhand's own hooks: the filters `steadhand_allowed_post_types`, `steadhand_log_read_calls`, `steadhand_log_retention_days` and `steadhand_rate_limit_per_minute`, and the actions `steadhand_log_entry_stored` and `steadhand_register_guardrails`. It also lists two WordPress hooks that Steadhand calls rather than attaches to: `the_content`, which `get-rendered` runs on purpose, and `wp_check_post_lock_window`, which the edit-lock rule reads. Today the output has eight lines: one for each of the six Steadhand hooks, and one for each of the two WordPress hooks. Any other `apply_filters()` or `do_action()` call in this output is a mistake, or a new extension point that needs a section here:
 
 ```
 grep -rnE "apply_filters\(|do_action\(" includes steadhand.php uninstall.php --exclude-dir=vendor
@@ -113,6 +113,33 @@ add_filter(
 
 This filter is public API. The [stability policy](#stability-policy) above applies. Any new parameter will go at the end.
 
+### `steadhand_rate_limit_per_minute`
+
+Sets how many writes an agent may make in one rolling minute. It is applied in `Steadhand\Guardrails\Rules\RateLimit` on every write, before the write runs.
+
+- **Since:** 0.2.0.
+- **Type:** filter.
+- **Parameters:**
+  - `$limit` (`int`), the current limit. The default is 30.
+  - `$user_id` (`int`), the agent user making the write.
+- **Return:** `int`, a whole number from 1 to 600. Steadhand checks it before use:
+  - A string made only of digits, such as `'60'`, is converted to an integer.
+  - Any other value is replaced by 30, the default. This covers zero, negative numbers, floats, booleans, `null`, arrays and other strings. A value above 600 is not reduced to 600; it also gives 30.
+  - If a callback throws, 30 is used.
+- **It cannot turn the limit off.** Zero and negative numbers give 30, not no limit.
+- **What is counted:** the change-log rows for write abilities (every ability that is not read-only) made by this user, with result `ok`, `fixed` or `error`, in the last 60 seconds. A write counts from the moment its row is reserved, so a write that is still running counts. Refused calls are not counted.
+
+This example allows 60 writes a minute for every agent:
+
+```php
+add_filter(
+	'steadhand_rate_limit_per_minute',
+	static fn( int $limit ): int => 60
+);
+```
+
+This filter is public API. The [stability policy](#stability-policy) above applies. Any new parameter will go at the end.
+
 ## Actions
 
 ### `steadhand_log_entry_stored`
@@ -131,15 +158,15 @@ Runs after Steadhand has stored a change-log entry. It is applied in `Steadhand\
     - `ability` (`string`): the ability name, for example `steadhand/get-post`.
     - `object_type` (`string`): `post`, `attachment`, or `''` when the call names no object.
     - `object_id` (`int`): the ID the call named, or 0.
-    - `input` (`string`): the stored input as JSON text. It is a string, not an array. It is either the redacted input or a summary (`{"truncated":true,"bytes":N,"keys":[...]}`).
-    - `result` (`string`): `ok`, `blocked`, `fixed` or `error`.
+    - `input` (`string`): the stored input as JSON text. It is a string, not an array. It is either the redacted input or a summary (`{"truncated":true,"bytes":N,"keys":[...]}`). Post content is stored as a digest, not as text (SPEC section 7).
+    - `result` (`string`): `ok`, `blocked`, `fixed` or `error`. `fixed` means a guardrail rewrote the input. No built-in rule does that yet.
     - `message` (`string`): the message for a refused or failed call, or `''`.
-    - `guardrail_notes` (`string`): always `''` today, because no guardrail runs yet.
-    - `snapshot_id` (`int`): always 0 today.
+    - `guardrail_notes` (`string`): the notes the guardrails recorded for a write, joined by newlines, or `''`.
+    - `snapshot_id` (`int`): the ID of the snapshot revision for an update (the newest non-autosave revision matching the post's title, content and excerpt, see SPEC section 7), or 0.
     - `undoable` (`int`): 0 or 1. It is an integer, not a boolean.
-    - `undone_by` (`int`): always 0 today.
-- **Values:** every string value and every key of the input is already redacted, and every string is size-capped, before it is stored. The listener receives exactly what was stored. The agent label is cut at 191 bytes. The message and guardrail note are cut at 2000 bytes. The input is capped as described above. Redaction is best-effort, so a listener must not assume that a value has no secret in it.
-- **When it runs:** once for each row that is inserted, after the insert succeeds. That includes the refusal-throttle marker row. It does not run for an entry that the throttle drops, or for an entry whose insert fails. It runs before the pruning step of the same call.
+    - `undone_by` (`int`): always 0 until undo is built.
+- **Values:** every string value and every key of the input is already redacted, and every string is size-capped, before it is stored. The listener receives exactly what was stored. The agent label is cut at 191 bytes. The message and guardrail note are cut at 2000 bytes. The input is capped as described above. Redaction is best-effort, so a listener must not assume that a value has no secret in it. For a write, the row is read back from the table once its outcome is recorded, so every value in it is a string, including `id`, `user_id`, `object_id`, `snapshot_id` and `undoable` (for example `'1'`). The types listed above apply to rows stored in one step.
+- **When it runs:** once for each row that is stored in one step, after the insert succeeds. That includes the refusal-throttle marker row, and for a stored row it runs before the pruning step of the same call. A write is stored in two steps: its row is reserved before the change, and the listener runs once, when the outcome is recorded and the row changes. The reservation itself does not run it. It does not run for an entry that the throttle drops, or for an entry whose insert fails.
 - **If a listener throws:** the exception is caught and ignored. The entry stays stored, and the call's result is not changed. An exception also stops the listeners on this action that come after the one that threw, so they do not run for that entry.
 - **Trust:** listeners are trusted code, and they run inside the agent's request. The exception handling above contains a thrown exception only. Output that a listener prints goes into the agent's response, and a call to `exit` ends the request before the call returns. Neither is contained.
 - **What it does not do:** it cannot change or delete the row, change whether the entry is stored, or change the result that the agent receives. It has no return value. It runs synchronously inside the agent's request, so a slow listener makes that call slower.
@@ -161,6 +188,120 @@ add_action(
 
 This action is public API. The [stability policy](#stability-policy) above applies. Any new parameter will go at the end.
 
+### `steadhand_register_guardrails`
+
+Lets a plugin add guardrail rules to the write path. Steadhand runs it once per request, when the first write in that request reaches the guardrails. It is applied in `Steadhand\Guardrails\Engine`.
+
+- **Since:** 0.2.0.
+- **Type:** action.
+- **Parameter:** `$registry` (`Steadhand\Guardrails\Registry`). Call `$registry->add( $rule )` for each rule. The rule interface and `Registry::add()` are described in the [Guardrail API](#guardrail-api) section.
+- **When it runs:** only for a write that reaches the guardrail step. It does not run for reads, for calls refused at the permission check, or at boot. It runs at most once per request, so a listener must be attached before the first write, for example on `init`. A listener attached later in the same request is not called.
+- **Order:** rules run in the order they were added, after the built-in rules that run first and before the built-in rules that run last. See [Rules of engagement](#rules-of-engagement).
+- **If a listener throws:** the exception is caught. The rules added before the throw still apply, and the listeners on this action after the one that threw do not run for that request. The built-in rules are not affected, so a listener cannot turn them off.
+- **What it does not do:** it cannot remove or reorder a built-in rule, and it cannot change a call. A rule changes a call only through its `Result`.
+- **Trust:** listeners are trusted code and run inside the agent's request. See [Hooks other code can use](#hooks-other-code-can-use-around-steadhands-abilities).
+
+This example adds a rule that refuses a title written in capitals:
+
+```php
+add_action(
+	'steadhand_register_guardrails',
+	static function ( \Steadhand\Guardrails\Registry $registry ): void {
+		$registry->add(
+			new class implements \Steadhand\Guardrails\Rule {
+				public function id(): string {
+					return 'example/no-shouting';
+				}
+
+				public function evaluate( \Steadhand\Guardrails\Context $context ): \Steadhand\Guardrails\Result {
+					$title = (string) ( $context->input['title'] ?? '' );
+					if ( '' !== $title && $title === strtoupper( $title ) && $title !== strtolower( $title ) ) {
+						return \Steadhand\Guardrails\Result::block( 'Write the title in normal case, not all capitals.' );
+					}
+
+					return \Steadhand\Guardrails\Result::allow();
+				}
+			}
+		);
+	}
+);
+```
+
+This action is public API. The [stability policy](#stability-policy) above applies. Any new parameter will go at the end.
+
+## Guardrail API
+
+Third-party guardrail rules are written against four classes in `Steadhand\Guardrails`: `Rule`, `Context`, `Result` and `Registry`. They are public API under the [stability policy](#stability-policy). The engine (`Engine`) and the verdict (`Verdict`) are internal and may change.
+
+A rule is added from the [`steadhand_register_guardrails`](#steadhand_register_guardrails) action with `Registry::add()`.
+
+### `Rule`
+
+An interface with two methods.
+
+- `id(): string` returns the rule's ID, in the form `vendor/name`: exactly one slash, lowercase letters, digits and hyphens, at most 40 characters before the slash and 60 after it. An ID must not start with `steadhand/`, which is reserved for the built-in rules.
+- `evaluate( Context $context ): Result` checks one call and returns a `Result`. A rule must not change the call. It returns a result, and the engine acts on it. A rule that throws, or that returns anything other than a `Result`, blocks the call.
+
+### `Context`
+
+The call as the rules see it. Every property is public and read-only.
+
+- `ability` (`string`): the ability name, `steadhand/create-post` or `steadhand/update-post`.
+- `capability` (`string`): the Steadhand capability the ability names. Both write tools name `steadhand_write_drafts`. A call that edits a live post or sets a live status also needs `steadhand_publish`. The object check decides that, not this property.
+- `user_id` (`int`): the agent user making the call.
+- `input` (`array<string, mixed>`): the validated and sanitized input, as the rules before this one left it. Defaults are filled in, so `create-post` always has `status` and `post_type`. After a fix, it is the rewritten input, already checked again.
+- `object_type` (`string`): `post` for both write tools.
+- `object_id` (`int`): the ID of the post the call changes. It is 0 for `create-post`, which has no ID until it runs.
+- `content` (`array<string, string>`): the input fields that will be stored as post content, keyed by field name, each holding block markup. For both write tools it has `content` when the caller sent it, and is empty otherwise. Title and excerpt are not included.
+
+### `Result`
+
+A decision. Build one with a named constructor. The constructor is private.
+
+- `Result::allow()`: the call proceeds unchanged.
+- `Result::block( string $message )`: the call is refused. The message is shown to the agent. It is cut at 500 bytes, and an empty message is replaced by "Refused by a guardrail."
+- `Result::warn( string $note )`: the call proceeds. The note is recorded in the change log and in the response.
+- `Result::fix( array $input, string $note )`: the call proceeds with `$input` in place of its input. The engine checks the new input before it is used (see [Rules of engagement](#rules-of-engagement)). The call is recorded with result `fixed`.
+
+Getters:
+
+- `mode()` returns `Result::MODE_ALLOW` (`'allow'`), `Result::MODE_BLOCK` (`'block'`), `Result::MODE_WARN` (`'warn'`) or `Result::MODE_FIX` (`'fix'`).
+- `message()` returns the refusal text. It is empty unless the mode is block.
+- `note()` returns the note. It is empty unless the mode is warn or fix.
+- `input()` returns the rewritten input. It is empty unless the mode is fix.
+
+Each note is cut at 300 bytes, including the rule's ID and `: ` in front of it, and a call keeps at most 20 notes. The engine adds one note for each warn and each fix, and one for a block, in the form `vendor/name: blocked`.
+
+### `Registry`
+
+`add( Rule $rule ): bool` adds a rule and returns `true`. It returns `false`, and adds nothing, when:
+
+- `id()` throws;
+- the ID does not match the form described under [`Rule`](#rule);
+- the ID starts with `steadhand/`;
+- another rule already has that ID.
+
+It does not throw for these cases. Rules run in the order they were added.
+
+### Rules of engagement
+
+These rules apply to every write. The order is fixed:
+
+1. The built-in rules that run first: `steadhand/rate-limit`, then `steadhand/edit-lock`.
+2. The third-party rules, in the order they were added.
+3. The built-in rules that run last: `steadhand/content-limits`, then `steadhand/block-markup`.
+
+- Each rule sees the input as the rules before it left it.
+- A block stops evaluation. The call is refused, and no later rule runs.
+- A warn adds its note, and evaluation continues.
+- A fix passes the new input through the same checks as the original call: the schema, the ability's own input rule, and the object check. If any of them fails, the call is blocked with "A guardrail changed this call into one that is not allowed, so it was refused." A fix that changes `object_type` or `object_id` is blocked with "A guardrail changed which object this call is about, so it was refused." Otherwise the call continues with the new input, and the rules after it see that input.
+- The built-in rules that run last always judge the final input, after every fix.
+- A rule that throws, or that returns anything other than a `Result`, blocks the call with "A guardrail could not check this call, so it was refused."
+- The block note is always recorded, even when the list of notes is full.
+- Rules run only on the write path. Reads and calls refused before the guardrail step never reach them.
+
+These classes are public API. A change to one of them is a breaking change, and needs a deprecation under the stability policy first.
+
 ## Planned (not implemented)
 
 Nothing in this section exists in the code today. The names and behaviour may change until each one ships.
@@ -170,14 +311,15 @@ Nothing in this section exists in the code today. The names and behaviour may ch
 SPEC section 9.1 says Free will provide these extension points for Pro. Their hook names will be set when each one is built:
 
 - Tool registration.
-- Guardrail rule registration.
 - Pre-execute interception, used for approvals.
 - Log export filters.
 - Admin screen slots.
 
+**Tool registration is not public yet.** `Steadhand\Abilities\Ability` is an internal base class. The tool list is a fixed list in `Steadhand\Abilities\Registry::abilities()`, and no filter or action adds a tool, so a third party cannot add an MCP tool today.
+
 ## Hooks from WordPress and the MCP Adapter that Steadhand uses
 
-Steadhand attaches to these hooks. Other plugins can see them too.
+Steadhand attaches to these hooks, or calls them where the row says so. Other plugins can see them too.
 
 | Hook | Type | Where | Purpose |
 |---|---|---|---|
@@ -200,8 +342,15 @@ Steadhand attaches to these hooks. Other plugins can see them too.
 | `pre_get_avatar` | filter | same | Returns an empty string, so `get_avatar()` prints nothing, whatever another plugin returns from this filter, at `PHP_INT_MAX` |
 | `get_avatar` | filter | same | Returns an empty string, at `PHP_INT_MAX`. The early `pre_get_avatar` return still passes through this filter (`pluggable.php`), so another plugin's markup here would otherwise print |
 | `pre_get_avatar_data`, `get_avatar_data` | filter | same | Set the avatar `url` to an empty string and `found_avatar` to `false`, at `PHP_INT_MAX`. `get_avatar_url()` and markup built from `get_avatar_data()` get no Gravatar URL. `get_avatar_data` is the last filter on every path |
+| `user_has_cap` | filter | `includes/CapabilityGuard.php`, registered in `includes/Plugin.php` (`boot()`, before the requirements check), at `PHP_INT_MAX` | Sets every Steadhand capability to the value the user holds, and `steadhand_no_grant` to false, so no other `user_has_cap` filter can grant or remove one. Other capabilities are not changed, so a third party's filter still applies to them and may change core's answers for an administrator |
+| `map_meta_cap` | filter | `includes/MetaCaps.php` (`register()`), priority 10 | Maps `read_post` for a dedicated agent during every Steadhand call, and `edit_post` and `publish_post` only during a write call (SPEC §14.1). Any requirement core adds beyond the post type's own capabilities is refused. A `do_not_allow` from core or an earlier callback is returned unchanged |
+| `admin_init` | action | `includes/Lockdown.php`, priority 1 | Refuses wp-admin, admin-ajax.php and admin-post.php to a dedicated agent with 403 (SPEC §4.1) |
+| `posts_clauses` | filter | `includes/Abilities/ListMedia.php` (`list-media` only, during its query) | Adds the media rule's parent condition, a join and a where clause, to that one query. Removed in a `finally` block |
+| `pre_http_request` | filter | `includes/Abilities/GetDiagnostics.php` (`execute()`, `get-diagnostics` only) | Fails every HTTP request made during the call with `steadhand_diagnostics_no_http`, at `PHP_INT_MAX - 1`. Removed in a `finally` block |
+| `wp_check_post_lock_window` | filter, applied and not attached | `includes/Guardrails/Rules/EditLock.php` | Core's edit-lock window in seconds, default 150. Steadhand reads it on each write that is checked. A value that is not a whole number from 1 to 3600 gives 150 |
+| `title_save_pre`, `content_save_pre`, `excerpt_save_pre`, `content_filtered_save_pre` | filter | `includes/Pipeline/PostWriter.php` (`with_kses()`; it does not call `kses_init_filters()` or `kses_remove_filters()`) | During a post write, adds WordPress's post KSES filters for these four fields where they are missing, and removes afterwards only the ones that write added. The callbacks are those core uses: `wp_filter_kses` to `title_save_pre`, `wp_filter_post_kses` to `content_save_pre`, `excerpt_save_pre` and `content_filtered_save_pre`, and `wp_filter_global_styles_post` to the two content filters |
 
-The rows above are attached only for the duration of a `get-rendered` call. They are added at the start of the render and removed in a `finally` block, so none remains after the call, including after an error. Core's own callbacks on the same hooks are unchanged. The `pre_http_request`, `pre_oembed_result` and `embed_oembed_discover` rows stop outbound requests. The meta, `oembed_cache` and block rows stop stored data from being written or shown.
+The `get-rendered` rows (`pre_http_request` through `pre_get_avatar_data`, where the Where column names `GetRendered` or says `same`) are attached only for the duration of a `get-rendered` call. They are added at the start of the render and removed in a `finally` block, so none remains after the call, including after an error. Core's own callbacks on the same hooks are unchanged. The `pre_http_request`, `pre_oembed_result` and `embed_oembed_discover` rows stop outbound requests. The meta, `oembed_cache` and block rows stop stored data from being written or shown. The `posts_clauses` and `pre_http_request` rows for `list-media` and `get-diagnostics` are attached and removed the same way, for their one call.
 
 Activation also runs Steadhand's install routine through `register_activation_hook()` in `steadhand.php`, which creates the `steadhand_agent` role.
 
@@ -210,6 +359,8 @@ This table was produced with the grep below. It lists the static calls only. The
 ```
 grep -rnE "add_(action|filter)\(|register_(activation|deactivation|uninstall)_hook" includes steadhand.php uninstall.php --exclude-dir=vendor
 ```
+
+The KSES filters in the table are added by Steadhand's `with_kses()` during a write, so the grep does not show them. The render guards are attached from a list, as noted above. `wp_check_post_lock_window` is applied rather than attached, so it appears in the first grep output and in [Current extension points](#current-extension-points), not here.
 
 The dev-only filters in `includes/Dev/Updater.php` are listed below.
 
@@ -222,6 +373,8 @@ Dev builds with a token only: `includes/Dev/Updater.php` hooks the library filte
 Any plugin on the site can hook these, and Steadhand cannot stop it. They run in the same PHP process as Steadhand, so code that hooks them is trusted by necessity.
 
 While `get-rendered` renders a post, the post's shortcodes and blocks, and any filters on `the_content` added by other plugins, run inside a Steadhand call. They see the same read grant the agent has, because the post capability mapping applies while the pipeline runs. The temporary filters in the table above are attached for that time. A callback added at a higher priority than Steadhand's can still undo one of them (for example, a `pre_http_request` callback at `PHP_INT_MAX` that returns `false`), and that is one of the places where code in the same PHP process is trusted.
+
+A write runs WordPress's own post functions (`wp_insert_post()` or `wp_update_post()`), so the core save hooks run inside it, among them `wp_insert_post_data` and `save_post`. Listeners on those hooks run in the agent's request and are trusted code. An exception from one of them is caught by the pipeline, which records the call as `error`, but the post may already have been saved.
 
 These are WordPress core hooks. All of them except `wp_before_execute_ability` were added in WordPress 7.1, so they do not exist on 6.9. `wp_before_execute_ability` exists on 6.9, and its `$ability` parameter was added in 7.1.
 

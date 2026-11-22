@@ -142,6 +142,18 @@ abstract class Ability {
 	}
 
 	/**
+	 * The copy of the input kept in the change log. The default is the input itself. A write ability that stores a large
+	 * field (post content, for one) returns a short summary of it instead, so that the log is not a second copy of the
+	 * content. The revisions hold the content. Called only with prepared input, after prepare() has passed.
+	 *
+	 * @param array<string, mixed> $input Prepared input.
+	 * @return array<string, mixed> The input to store in the change log.
+	 */
+	public function log_input( array $input ): array {
+		return $input;
+	}
+
+	/**
 	 * Names the input fields that will be stored as post content, so that the content guardrails can check them.
 	 *
 	 * Each value is block markup the call will store. The default returns no fields, so a read ability never needs this.

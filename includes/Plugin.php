@@ -45,6 +45,13 @@ final class Plugin {
 	private MetaCaps $meta_caps;
 
 	/**
+	 * Keeps user_has_cap filters from granting a Steadhand capability.
+	 *
+	 * @var CapabilityGuard
+	 */
+	private CapabilityGuard $capability_guard;
+
+	/**
 	 * Constructor. Builds the service graph; registers no hooks.
 	 */
 	public function __construct() {
@@ -62,11 +69,12 @@ final class Plugin {
 			)
 		);
 
-		$pipeline        = new Pipeline\Pipeline( $change_log, $engine );
-		$this->registry  = new Abilities\Registry( $pipeline, $change_log );
-		$this->server    = new Server( $this->registry );
-		$this->lockdown  = new Lockdown();
-		$this->meta_caps = new MetaCaps();
+		$pipeline               = new Pipeline\Pipeline( $change_log, $engine );
+		$this->registry         = new Abilities\Registry( $pipeline, $change_log );
+		$this->server           = new Server( $this->registry );
+		$this->lockdown         = new Lockdown();
+		$this->meta_caps        = new MetaCaps();
+		$this->capability_guard = new CapabilityGuard();
 	}
 
 	/**
@@ -90,15 +98,17 @@ final class Plugin {
 	/**
 	 * Hooks Steadhand into WordPress, or shows a notice if a dependency is missing.
 	 *
-	 * The lockdown is registered first and whatever the requirements, because it depends only on WordPress core.
-	 * Without it, an agent's application password would work on core REST and wp-login while the MCP Adapter is
-	 * missing. Only the ability and server wiring needs the dependencies.
+	 * The lockdown and the capability guard are registered first and whatever the requirements, because they depend only
+	 * on WordPress core. Without the lockdown, an agent's application password would work on core REST and wp-login while
+	 * the MCP Adapter is missing. Without the guard, a user_has_cap filter could grant a Steadhand capability.
+	 * Only the ability and server wiring needs the dependencies.
 	 *
 	 * @param Requirements $requirements The detected dependency state.
 	 * @return bool True when the ability and server hooks were registered.
 	 */
 	public function boot( Requirements $requirements ): bool {
 		$this->lockdown->register();
+		$this->capability_guard->register();
 
 		if ( ! $requirements->are_met() ) {
 			add_action( 'admin_notices', array( $requirements, 'render_notice' ) );

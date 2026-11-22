@@ -35,6 +35,10 @@ defined( 'ABSPATH' ) || exit;
  * - Whether a block name is registered on the site, or whether its attributes match its schema.
  *
  * The token regular expression is run with preg_match() at an offset, as core does, and a PCRE error blocks the call.
+ *
+ * A known false positive: text that looks like a malformed delimiter, such as <!-- wp:x and no closing -->, is refused
+ * even where it is only text. That happens inside a core/html block and in an ordinary HTML comment that starts with
+ * <!-- wp:. Such content is refused until the comment is changed or the text is escaped.
  */
 final class BlockMarkup implements Rule {
 
@@ -44,11 +48,15 @@ final class BlockMarkup implements Rule {
 	 */
 	private const TOKEN = '/<!--[ \t\f\r\n]+(?P<closer>\/)?wp:(?P<namespace>[a-z][a-z0-9_-]*\/)?(?P<name>[a-z][a-z0-9_-]*)[ \t\f\r\n]+(?P<attrs>{(?:(?:[^}]+|}+(?=})|(?!}[ \t\f\r\n]+\/?-->).)*+)?}[ \t\f\r\n]+)?(?P<void>\/)?-->/s';
 
-	/** Every comment that looks like an opener or a void block, however it is spelled. */
-	private const LOOSE_OPENER = '/<!--\s*wp:/i';
+	/**
+	 * Every comment that looks like an opener or a void block. It is matched as core's token grammar matches a delimiter: the
+	 * same whitespace after <!-- (not \s, which also takes a vertical tab), wp: in lower case, and no ignore-case flag. So
+	 * <!-- WP:Engine cache note --> and <!--wp:x--> are not counted, because core does not read them as delimiters.
+	 */
+	private const LOOSE_OPENER = '/<!--[ \t\f\r\n]+wp:/';
 
-	/** Every comment that looks like a closer, however it is spelled. */
-	private const LOOSE_CLOSER = '/<!--\s*\/wp:/i';
+	/** Every comment that looks like a closer, matched the same way as LOOSE_OPENER. */
+	private const LOOSE_CLOSER = '/<!--[ \t\f\r\n]+\/wp:/';
 
 	/** Token kinds. */
 	private const OPENER = 'opener';

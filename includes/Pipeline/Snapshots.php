@@ -22,10 +22,11 @@ final class Snapshots {
 	/**
 	 * Makes sure a core revision of the post's current state exists, and returns its ID.
 	 *
-	 * Core saves a revision only when the post differs from its latest one. In that case the latest revision already
-	 * holds the current state, and it is returned. The returned revision is checked against the post's title, content
-	 * and excerpt before it is trusted. Returns 0 when revisions are not kept for the post (no revision support, the
-	 * wp_revisions_to_keep() limit is 0, or a save failed), or when the revision does not match the post.
+	 * Core saves a revision only when the post differs from its latest one. Autosaves are revisions too, and they are
+	 * never returned: a revision is returned only when it is not an autosave and holds exactly the post's current title,
+	 * content and excerpt. The newest such revision is looked up directly, with the revision limit ignored, so an older
+	 * revision is found even when none is saved now. Returns 0 when revisions are not available for the post, when
+	 * no matching revision exists, or when a save failed.
 	 *
 	 * @param int $post_id Post ID.
 	 * @return int The revision ID, or 0.
@@ -42,28 +43,29 @@ final class Snapshots {
 		}
 
 		// Saves a revision of the current state, unless it matches the latest one. Its return value is not used: the
-		// latest revision is checked below either way.
+		// revision looked up below is checked either way.
 		wp_save_post_revision( $post->ID );
 
-		$latest = wp_get_latest_revision_id_and_total_count( $post->ID );
-		if ( is_wp_error( $latest ) ) {
-			return 0;
+		$revisions = wp_get_post_revisions(
+			$post->ID,
+			array(
+				'posts_per_page' => 5,
+				'check_enabled'  => false,
+			)
+		);
+
+		foreach ( $revisions as $revision ) {
+			if ( ! $revision instanceof \WP_Post || 'revision' !== $revision->post_type || wp_is_post_autosave( $revision ) ) {
+				continue;
+			}
+
+			$same = $revision->post_title === $post->post_title
+				&& $revision->post_content === $post->post_content
+				&& $revision->post_excerpt === $post->post_excerpt;
+
+			return $same ? (int) $revision->ID : 0;
 		}
 
-		$revision_id = (int) ( $latest['latest_id'] ?? 0 );
-		if ( $revision_id <= 0 ) {
-			return 0;
-		}
-
-		$revision = get_post( $revision_id );
-		if ( ! $revision instanceof \WP_Post || 'revision' !== $revision->post_type ) {
-			return 0;
-		}
-
-		$same = $revision->post_title === $post->post_title
-			&& $revision->post_content === $post->post_content
-			&& $revision->post_excerpt === $post->post_excerpt;
-
-		return $same ? $revision_id : 0;
+		return 0;
 	}
 }

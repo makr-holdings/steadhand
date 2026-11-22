@@ -184,4 +184,17 @@ final class BlockMarkupRuleTest extends TestCase {
 
 		$this->assertStringStartsWith( 'The post_content field', $result->message() );
 	}
+
+
+	public function test_an_upper_case_wp_comment_is_not_a_delimiter_and_passes(): void {
+		$this->assertSame( Result::MODE_ALLOW, $this->evaluate( "<p>x</p>\n<!-- WP:Engine cache note -->" )->mode() );
+	}
+
+	public function test_a_comment_with_no_space_after_the_opening_is_not_a_delimiter_and_passes(): void {
+		$this->assertSame( Result::MODE_ALLOW, $this->evaluate( '<p>x</p><!--wp:x-->' )->mode() );
+	}
+
+	public function test_a_space_after_the_opening_still_counts_as_a_delimiter(): void {
+		$this->assertSame( Result::MODE_BLOCK, $this->evaluate( '<!-- wp:paragraph --><p>x</p>' )->mode() );
+	}
 }
