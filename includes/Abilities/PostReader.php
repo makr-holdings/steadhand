@@ -158,7 +158,7 @@ final class PostReader {
 	 *
 	 * @return array<string, mixed>
 	 */
-	private static function date_schema(): array {
+	public static function date_schema(): array {
 		return array(
 			'type'   => array( 'string', 'null' ),
 			'format' => 'date-time',
@@ -217,6 +217,69 @@ final class PostReader {
 	}
 
 	/**
+	 * Reads an ISO 8601 bound (after or before) as a UTC instant. A value without an offset is read as UTC.
+	 *
+	 * The calendar date is checked before DateTimeImmutable is used, because DateTimeImmutable rolls 2026-02-30 over to
+	 * 2 March. Hour 24 and minute 60 are refused for the same reason.
+	 *
+	 * @param string $value Bound as the caller sent it.
+	 * @return \DateTimeImmutable|null The instant in UTC, or null when the value is not a real date and time.
+	 */
+	public static function utc_bound( string $value ): ?\DateTimeImmutable {
+		if ( 1 === preg_match( '/^(\d{4})-(\d{2})-(\d{2})(?:[Tt ](\d{2}):(\d{2}))?/', $value, $parts ) ) {
+			if ( ! checkdate( (int) $parts[2], (int) $parts[3], (int) $parts[1] ) ) {
+				return null;
+			}
+			if ( isset( $parts[4] ) && '' !== $parts[4] && ( (int) $parts[4] > 23 || (int) $parts[5] > 59 ) ) {
+				return null;
+			}
+		}
+
+		try {
+			return ( new \DateTimeImmutable( $value, new \DateTimeZone( 'UTC' ) ) )->setTimezone( new \DateTimeZone( 'UTC' ) );
+		} catch ( \Exception ) {
+			return null;
+		}
+	}
+
+	/**
+	 * The date_query for an optional after and before, in $input. The post_date column holds site-local time, and it is
+	 * set for every post, including drafts that were never published (their post_date_gmt is zero). So each bound is
+	 * converted to the site time zone, and the comparison is inclusive.
+	 *
+	 * @param array<string, mixed> $input Validated input; after and before are optional ISO 8601 strings.
+	 * @return array<string, mixed> The date_query, or an empty array when neither bound is set.
+	 */
+	public static function date_query( array $input ): array {
+		$clauses = array();
+		foreach ( array( 'after', 'before' ) as $bound ) {
+			if ( ! isset( $input[ $bound ] ) || '' === $input[ $bound ] ) {
+				continue;
+			}
+			$date = self::utc_bound( (string) $input[ $bound ] );
+			if ( null === $date ) {
+				continue;
+			}
+
+			$local     = $date->setTimezone( wp_timezone() );
+			$clauses[] = array(
+				'column'    => 'post_date',
+				$bound      => array(
+					'year'   => (int) $local->format( 'Y' ),
+					'month'  => (int) $local->format( 'n' ),
+					'day'    => (int) $local->format( 'j' ),
+					'hour'   => (int) $local->format( 'G' ),
+					'minute' => (int) $local->format( 'i' ),
+					'second' => (int) $local->format( 's' ),
+				),
+				'inclusive' => true,
+			);
+		}
+
+		return $clauses ? array_merge( array( 'relation' => 'AND' ), $clauses ) : array();
+	}
+
+	/**
 	 * Converts a stored GMT date to ISO 8601 UTC, or returns null for an empty or zero or unreadable date.
 	 *
 	 * @param string $gmt Date as stored, Y-m-d H:i:s in GMT.
@@ -242,6 +305,17 @@ final class PostReader {
 	 */
 	public static function utf8( string $text ): string {
 		return wp_check_invalid_utf8( $text, true );
+	}
+
+	/**
+	 * A label as plain text: tags removed, entities decoded, cut to $max_bytes on a UTF-8 boundary. Used for titles and
+	 * other short labels that come from site data (media titles, alt text, captions and menu item titles).
+	 *
+	 * @param string $raw       Value as stored.
+	 * @param int    $max_bytes Longest result, in bytes.
+	 */
+	public static function label_text( string $raw, int $max_bytes ): string {
+		return self::cut_utf8( self::plain_text( wp_strip_all_tags( self::utf8( $raw ) ) ), $max_bytes );
 	}
 
 	/**

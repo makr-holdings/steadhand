@@ -253,29 +253,9 @@ final class ListPosts extends Ability {
 			$args['s'] = (string) $input['search'];
 		}
 
-		$date_query = array();
-		foreach ( array( 'after', 'before' ) as $bound ) {
-			$date = $this->utc_date( $input, $bound );
-			if ( null !== $date ) {
-				// The post_date column holds site-local time, and it is set for every post, including drafts that
-				// were never published (their post_date_gmt is zero). So the bound is converted to the site time zone.
-				$local        = $date->setTimezone( wp_timezone() );
-				$date_query[] = array(
-					'column'    => 'post_date',
-					$bound      => array(
-						'year'   => (int) $local->format( 'Y' ),
-						'month'  => (int) $local->format( 'n' ),
-						'day'    => (int) $local->format( 'j' ),
-						'hour'   => (int) $local->format( 'G' ),
-						'minute' => (int) $local->format( 'i' ),
-						'second' => (int) $local->format( 's' ),
-					),
-					'inclusive' => true,
-				);
-			}
-		}
-		if ( $date_query ) {
-			$args['date_query'] = array_merge( array( 'relation' => 'AND' ), $date_query );
+		$date_query = PostReader::date_query( $input );
+		if ( array() !== $date_query ) {
+			$args['date_query'] = $date_query;
 		}
 
 		$query = new \WP_Query( $args );
@@ -320,30 +300,13 @@ final class ListPosts extends Ability {
 	 *
 	 * @param array<string, mixed> $input Validated input.
 	 * @param string               $key   after or before.
-	 * @return \DateTimeImmutable|null Null when the input has no such key. A value that cannot be parsed is not
-	 *                                 returned here: validate_input() refuses it first.
+	 * @return \DateTimeImmutable|null Null when the input has no such key or the value is not a real date and time.
 	 */
 	private function utc_date( array $input, string $key ): ?\DateTimeImmutable {
 		if ( ! isset( $input[ $key ] ) || '' === $input[ $key ] ) {
 			return null;
 		}
 
-		$value = (string) $input[ $key ];
-
-		// DateTimeImmutable rolls 2026-02-30 over to 2 March, so the calendar date and the time are checked first.
-		if ( 1 === preg_match( '/^(\d{4})-(\d{2})-(\d{2})(?:[Tt ](\d{2}):(\d{2}))?/', $value, $parts ) ) {
-			if ( ! checkdate( (int) $parts[2], (int) $parts[3], (int) $parts[1] ) ) {
-				return null;
-			}
-			if ( isset( $parts[4] ) && '' !== $parts[4] && ( (int) $parts[4] > 23 || (int) $parts[5] > 59 ) ) {
-				return null;
-			}
-		}
-
-		try {
-			return ( new \DateTimeImmutable( $value, new \DateTimeZone( 'UTC' ) ) )->setTimezone( new \DateTimeZone( 'UTC' ) );
-		} catch ( \Exception ) {
-			return null;
-		}
+		return PostReader::utc_bound( (string) $input[ $key ] );
 	}
 }

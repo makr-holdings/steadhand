@@ -44,6 +44,12 @@ final class Registry {
 			new GetPost(),
 			new GetBlocks(),
 			new GetRendered(),
+			new ListTerms(),
+			new GetPostTerms(),
+			new ListMenus(),
+			new GetMenu(),
+			new ListMedia(),
+			new GetMedia(),
 		);
 	}
 

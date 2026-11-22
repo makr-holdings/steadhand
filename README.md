@@ -6,13 +6,19 @@ Steadhand is an access and governance layer, not an AI plugin. It never calls an
 
 ## Status
 
-Pre-release. This is milestone M1 (read tools) in progress, in a private repository. The plugin registers five read-only tools. None of them changes site content. `steadhand/get-rendered` runs the site's own blocks and shortcodes to produce HTML. While it renders, Steadhand blocks outbound HTTP requests and embed-cache writes, so embeds appear as plain URLs, and it omits login/logout blocks, avatar blocks and mis-referenced navigation blocks. It also omits every avatar image wherever it is printed, so no Gravatar hash of an email address and no author-archive link appears in the output. Third-party shortcodes may still have side effects of their own:
+Pre-release. This is milestone M1 (read tools) in progress, in a private repository. The plugin registers eleven read-only tools. None of them changes site content. `steadhand/get-rendered` runs the site's own blocks and shortcodes to produce HTML. While it renders, Steadhand blocks outbound HTTP requests and embed-cache writes, so embeds appear as plain URLs, and it omits login/logout blocks, avatar blocks and mis-referenced navigation blocks. It also omits every avatar image wherever it is printed, so no Gravatar hash of an email address and no author-archive link appears in the output. Third-party shortcodes may still have side effects of their own:
 
 - `steadhand/get-site-info`: site name, URL, versions, active theme and this agent's capabilities.
 - `steadhand/list-posts`: a page of posts of one allowed type (`post` and `page` by default), in the statuses the agent asks for, by any author.
 - `steadhand/get-post`: one post with its raw content as stored.
 - `steadhand/get-blocks`: the block tree of one post, with an index path for each block.
 - `steadhand/get-rendered`: the HTML a post's content produces through the site's content filters, with the render limits above.
+- `steadhand/list-terms`: a page of the terms of one public taxonomy attached to an allowed post type (categories, tags and post formats by default), including empty terms, with their stored counts.
+- `steadhand/get-post-terms`: the allowed terms assigned to one post, grouped by taxonomy, at most 500 per taxonomy.
+- `steadhand/list-menus`: classic menus and block navigation menus, with stored item counts and theme locations.
+- `steadhand/get-menu`: one classic menu as a flat list of up to 500 items in menu order, or one block navigation post with its content and block tree.
+- `steadhand/list-media`: a page of media items the media rule allows, newest first, with public URLs, alt text, captions, dimensions where stored, and the parent post ID. Trashed media is never listed.
+- `steadhand/get-media`: one media item, with its description as plain text and its generated image sizes. Server file paths and image metadata (EXIF, IPTC, GPS) are never returned.
 
 The change log, guardrails, undo, the admin screens and every write tool are not built yet. Do not use it on a production site, except internal dogfooding sites set up as described in [Dev builds on internal sites](#dev-builds-on-internal-sites).
 
@@ -45,7 +51,7 @@ Steadhand has eight capabilities. The table shows the defaults for a new agent. 
 | Capability | Default for a new agent | Effect today |
 |---|---|---|
 | `steadhand_connect` | on | Lets the agent reach the endpoint |
-| `steadhand_read` | on | Lets the agent call the five read tools |
+| `steadhand_read` | on | Lets the agent call the eleven read tools |
 | `steadhand_write_drafts` | on | None yet (no write tools in M1) |
 | `steadhand_publish` | off | None yet |
 | `steadhand_media` | off | None yet |
@@ -144,14 +150,29 @@ To check the connection, ask the client to call the tool `steadhand-get-site-inf
 - `steadhand_version`.
 - `capabilities`: each of the eight Steadhand capabilities set to `true` or `false` for this agent.
 
-The other four read tools are listed below. Each takes the arguments shown and refuses any other.
+The other ten read tools are listed below. Each takes the arguments shown and refuses any other.
 
 - `steadhand-list-posts` takes `post_type` (default `post`; must be an allowed type), `status` (one or more of `publish`, `future`, `draft`, `pending`, `private`; default all five), `search` (up to 200 characters), `after` and `before` (ISO 8601 dates), `orderby` (`date`, `modified` or `title`), `order`, `page` (1 to 10000) and `per_page` (1 to 50). It returns `items`, `total`, `total_pages`, `page` and `per_page`. Trashed and auto-draft posts are never returned.
 - `steadhand-get-post` takes `id`. It returns the post's fields and its raw `content`, exactly as stored.
 - `steadhand-get-blocks` takes `id`. It returns the block tree. Each block has a `path` such as `0` or `1.0`, a `name`, `attrs`, `inner_html` and `inner_blocks`.
 - `steadhand-get-rendered` takes `id`. It returns the post's rendered `html` as a fragment, not a full page.
 
+- `steadhand-list-terms` takes `taxonomy` (required; a public taxonomy attached to an allowed post type, such as `category` or `post_tag`), `search` (up to 200 characters, matched against names and slugs), `parent` (a term ID, or 0 for top-level terms), `orderby` (`name`, `count` or `id`), `order` (`asc` or `desc`), `page` (1 to 10000) and `per_page` (1 to 100). It returns `items`, `total`, `total_pages`, `page` and `per_page`. A taxonomy that is not allowed is refused, and the response names the allowed ones. Every public taxonomy attached to an allowed post type is readable: by default categories, tags and post formats, plus any public custom taxonomy attached to an allowed type. Each term's `count` is the number WordPress stores for it, not a fresh count.
+- `steadhand-get-post-terms` takes `id`. It returns the allowed taxonomies of that post, each with its label, its `total` number of terms, `truncated`, and its terms. At most 500 terms are returned per taxonomy, in name order; `truncated` is true when there are more, and `total` gives the full count.
+- `steadhand-list-menus` takes no arguments. It returns `menus`, classic menus first, then block navigation in the publish, draft, pending, future or private status, up to 200, with `truncated` set when there are more. A classic menu's `item_count` is the count WordPress stores for the menu. It can include an item that get-menu leaves out, such as one whose linked page is trashed, and it is not a count of loaded items.
+- `steadhand-get-menu` takes `kind` (`classic` or `block`) and `id`. A classic menu loads the whole menu and returns its items as a flat list in menu order, at most 500, with each item's parent item ID, type, title and URL. An item's title and URL are the ones the public menu prints, as plain text. The item's linked object may be a draft, a private post, or a content type the post tools refuse; only its type, its ID, and that title and URL are returned. Items whose linked object is trashed or missing are left out. A block navigation post returns its raw `content` and its block tree.
+- `steadhand-list-media` takes `media_type` (`image`, `video`, `audio`, `application` or `text`), `search` (up to 200 characters), `parent` (0 for unattached media, or a post ID you can read; any other parent is refused with the standard message), `after` and `before` (ISO 8601 dates, checked as real calendar dates), `orderby` (`date` or `title`), `order`, `page` (1 to 10000) and `per_page` (1 to 50). It returns `items`, `total`, `total_pages`, `page` and `per_page`. Each item has `id`, `title`, `slug`, `mime_type`, `media_type`, `url`, `alt`, `caption`, `date_gmt`, `modified_gmt`, `author` (`id` and display name), `parent`, `width` and `height` (images and videos), `filesize` and `duration` (audio and video), each null when it is not stored. Titles, alt text and captions are plain text, cut at 1000 bytes. Only media the rule below allows is listed, and `total` counts only those.
+- `steadhand-get-media` takes `id`. It returns the same fields as an item, plus `description` (the content as plain text, cut at 5000 bytes, with `truncated` set when it was cut) and `sizes` (the generated image sizes, at most 30, each with `name`, `url`, `width`, `height` and `mime_type`; empty for non-images).
+
 Content over 256 KB is cut, and the response then says `truncated: true` and gives the full size.
+
+**Policies in plain words.**
+
+- **Media.** A file can be read when its own status is `inherit` (the normal state of a media item), and it is either unattached, attached to a post that no longer exists, or attached to a post of an allowed type that is not in the trash. The parent's status and author do not matter, so a file on a draft, a private page or another author's post can be read. A file attached to any other content type (for example a custom type that is not allowed, or a block), or to a trashed post, is refused with the standard message, and list-media neither lists it nor counts it in `total`. Files in the media library are public URLs, so this rule decides what the agent sees through these tools; it does not hide anything from the public.
+- **Never returned for media.** No server file paths, and no raw attachment metadata. No EXIF, IPTC or GPS data from the image. A `url` is empty when the file has no stored location, or when the stored location is a server path, so that a server path is never printed as a URL.
+- **Block navigation.** Block navigation is readable in the publish, draft, pending, future and private statuses. Trashed and auto-draft navigation is never listed or read.
+- **Authors.** Every tool that returns an author gives its ID and display name. On many sites the display name is the same as the login name, so the login can be learned that way. No email address is ever returned.
+- **Counts and caps.** A term's `count` and a menu's `item_count` are the numbers WordPress stores. Lists take at most 50 posts or media items, or 100 terms, per page; get-post-terms returns at most 500 terms per taxonomy; get-menu returns at most 500 items of a classic menu; list-menus returns at most 200 menus.
 
 Refused and missing posts get the same message, so the tools cannot be used to find out which IDs exist. An administrator account is refused at the endpoint, with or without `steadhand_connect`, because only a dedicated agent connects.
 

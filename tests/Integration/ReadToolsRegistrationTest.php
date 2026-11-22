@@ -1,6 +1,6 @@
 <?php
 /**
- * Registration of the five read tools: the MCP tool list, annotations, strict schemas and exposure.
+ * Registration of the nine read tools: the MCP tool list, annotations, strict schemas and exposure.
  *
  * @package Steadhand
  */
@@ -25,6 +25,12 @@ final class ReadToolsRegistrationTest extends TestCase {
 		'steadhand/get-post',
 		'steadhand/get-blocks',
 		'steadhand/get-rendered',
+		'steadhand/list-terms',
+		'steadhand/get-post-terms',
+		'steadhand/list-menus',
+		'steadhand/get-menu',
+		'steadhand/list-media',
+		'steadhand/get-media',
 	);
 
 	private const TOOLS = array(
@@ -33,9 +39,15 @@ final class ReadToolsRegistrationTest extends TestCase {
 		'steadhand-get-post',
 		'steadhand-get-blocks',
 		'steadhand-get-rendered',
+		'steadhand-list-terms',
+		'steadhand-get-post-terms',
+		'steadhand-list-menus',
+		'steadhand-get-menu',
+		'steadhand-list-media',
+		'steadhand-get-media',
 	);
 
-	public function test_server_lists_exactly_the_five_read_tools(): void {
+	public function test_server_lists_exactly_the_eleven_read_tools(): void {
 		wp_set_current_user( $this->make_agent() );
 
 		$body  = $this->body( $this->mcp( 'tools/list', array(), $this->mcp_session() ) );
