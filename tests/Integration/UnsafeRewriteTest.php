@@ -10,22 +10,26 @@ declare( strict_types=1 );
 namespace Steadhand\Tests\Integration;
 
 use Steadhand\Pipeline\PostWriter;
+use WP_Hook;
 
 /**
  * A post an administrator wrote with markup that KSES would remove for an agent. The fixtures are written as the
- * administrator, so they are stored as written. Covers the update path (PostWriter::update() and would_alter_unsent()) and
- * the insert path, which filters everything.
+ * administrator, so they are stored as written. Covers the update path (PostWriter::update() and the post-write check in
+ * UpdatePost) and the insert path, which filters everything.
  */
 final class UnsafeRewriteTest extends PostWriteTestCase {
 
-	/** Content an administrator wrote: an iframe, a script, a style, a void tag, bare and encoded ampersands, quotes, inline style. */
-	private const RICH = "<p class='note' style=\"color: red;\">Tom & Jerry &amp; Q&A <img src=\"https://example.org/a.jpg\" alt=\"\" /></p><hr/><iframe src=\"https://www.youtube.com/embed/x\"></iframe><script>var a=1;</script><style>p{color:red}</style>";
+	/**
+	 * Content an administrator wrote: an iframe, a script, a style, a void tag, bare and encoded ampersands, quotes, single
+	 * quotes, inline style, and backslashes next to quotes.
+	 */
+	private const RICH = "<p class='note' style=\"color: red;\">Tom & Jerry &amp; Q&A <img src=\"https://example.org/a.jpg\" alt=\"\" /></p><hr/><iframe src=\"https://www.youtube.com/embed/x\"></iframe><script>var a=1;</script><style>p{color:red}</style><p>C:\\dir\\new \"q\" \\\\ end</p>";
 
-	/** Excerpt an administrator wrote, with a script in it. */
-	private const RICH_EXCERPT = '<script>e</script>ex & <b>bold</b>';
+	/** Excerpt an administrator wrote, with a script, an ampersand, and a backslash next to quotes. */
+	private const RICH_EXCERPT = '<script>e</script>ex & <b>bold</b> \\ "q"';
 
-	/** Filtered content an administrator wrote. */
-	private const RICH_FILTERED = '<iframe src="https://a.example/"></iframe>md & <script>x()</script>';
+	/** Filtered content an administrator wrote, with an iframe, an ampersand and a backslash next to an apostrophe. */
+	private const RICH_FILTERED = '<iframe src="https://a.example/"></iframe>md & <script>x()</script> \\ it\'s';
 
 	/** The four post-field save filters, and the Global Styles filter core adds with them. */
 	private const SAVE_FILTERS = array(
@@ -44,15 +48,19 @@ final class UnsafeRewriteTest extends PostWriteTestCase {
 	 */
 	private function rich_post( array $fields = array() ): int {
 		wp_set_current_user( $this->admin_id() );
+		// wp_insert_post() unslashes what it is given, so the values are slashed first: the stored bytes are the ones above.
 		$post = $this->admin_post(
-			array_merge(
-				array(
-					'post_status'  => 'draft',
-					'post_title'   => 'T',
-					'post_content' => self::RICH,
-					'post_excerpt' => self::RICH_EXCERPT,
-				),
-				$fields
+			array_map(
+				'wp_slash',
+				array_merge(
+					array(
+						'post_status'  => 'draft',
+						'post_title'   => 'T',
+						'post_content' => self::RICH,
+						'post_excerpt' => self::RICH_EXCERPT,
+					),
+					$fields
+				)
 			)
 		);
 		$this->set_filtered_content( $post, self::RICH_FILTERED );
@@ -102,6 +110,25 @@ final class UnsafeRewriteTest extends PostWriteTestCase {
 		return $state;
 	}
 
+	/**
+	 * The number of callbacks on a hook, at every priority. Used to show that a write left none of its own behind.
+	 *
+	 * @param string $hook Hook name.
+	 */
+	private function callback_count( string $hook ): int {
+		$registered = $GLOBALS['wp_filter'][ $hook ] ?? null;
+		if ( ! $registered instanceof WP_Hook ) {
+			return 0;
+		}
+
+		$count = 0;
+		foreach ( $registered->callbacks as $callbacks ) {
+			$count += count( $callbacks );
+		}
+
+		return $count;
+	}
+
 	public function test_a_title_only_update_of_an_administrators_post_succeeds_and_leaves_the_other_fields_byte_identical(): void {
 		$post = $this->rich_post();
 		$this->assertStringContainsString( '<iframe', get_post( $post )->post_content, 'The fixture keeps the administrator markup.' );
@@ -126,6 +153,34 @@ final class UnsafeRewriteTest extends PostWriteTestCase {
 		$this->assertSame( $before['post_content'], $this->raw( $post, 'post_content' ) );
 	}
 
+	public function test_backslashes_and_quotes_in_the_unsent_fields_round_trip_byte_for_byte(): void {
+		$content  = 'C:\\path\\to "file" \\\\ \\n \\\' end';
+		$excerpt  = "\\'quoted\\' \\\\\\ \"x\" \\\\";
+		$filtered = 'a\\b "c" \\d';
+		$post     = $this->rich_post(
+			array(
+				'post_content' => $content,
+				'post_excerpt' => $excerpt,
+			)
+		);
+		$this->set_filtered_content( $post, $filtered );
+		$this->act_as_agent();
+
+		$out = $this->execute_ability(
+			'steadhand/update-post',
+			array(
+				'id'    => $post,
+				'title' => 'Backslashes',
+			)
+		);
+
+		$this->assertIsArray( $out );
+		$this->assertFalse( $out['content_modified_on_save'] );
+		$this->assertSame( $content, $this->raw( $post, 'post_content' ) );
+		$this->assertSame( $excerpt, $this->raw( $post, 'post_excerpt' ) );
+		$this->assertSame( $filtered, $this->raw( $post, 'post_content_filtered' ) );
+	}
+
 	public function test_the_fields_that_are_sent_are_filtered_and_the_others_are_not_in_the_same_call(): void {
 		$post = $this->rich_post();
 		$this->act_as_agent();
@@ -140,7 +195,7 @@ final class UnsafeRewriteTest extends PostWriteTestCase {
 
 		$this->assertIsArray( $out );
 		$this->assertTrue( $out['content_modified_on_save'], 'The title the agent sent was changed by the save.' );
-		$this->assertStringNotContainsString( '<script', get_post( $post )->post_title, 'A script the agent sent in the title is stripped.' );
+		$this->assertSame( 'Hix()There', get_post( $post )->post_title, 'The script the agent sent in the title is removed, and its text kept.' );
 		$this->assertSame( self::RICH, $this->raw( $post, 'post_content' ) );
 		$this->assertSame( self::RICH_EXCERPT, $this->raw( $post, 'post_excerpt' ) );
 	}
@@ -368,17 +423,19 @@ final class UnsafeRewriteTest extends PostWriteTestCase {
 		$this->assertSame( $before, $this->save_filter_state(), 'The filters are restored after a throw.' );
 	}
 
-	public function test_a_third_party_filter_that_would_rewrite_an_unsent_field_refuses_the_call_before_any_write(): void {
+	public function test_a_third_party_save_filter_that_rewrites_an_unsent_field_does_not_refuse_the_call_or_change_the_field(): void {
 		$post = $this->rich_post( array( 'post_content' => '<p>clean</p>' ) );
 		add_filter(
 			'content_save_pre',
 			static fn( string $content ): string => $content . '<!-- added -->'
 		);
+		add_filter(
+			'excerpt_save_pre',
+			static fn( string $excerpt ): string => $excerpt . ' changed'
+		);
 		$this->act_as_agent();
-		$before    = $this->row( $post );
-		$revisions = $this->revision_ids( $post );
 
-		$result = $this->execute_ability(
+		$out = $this->execute_ability(
 			'steadhand/update-post',
 			array(
 				'id'    => $post,
@@ -386,29 +443,11 @@ final class UnsafeRewriteTest extends PostWriteTestCase {
 			)
 		);
 
-		$this->assertSame( 'steadhand_refused_unsafe_rewrite', $this->refusal_code( $result ) );
-		$this->assertSame( 409, $result->get_error_data()['status'] );
-		$this->assertSame( 'Saving this post would change its content, which this call did not send, because of a filter on this site. Nothing was changed.', $result->get_error_message() );
-		$this->assertSame( $before, $this->row( $post ) );
-		$this->assertSame( $revisions, $this->revision_ids( $post ) );
-	}
-
-	public function test_the_refusal_names_every_field_a_filter_would_change_in_the_right_words(): void {
-		$post = $this->rich_post( array( 'post_content' => '<p>clean</p>' ) );
-		foreach ( array( 'title_save_pre', 'excerpt_save_pre', 'content_save_pre' ) as $hook ) {
-			add_filter( $hook, static fn( string $value ): string => $value . ' ' );
-		}
-		$this->act_as_agent();
-
-		$two = $this->execute_ability(
-			'steadhand/update-post',
-			array(
-				'id'     => $post,
-				'status' => 'pending',
-			)
-		);
-		$this->assertSame( 'steadhand_refused_unsafe_rewrite', $this->refusal_code( $two ) );
-		$this->assertStringContainsString( 'change its title, content and excerpt, which', $two->get_error_message() );
+		$this->assertIsArray( $out, 'A filter on the unsent fields is no longer a refusal.' );
+		$this->assertSame( 'New title', get_post( $post )->post_title );
+		$this->assertSame( '<p>clean</p>', $this->raw( $post, 'post_content' ), 'The unsent content is byte-identical, whatever the filter does.' );
+		$this->assertSame( self::RICH_EXCERPT, $this->raw( $post, 'post_excerpt' ), 'The unsent excerpt is byte-identical, whatever the filter does.' );
+		$this->assertFalse( $out['content_modified_on_save'] );
 	}
 
 	public function test_core_alone_reports_nothing_for_any_stored_value(): void {
@@ -433,15 +472,159 @@ final class UnsafeRewriteTest extends PostWriteTestCase {
 			$ids[] = $this->admin_post(
 				array(
 					'post_status'  => 'draft',
-					'post_content' => $html,
-					'post_excerpt' => $html,
+					'post_content' => wp_slash( $html ),
+					'post_excerpt' => wp_slash( $html ),
 				)
 			);
 		}
 		$this->act_as_agent();
 
-		foreach ( $ids as $id ) {
-			$this->assertSame( array(), PostWriter::would_alter_unsent( $id, array( 'post_title' => 'x' ) ) );
+		foreach ( $ids as $index => $id ) {
+			$out = $this->execute_ability(
+				'steadhand/update-post',
+				array(
+					'id'    => $id,
+					'title' => 'Title only',
+				)
+			);
+
+			$this->assertIsArray( $out, "Sample $index: a title-only update succeeds." );
+			$this->assertSame( $samples[ $index ], $this->raw( $id, 'post_content' ), "Sample $index: the content is byte-identical." );
+			$this->assertSame( $samples[ $index ], $this->raw( $id, 'post_excerpt' ), "Sample $index: the excerpt is byte-identical." );
 		}
+	}
+
+	public function test_a_row_changed_by_another_writer_after_the_restore_is_reported_as_partial_and_never_as_a_success(): void {
+		$post = $this->rich_post( array( 'post_content' => '<p>clean</p>' ) );
+		$this->act_as_agent();
+		add_action(
+			'save_post',
+			static function ( int $id ) use ( $post ): void {
+				global $wpdb;
+
+				if ( $id === $post ) {
+					$wpdb->update( $wpdb->posts, array( 'post_content' => '<p>changed under us</p>' ), array( 'ID' => $post ) ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching -- Simulates code that writes the row directly after the restore.
+				}
+			},
+			999
+		);
+
+		$result = $this->execute_ability(
+			'steadhand/update-post',
+			array(
+				'id'    => $post,
+				'title' => 'New title',
+			)
+		);
+
+		$this->assertSame( 'steadhand_update_partial', $this->refusal_code( $result ) );
+		$this->assertSame( 'The post was changed, but the save did not finish as expected, so the change was at least partly applied. Check the post before you continue.', $result->get_error_message() );
+		$this->assertSame( '<p>changed under us</p>', $this->raw( $post, 'post_content' ), 'The row is left as the other writer made it.' );
+	}
+
+	public function test_no_wp_insert_post_data_callback_is_left_behind_after_a_successful_update(): void {
+		$post = $this->rich_post();
+		$this->act_as_agent();
+		$before = $this->callback_count( 'wp_insert_post_data' );
+
+		$out = $this->execute_ability(
+			'steadhand/update-post',
+			array(
+				'id'    => $post,
+				'title' => 'New',
+			)
+		);
+
+		$this->assertIsArray( $out );
+		$this->assertSame( $before, $this->callback_count( 'wp_insert_post_data' ), 'The restore filter is removed after a success.' );
+	}
+
+	public function test_no_wp_insert_post_data_callback_is_left_behind_after_a_wp_error(): void {
+		$post = $this->rich_post( array( 'post_content' => '<p>clean</p>' ) );
+		$this->act_as_agent();
+		add_action(
+			'save_post',
+			static function ( int $id ) use ( $post ): void {
+				global $wpdb;
+
+				if ( $id === $post ) {
+					$wpdb->update( $wpdb->posts, array( 'post_content' => '<p>changed</p>' ), array( 'ID' => $post ) ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching -- Makes the write end in a WP_Error.
+				}
+			},
+			999
+		);
+		$before = $this->callback_count( 'wp_insert_post_data' );
+
+		$result = $this->execute_ability(
+			'steadhand/update-post',
+			array(
+				'id'    => $post,
+				'title' => 'New',
+			)
+		);
+
+		$this->assertWPError( $result );
+		$this->assertSame( $before, $this->callback_count( 'wp_insert_post_data' ), 'The restore filter is removed after a WP_Error.' );
+	}
+
+	public function test_no_wp_insert_post_data_callback_is_left_behind_after_a_throw(): void {
+		$post = $this->rich_post();
+		$this->act_as_agent();
+		add_action(
+			'save_post',
+			static function ( int $id ) use ( $post ): void {
+				if ( $id === $post ) {
+					throw new \RuntimeException( 'listener failed' );
+				}
+			},
+			999
+		);
+		$before = $this->callback_count( 'wp_insert_post_data' );
+
+		$result = $this->execute_ability(
+			'steadhand/update-post',
+			array(
+				'id'    => $post,
+				'title' => 'New',
+			)
+		);
+
+		$this->assertWPError( $result );
+		$this->assertSame( $before, $this->callback_count( 'wp_insert_post_data' ), 'The restore filter is removed after a throw.' );
+	}
+
+	public function test_a_nested_write_of_another_post_during_an_update_is_not_given_this_posts_restored_values(): void {
+		$target = $this->rich_post();
+		$other  = $this->admin_post(
+			array(
+				'post_content' => '<p>other</p>',
+				'post_excerpt' => 'Other excerpt',
+			)
+		);
+		$this->act_as_agent();
+		$triggered = false;
+		// Runs inside the target's own sanitize step, which is before core's wp_insert_post_data filter, so the nested write of
+		// the other post happens while the target's restore is still armed.
+		add_filter(
+			'title_save_pre',
+			static function ( string $value ) use ( $other, &$triggered ): string {
+				if ( ! $triggered ) {
+					$triggered = true;
+					PostWriter::update( $other, array( 'post_content' => '<p>other</p><script>z()</script>' ) );
+				}
+
+				return $value;
+			},
+			1
+		);
+
+		$out = $this->in_write(
+			static fn(): int|\WP_Error => PostWriter::update( $target, array( 'post_title' => 'Target' ) )
+		);
+
+		$this->assertSame( $target, $out );
+		$this->assertSame( '<p>other</p>z()', $this->raw( $other, 'post_content' ), 'The other post content is filtered by its own write, not restored to the target values.' );
+		$this->assertSame( 'Other excerpt', $this->raw( $other, 'post_excerpt' ) );
+		$this->assertSame( self::RICH, $this->raw( $target, 'post_content' ), 'The target content is still byte-identical.' );
 	}
 }

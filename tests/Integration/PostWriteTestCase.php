@@ -9,6 +9,10 @@ declare( strict_types=1 );
 
 namespace Steadhand\Tests\Integration;
 
+use Closure;
+use Steadhand\Capabilities;
+use Steadhand\Log\DbLogger;
+use Steadhand\Pipeline\Pipeline;
 use Steadhand\Roles;
 
 /**
@@ -118,6 +122,31 @@ abstract class PostWriteTestCase extends LogTestCase {
 		}
 
 		$this->fail( "No ability named $name." );
+	}
+
+	/**
+	 * Runs a callback inside a real write call made by the current user, and returns what it returned. Use it to call
+	 * PostWriter directly, for a test that needs a write without the update-post checks. Exceptions the callback throws
+	 * are the test's to catch inside the callback: the pipeline would turn them into a generic error.
+	 *
+	 * @param Closure $work       The code under test.
+	 * @param string  $capability Steadhand capability the probe write requires.
+	 * @return mixed
+	 */
+	protected function in_write( Closure $work, string $capability = Capabilities::WRITE_DRAFTS ): mixed {
+		$captured          = null;
+		$probe             = new WriteProbeAbility( $capability );
+		$probe->on_execute = static function ( array $input ) use ( $work, &$captured ): array {
+			unset( $input );
+			$captured = $work();
+
+			return array();
+		};
+
+		$result = ( new Pipeline( new DbLogger() ) )->run( $probe, array() );
+		$this->assertIsArray( $result, 'The write probe must be allowed to run.' );
+
+		return $captured;
 	}
 
 	/**

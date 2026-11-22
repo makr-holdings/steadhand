@@ -24,9 +24,9 @@ defined( 'ABSPATH' ) || exit;
  *   update.
  * - post_type must be allowed (PostTypes::is_allowed()). An update to a post whose stored type is not allowed, or to a
  *   trashed post, is refused.
- * - On insert, every post-field KSES filter is in place for the write, so everything the agent sends is filtered.
- * - On update, the KSES filters are in place for the fields the call sends, and removed for the fields it does not send.
- *   See update() for why an unsent field is saved as it is stored.
+ * - The four post-field KSES filters are in place for every write, insert or update, for every field. Steadhand never
+ *   removes a KSES filter or a Global Styles filter.
+ * - On update, a field the call does not send is put back as it is stored, for that one post. See update().
  */
 final class PostWriter {
 
@@ -41,23 +41,13 @@ final class PostWriter {
 
 	/**
 	 * The save filters core adds for post fields (kses_init_filters() in wp-includes/kses.php), by post field. Each is
-	 * added at priority 10, as core adds it. Each entry is the hook and the function.
+	 * added at priority 10, as core adds it. Each entry is the hook and the function. Every write has all four in place.
 	 */
 	private const KSES_FILTERS = array(
 		'post_title'            => array( 'title_save_pre', 'wp_filter_kses' ),
 		'post_content'          => array( 'content_save_pre', 'wp_filter_post_kses' ),
 		'post_excerpt'          => array( 'excerpt_save_pre', 'wp_filter_post_kses' ),
 		'post_content_filtered' => array( 'content_filtered_save_pre', 'wp_filter_post_kses' ),
-	);
-
-	/**
-	 * Core's Global Styles filter for the two content fields. kses_init_filters() adds it at priority 9, next to the KSES
-	 * filters. It changes only a value that holds Global Styles JSON. For an unsent field it is removed with the KSES
-	 * filters, so the stored bytes are saved as they are.
-	 */
-	private const GLOBAL_STYLES_FILTERS = array(
-		'post_content'          => array( 'content_save_pre', 'wp_filter_global_styles_post', 9 ),
-		'post_content_filtered' => array( 'content_filtered_save_pre', 'wp_filter_global_styles_post', 9 ),
 	);
 
 	/**
@@ -91,13 +81,21 @@ final class PostWriter {
 	 * Updates a post as the current user. The author and type stay as they are.
 	 *
 	 * Core's wp_update_post() saves every stored field again, through the save filters, not only the fields the call sends.
-	 * So for each of the title, content, excerpt and filtered content the call does not send, the KSES filters (and the
-	 * Global Styles filter on the content fields) are removed for the save, and restored afterwards. The stored bytes are
-	 * saved unchanged. The agent cannot change those values: UPDATE_FIELDS does not allow them, and every value the agent
-	 * has ever sent was filtered when it was stored. A stored value that a non-core filter on this site would change is
-	 * refused before the write (would_alter_unsent()).
+	 * The four KSES filters are in place for the whole write, for every field, as they are for an insert. No filter is
+	 * removed for any field, so no code that runs during the save, such as a save_post listener that writes another post or
+	 * a revision insert, runs without them.
 	 *
-	 * The fields the call does send keep their KSES filters, which are added for the save where they are missing.
+	 * To keep the fields the call does not send byte-identical, update() records their stored values before the write: the
+	 * title, content, excerpt and filtered content that $fields does not name. A wp_insert_post_data filter at PHP_INT_MAX puts
+	 * each one back, after the save filters have run, and sets it slashed, because core passes $data slashed to that filter
+	 * and unslashes it afterwards. The filter acts only on this post's own update (the update flag, the ID and the stored
+	 * post type must all match), and only the first time it matches, so a nested update of the same post from a save_post
+	 * listener is filtered as usual and is not given these values again. It is removed in finally, whatever happens. The
+	 * fields the call sends are never touched by it: they keep the value core computes with the KSES filters.
+	 *
+	 * The one limit: code that changes the row after wp_insert_post_data (a filter that runs later at PHP_INT_MAX, or a direct
+	 * write to the table) can still alter an unsent field. UpdatePost reads the row again after the write and reports
+	 * steadhand_update_partial when such a field differs from what was stored before the write.
 	 *
 	 * @param int                   $post_id Post ID.
 	 * @param array<string, string> $fields  Fields to set.
@@ -109,8 +107,9 @@ final class PostWriter {
 		self::assert_writing();
 		self::assert_fields( $fields, self::UPDATE_FIELDS );
 
-		// Checked again here, immediately before the write: the post may have been trashed or changed since the caller
-		// looked at it.
+		// Read again, uncached: the post may have been trashed or changed since the caller looked at it, and the values read
+		// here are the ones put back below.
+		clean_post_cache( $post_id );
 		$post = get_post( $post_id );
 		if ( ! $post instanceof \WP_Post || 'trash' === $post->post_status || ! PostTypes::is_allowed( $post->post_type ) ) {
 			return new \WP_Error( 'steadhand_forbidden', __( 'Not found, or this agent may not access it.', 'steadhand' ), array( 'status' => 403 ) );
@@ -125,97 +124,45 @@ final class PostWriter {
 			$data['edit_date'] = true;
 		}
 
-		$sent   = array();
-		$unsent = array();
-		foreach ( self::KSES_FILTERS as $field => $pair ) {
-			if ( array_key_exists( $field, $fields ) ) {
-				$sent[] = $pair;
-				continue;
-			}
-
-			$unsent[] = $pair;
-			if ( isset( self::GLOBAL_STYLES_FILTERS[ $field ] ) ) {
-				$unsent[] = self::GLOBAL_STYLES_FILTERS[ $field ];
+		// The stored value of each field the call does not send, as the raw row holds it.
+		$keep = array();
+		foreach ( array_keys( self::KSES_FILTERS ) as $field ) {
+			if ( ! array_key_exists( $field, $fields ) ) {
+				$keep[ $field ] = (string) $post->$field;
 			}
 		}
 
-		return self::with_filters_added(
-			$sent,
-			static fn(): int|\WP_Error => self::without_filters(
-				$unsent,
-				static fn(): int|\WP_Error => wp_update_post( wp_slash( $data ), true )
-			)
-		);
-	}
+		$target_id = (int) $post->ID;
+		$post_type = (string) $post->post_type;
+		$armed     = true;
+		$restore   = static function ( array $data, array $postarr, array $unsanitized_postarr, bool $update ) use ( &$armed, $target_id, $post_type, $keep ): array {
+			unset( $unsanitized_postarr );
 
-	/**
-	 * The fields of a stored post that WordPress would store differently on its next save, because of a save filter that is
-	 * not core's KSES filter. The KSES filters are not run here: as update() does, they are removed for every field the call
-	 * does not send. So core alone reports nothing for any stored value, whatever markup it holds.
-	 *
-	 * A field that a non-core filter (for example, a plugin's content_save_pre filter) would rewrite is refused by UpdatePost
-	 * before anything is written. The title, content, excerpt and filtered content are checked, and those in $fields are not:
-	 * the call replaces them.
-	 *
-	 * @param int                   $post_id Post ID.
-	 * @param array<string, string> $fields  Fields the update will set, keyed by post field name.
-	 * @return string[] The post field names that would change, such as post_title. Empty when none would.
-	 */
-	public static function would_alter_unsent( int $post_id, array $fields ): array {
-		$post = get_post( $post_id );
-		if ( ! $post instanceof \WP_Post ) {
-			return array();
-		}
-
-		$unsent = array();
-		$strip  = array();
-		foreach ( self::KSES_FILTERS as $field => $pair ) {
-			if ( array_key_exists( $field, $fields ) ) {
-				continue;
+			if ( ! $armed || ! $update || (int) ( $postarr['ID'] ?? 0 ) !== $target_id || ( $data['post_type'] ?? null ) !== $post_type ) {
+				return $data;
 			}
 
-			$unsent[] = $field;
-			$strip[]  = $pair;
-			if ( isset( self::GLOBAL_STYLES_FILTERS[ $field ] ) ) {
-				$strip[] = self::GLOBAL_STYLES_FILTERS[ $field ];
-			}
-		}
-
-		$altered = array();
-		if ( array() === $unsent ) {
-			return $altered;
-		}
-
-		self::without_filters(
-			$strip,
-			static function () use ( $post, $unsent, &$altered ): void {
-				foreach ( $unsent as $field ) {
-					$stored = (string) $post->$field;
-					if ( self::as_saved( $field, $stored ) !== $stored ) {
-						$altered[] = $field;
-					}
+			// Once only: a nested update of this post, from a save_post listener, must not get these values again.
+			$armed = false;
+			foreach ( $keep as $field => $value ) {
+				if ( array_key_exists( $field, $data ) ) {
+					// $data is slashed here, as core passes it. Core unslashes it after this filter, so the stored bytes come back.
+					$data[ $field ] = wp_slash( $value );
 				}
 			}
-		);
 
-		return $altered;
-	}
+			return $data;
+		};
 
-	/**
-	 * What a field holds after the save filters, as sanitize_post_field() applies them on a save: the pre_ filter, then
-	 * the _save_pre filter, each given the slashed value that core passes.
-	 *
-	 * @param string $field The post field, such as post_content.
-	 * @param string $value The stored value.
-	 * @return string
-	 */
-	private static function as_saved( string $field, string $value ): string {
-		$short = str_replace( 'post_', '', $field );
-
-		// Core's own save filters, so their names are not ours to prefix.
-		$value = wp_unslash( apply_filters( "pre_{$field}", wp_slash( $value ) ) ); // phpcs:ignore WordPress.NamingConventions.PrefixAllGlobals.NonPrefixedHooknameFound,WordPress.NamingConventions.PrefixAllGlobals.DynamicHooknameFound -- Core's pre_ filter.
-
-		return (string) wp_unslash( apply_filters( "{$short}_save_pre", wp_slash( $value ) ) ); // phpcs:ignore WordPress.NamingConventions.PrefixAllGlobals.DynamicHooknameFound -- Core's _save_pre filter.
+		add_filter( 'wp_insert_post_data', $restore, PHP_INT_MAX, 4 );
+		try {
+			return self::with_filters_added(
+				array_values( self::KSES_FILTERS ),
+				static fn(): int|\WP_Error => wp_update_post( wp_slash( $data ), true )
+			);
+		} finally {
+			remove_filter( 'wp_insert_post_data', $restore, PHP_INT_MAX );
+		}
 	}
 
 	/**
@@ -279,37 +226,6 @@ final class PostWriter {
 		} finally {
 			foreach ( array_reverse( $added ) as $pair ) {
 				remove_filter( $pair[0], $pair[1] );
-			}
-		}
-	}
-
-	/**
-	 * Runs one step with the given filters removed, and afterwards restores each one that was removed, at the priority it
-	 * had. A filter that was not there is not added. Removed filters are restored in finally, so a write that throws
-	 * leaves them as they were.
-	 *
-	 * @param array<int, array{0: string, 1: string, 2?: int}> $pairs Filters to remove: hook, function and, optionally, priority.
-	 * @param callable                                         $step  The step, a write or a check.
-	 * @return mixed What the step returned.
-	 */
-	private static function without_filters( array $pairs, callable $step ): mixed {
-		$removed = array();
-		foreach ( $pairs as $pair ) {
-			do {
-				$priority = has_filter( $pair[0], $pair[1] );
-				if ( false === $priority || ! remove_filter( $pair[0], $pair[1], $priority ) ) {
-					break;
-				}
-
-				$removed[] = array( $pair[0], $pair[1], $priority );
-			} while ( true );
-		}
-
-		try {
-			return $step();
-		} finally {
-			foreach ( array_reverse( $removed ) as $item ) {
-				add_filter( $item[0], $item[1], $item[2] );
 			}
 		}
 	}

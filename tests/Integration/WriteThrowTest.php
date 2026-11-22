@@ -17,7 +17,7 @@ final class WriteThrowTest extends PostWriteTestCase {
 	/**
 	 * The text for a write whose execute() threw.
 	 */
-	private const WRITE_THROW = 'WordPress reported an error while saving, and the post has changed, so the change was at least partly applied. Check the post before you continue.';
+	private const WRITE_THROW = 'The post was changed, but the save did not finish as expected, so the change was at least partly applied. Check the post before you continue.';
 
 	public function test_a_listener_that_throws_after_the_row_is_written_is_reported_as_possibly_partly_applied(): void {
 		$post  = $this->admin_post(
