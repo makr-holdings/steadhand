@@ -32,3 +32,4 @@ require $steadhand_tests_dir . '/includes/bootstrap.php';
 
 // The test suite loads the plugin without activating it, so run the activation step once.
 \Steadhand\Roles::install();
+\Steadhand\Log\Schema::install();

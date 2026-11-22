@@ -6,6 +6,22 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). The
 
 ## [Unreleased]
 
+### Added
+- Change log, in the table `{prefix}steadhand_log`. It records every refused call (`blocked`) and every failed call (`error`) to any Steadhand ability, including refusals at the permission check. Successful calls to read-only abilities that need `steadhand_read` are not recorded, unless the `steadhand_log_read_calls` filter returns true. Other successful calls are recorded. Each entry stores the time (UTC), the agent user ID, the agent label (the name of the Application Password), the ability, the object the call named (for `get-post`, `get-blocks`, `get-rendered`, `get-post-terms` and `get-media`: the ID the caller asked for, even when the call was refused), the result, the message, any guardrail note, and the call's input. The input is redacted, keys as well as values, and stored as JSON, capped at 16 KB. Larger input is stored as a summary (its original size and its top-level key names, each redacted), not cut in the middle. Input over 256 KB is not scanned at all.
+- `steadhand/get-change-log` (`steadhand-get-change-log`), the thirteenth tool. It returns the calling agent's own entries, newest first, with paging and filters for result, ability and date. It never returns another agent's entries or any stored input. If the log cannot be read, it returns `steadhand_log_unavailable` (503) rather than an empty list.
+- Retention of 30 days. Entries are pruned when a new entry is written, at most once a day, in batches of 1,000 rows and up to 20 batches per pass. A pass that runs out of batches is continued by the next write. Nothing runs on WP-Cron, so entries older than the period remain while nothing is being written.
+- Three extension points, documented in `docs/HOOKS.md`: the filters `steadhand_log_read_calls` and `steadhand_log_retention_days`, and the action `steadhand_log_entry_stored`.
+- `change_log_ready` in the self-check of `steadhand/get-diagnostics`: whether the change-log table exists.
+- The change-log table is created on activation, and on the first request after an update when its recorded schema version is missing or different. If that create fails, the request-time retry waits an hour, and database errors from it are never printed.
+- Uninstall drops the change-log table and removes its two options, `steadhand_db_version` and `steadhand_log_last_prune`. As with the rest of uninstall, this runs only when the Composer autoloader is present.
+
+### Security
+- Refusal throttle. For each agent user, at most 60 refused calls are stored in any rolling minute. Then one marker row records that further refusals are not being logged, and nothing more is stored until the minute has passed. The refusals themselves are still returned to the caller. Errors are never throttled or dropped. The count and the insert are not locked together, so concurrent calls can store slightly more than 60.
+- Successful calls are logged unless they go to a read-only ability that needs `steadhand_read`. An ability that is marked read-only but needs a write capability is logged on success too.
+- Keys in logged input are redacted as well as values, so a token used as a key does not reach the log.
+- Logging does not fail open. On the call path, when a call's entry cannot be stored, the call returns `steadhand_log_failed` in place of its result. On the permission-check path, a refusal is returned whether or not its entry is stored, so a refused call is never allowed through.
+- Redaction of logged fields is best-effort. It uses the same helper as `get-diagnostics`, and it cannot catch a secret that no pattern recognises (see the class docblock of `Steadhand\Redactor`).
+
 ## [0.1.0] - 2026-11-22
 
 First tagged build, for internal testing. It is read-only: an agent can connect and read, and nothing in it writes to a site.

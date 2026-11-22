@@ -213,6 +213,7 @@ final class GetDiagnostics extends Ability {
 						'abilities_registered'        => self::count( 0, 100 ),
 						'server_registered'           => self::flag(),
 						'lockdown_active'             => self::flag(),
+						'change_log_ready'            => self::flag(),
 					)
 				),
 			)

@@ -81,6 +81,7 @@ if ( is_readable( STEADHAND_DIR . 'includes/Dev/Updater.php' ) ) {
 }
 
 register_activation_hook( __FILE__, array( \Steadhand\Roles::class, 'install' ) );
+register_activation_hook( __FILE__, array( \Steadhand\Log\Schema::class, 'install' ) );
 
 add_action(
 	'plugins_loaded',

@@ -13,6 +13,7 @@ use Steadhand\Abilities\PostReader;
 use Steadhand\Abilities\Registry;
 use Steadhand\Lockdown;
 use Steadhand\Log\NullLogger;
+use Steadhand\Log\Schema;
 use Steadhand\Pipeline\Pipeline;
 use Steadhand\Server;
 
@@ -48,6 +49,7 @@ final class SelfCheck {
 			'abilities_registered'        => self::abilities_registered(),
 			'server_registered'           => self::server_registered(),
 			'lockdown_active'             => self::lockdown_active(),
+			'change_log_ready'            => Schema::exists(),
 		);
 	}
 

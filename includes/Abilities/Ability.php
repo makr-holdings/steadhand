@@ -97,6 +97,23 @@ abstract class Ability {
 	}
 
 	/**
+	 * Names the object this call is about, for the change log.
+	 *
+	 * Returns '' and 0 by default, for a call that names no object. An ability that works on one object overrides it.
+	 * It is called only with validated, sanitized input.
+	 *
+	 * @param array<string, mixed> $input Validated, sanitized input.
+	 * @return array{type: string, id: int} The object type and its ID.
+	 */
+	public function log_object( array $input ): array {
+		unset( $input );
+		return array(
+			'type' => '',
+			'id'   => 0,
+		);
+	}
+
+	/**
 	 * Performs the ability. Called only after validation and authorization have passed.
 	 *
 	 * @param array<string, mixed> $input Validated input.
