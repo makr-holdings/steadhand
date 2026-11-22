@@ -188,4 +188,38 @@ final class PipelineTest extends TestCase {
 
 		$this->assertWPError( $result );
 	}
+
+	/**
+	 * Guards the is_agent() check in Pipeline::authorize(): an administrator who holds the agent role and
+	 * steadhand_connect (from the role defaults) is refused, and the message says why.
+	 */
+	public function test_administrator_who_also_holds_the_agent_role_is_refused_by_authorize(): void {
+		$admin_id = self::factory()->user->create( array( 'role' => 'administrator' ) );
+		get_userdata( $admin_id )->add_role( \Steadhand\Roles::ROLE );
+		wp_set_current_user( $admin_id );
+
+		$result = ( new Pipeline( new SpyLogger() ) )->authorize( new GetSiteInfo(), array() );
+
+		$this->assertWPError( $result );
+		$this->assertSame( 'steadhand_forbidden', $result->get_error_code() );
+		$this->assertStringContainsString( 'dedicated Steadhand agent', $result->get_error_message() );
+	}
+
+	/**
+	 * Guards the is_agent() check in Pipeline::authorize() against user-level grants on a non-agent.
+	 */
+	public function test_subscriber_with_user_level_steadhand_grants_is_refused_by_run(): void {
+		$user_id = self::factory()->user->create( array( 'role' => 'subscriber' ) );
+		get_userdata( $user_id )->add_cap( Capabilities::CONNECT, true );
+		get_userdata( $user_id )->add_cap( Capabilities::READ, true );
+		wp_set_current_user( $user_id );
+		$logger = new SpyLogger();
+
+		$result = ( new Pipeline( $logger ) )->run( new GetSiteInfo(), array() );
+
+		$this->assertWPError( $result );
+		$this->assertSame( 'steadhand_forbidden', $result->get_error_code() );
+		$this->assertCount( 1, $logger->entries );
+		$this->assertSame( Entry::RESULT_BLOCKED, $logger->entries[0]->result );
+	}
 }

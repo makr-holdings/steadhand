@@ -20,11 +20,17 @@ Steadhand declares the MCP Adapter with `Requires Plugins`. If the Abilities API
 
 ## How access works today
 
-- An agent is a WordPress user with the `steadhand_agent` role. Activating Steadhand creates the role.
+- An agent is a WordPress user whose only role is `steadhand_agent`. Activating Steadhand creates the role. A user that also holds another role, such as an administrator given the agent role, is not an agent and cannot connect.
 - The agent authenticates with a WordPress Application Password, sent with HTTP Basic auth.
 - The MCP endpoint is `/wp-json/steadhand/mcp` on the site, for example `https://example.com/wp-json/steadhand/mcp`.
-- A user must hold the `steadhand_connect` capability to reach the endpoint. Administrators do not get it automatically. Only a user deliberately set up as an agent connects.
-- **Known gap in M0:** an agent's Application Password also works against WordPress's own REST API and against the MCP Adapter's default server (`/wp-json/mcp/mcp-adapter-default-server`), with the rights of a user that has only `read`. For example, an agent can read its own user record at `/wp-json/wp/v2/users/me`, and it can list the default server's tools and reach core abilities such as `core/get-site-info`. Steadhand's own ability is not reachable through the default server. Refusing agent credentials everywhere except the Steadhand endpoint is planned for M1 (SPEC §14.1). Until then, give agent credentials only to clients you would trust with a subscriber-level login.
+- To reach the endpoint, a user must be a dedicated agent and hold the `steadhand_connect` capability. Administrators do not get that capability automatically.
+- Agent credentials work only at the Steadhand endpoint. The lockdown (SPEC §4.1, §14.1) enforces this:
+  1. Only a user whose sole role is `steadhand_agent` can connect. A user that also holds the agent role is refused at the endpoint.
+  2. A dedicated agent's Application Password works only at the Steadhand endpoint. Anywhere else the request is treated as not logged in: core REST answers 401 (`rest_not_logged_in`), `/wp-json/batch/v1` runs as anonymous, and the MCP Adapter's default server (`/wp-json/mcp/mcp-adapter-default-server`) refuses it. A user that holds the agent role and another role gets no use of its Application Passwords anywhere, the Steadhand endpoint included. Its cookie sign-in is unchanged.
+  3. Dedicated agents cannot sign in with a password (`wp-login.php`, `wp_signon()`, XML-RPC) and cannot use wp-admin (403). A user that holds the agent role and another role cannot sign in over XML-RPC with its Application Password either, though its account password and cookie sign-in still work.
+  4. The lockdown is registered even when the MCP Adapter or the Abilities API is missing. It depends only on WordPress core.
+  5. Limits: the lockdown runs only while Steadhand is active and loadable. If Steadhand is deactivated, or cannot load (PHP older than 8.1, or a source checkout without its autoloader), agent users and their Application Passwords still exist and work as ordinary low-privilege accounts on core REST and `wp-login.php` until they are revoked. Uninstalling revokes them. To take a site out of service safely, revoke the agents' Application Passwords first, or uninstall rather than deactivate.
+  6. Do not give the agent role to a person's account. That account's Application Passwords stop working everywhere (point 2).
 
 Steadhand has eight capabilities. The table shows the defaults for a new agent. Only `steadhand_connect` and `steadhand_read` have any effect today, because M0 has only one read tool. The other capabilities are stored in the role and checked by nothing yet.
 
@@ -130,7 +136,7 @@ To check the connection, ask the client to call the tool `steadhand-get-site-inf
 - `steadhand_version`.
 - `capabilities`: each of the eight Steadhand capabilities set to `true` or `false` for this agent.
 
-An administrator account without `steadhand_connect` is refused at the endpoint. The MCP tool list shows only `steadhand-get-site-info`.
+An administrator account is refused at the endpoint, with or without `steadhand_connect`, because only a dedicated agent connects. The MCP tool list shows only `steadhand-get-site-info`.
 
 ## Builds and releases
 

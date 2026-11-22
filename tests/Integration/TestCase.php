@@ -23,6 +23,53 @@ abstract class TestCase extends WP_UnitTestCase {
 	protected const TOOL  = 'steadhand-get-site-info';
 
 	/**
+	 * Clears the state that core and these tests leave behind: the application password global that
+	 * rest_get_authenticated_app_password() reads, and the filters the application password tests add.
+	 */
+	protected function tearDown(): void {
+		unset( $GLOBALS['wp_rest_application_password_uuid'], $GLOBALS['wp_rest_application_password_status'] );
+		remove_filter( 'application_password_is_api_request', '__return_true' );
+		remove_filter( 'wp_is_application_passwords_available', '__return_true' );
+		parent::tearDown();
+	}
+
+	/**
+	 * Creates an application password for a user and returns the plain password and its UUID.
+	 *
+	 * @param int    $user_id User ID.
+	 * @param string $name    Application password name.
+	 * @return array{0: string, 1: string} Plain password, UUID.
+	 */
+	protected function app_password_for( int $user_id, string $name ): array {
+		list( $password, $item ) = \WP_Application_Passwords::create_new_application_password( $user_id, array( 'name' => $name ) );
+
+		return array( $password, $item['uuid'] );
+	}
+
+	/**
+	 * Runs core's determine_current_user chain for a request that carries an application password, as core does
+	 * for a REST request. The application_password_is_api_request filter is set so that core accepts the password
+	 * in every context. The remaining refusal is therefore Lockdown's doing, and not core's.
+	 *
+	 * @param \WP_User $user     The user the password belongs to.
+	 * @param string   $password Plain application password.
+	 * @return mixed The chain's result: a user ID, or 0 when Lockdown refused.
+	 */
+	protected function authenticate_with_app_password( \WP_User $user, string $password ): mixed {
+		add_filter( 'application_password_is_api_request', '__return_true' );
+		add_filter( 'wp_is_application_passwords_available', '__return_true' );
+
+		$_SERVER['PHP_AUTH_USER'] = $user->user_login;
+		$_SERVER['PHP_AUTH_PW']   = $password;
+		try {
+			// phpcs:ignore WordPress.NamingConventions.PrefixAllGlobals.NonPrefixedHooknameFound -- Core hook.
+			return apply_filters( 'determine_current_user', false );
+		} finally {
+			unset( $_SERVER['PHP_AUTH_USER'], $_SERVER['PHP_AUTH_PW'] );
+		}
+	}
+
+	/**
 	 * Creates an agent user, optionally with user-level capability overrides.
 	 *
 	 * @param array<string, bool> $overrides Capability => grant.
@@ -100,6 +147,23 @@ abstract class TestCase extends WP_UnitTestCase {
 		);
 		$this->assertSame( 200, $response->get_status() );
 		return $this->body( $response );
+	}
+
+	/**
+	 * Sends one REST request through rest_do_request() as the current user.
+	 *
+	 * @param string                    $method HTTP method.
+	 * @param string                    $route  REST route, exactly as the request carries it.
+	 * @param array<string, mixed>|null $body   JSON body, or null for none.
+	 */
+	protected function rest( string $method, string $route, ?array $body = null ): WP_REST_Response {
+		$request = new WP_REST_Request( $method, $route );
+		if ( null !== $body ) {
+			$request->set_header( 'Content-Type', 'application/json' );
+			$request->set_body( (string) wp_json_encode( $body ) );
+		}
+
+		return rest_do_request( $request );
 	}
 
 	/**

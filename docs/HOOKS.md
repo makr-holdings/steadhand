@@ -44,7 +44,7 @@ SPEC section 9.1 says Free will provide these extension points for Pro. Their ho
 
 ## Hooks from WordPress and the MCP Adapter that Steadhand uses
 
-Steadhand attaches to these actions. Other plugins can see them too.
+Steadhand attaches to these hooks. Other plugins can see them too.
 
 | Hook | Type | Where | Purpose |
 |---|---|---|---|
@@ -53,6 +53,10 @@ Steadhand attaches to these actions. Other plugins can see them too.
 | `wp_abilities_api_categories_init` | action | `includes/Plugin.php` | Registers the `steadhand` ability category |
 | `wp_abilities_api_init` | action | `includes/Plugin.php` | Registers the Steadhand abilities |
 | `mcp_adapter_init` | action | `includes/Plugin.php` | Registers the `steadhand` MCP server, from the MCP Adapter |
+| `authenticate` | filter | `includes/Lockdown.php` (`register()`, called from `includes/Plugin.php` before the requirements check) | Refuses password sign-in by a dedicated agent, and Application Password sign-in by a user with the agent role and another role (XML-RPC), at the last priority (`PHP_INT_MAX`), so core's result is replaced |
+| `determine_current_user` | filter | `includes/Lockdown.php` | At `PHP_INT_MAX`. A dedicated agent resolves to no user unless the request is a REST request for the Steadhand endpoint, authenticated by its own Application Password. A user with the agent role and another role resolves to no user when authenticated by its own Application Password |
+| `rest_pre_dispatch` | filter | `includes/Lockdown.php` | At `PHP_INT_MIN` (was priority 0), so it runs before other plugins' callbacks on this filter. Refuses every REST route to a blocked user except the Steadhand MCP endpoint |
+| `rest_request_before_callbacks` | filter | `includes/Lockdown.php` | New. At `PHP_INT_MAX`. Second check: for every matched REST request, including `/batch/v1` sub-requests, before the route's permission callback and callback. Refuses a blocked user on every route except the Steadhand endpoint |
 
 Activation also runs Steadhand's install routine through `register_activation_hook()` in `steadhand.php`, which creates the `steadhand_agent` role.
 
@@ -78,6 +82,11 @@ These are WordPress core hooks. All of them except `wp_before_execute_ability` w
 - `wp_pre_execute_ability` (filter, 7.1+) can return its own result, which skips Steadhand's pipeline, including its log entry.
 - `wp_ability_execute_result` (filter, 7.1+) and `wp_ability_validate_output` (filter, 7.1+) can change what the agent receives after Steadhand has logged the call.
 - `wp_ability_invoked` (action, 7.1+) and `wp_before_execute_ability` (action) see the agent's raw input.
+
+These are REST filters that Steadhand's lockdown uses. The lockdown answers them, so other code can change its result only at the same priority or later:
+
+- `rest_pre_dispatch` (filter, core): Steadhand's first check runs at `PHP_INT_MIN`, before any other callback here. A callback that runs after it can cancel that check by returning null or dropping the refusal. The second check still refuses the request, because it runs later (next item).
+- `rest_request_before_callbacks` (filter, core): Steadhand's second check runs at `PHP_INT_MAX`. A callback at a lower priority runs before it and cannot lift it. A callback added at `PHP_INT_MAX` after Steadhand has booted runs after it and can undo it. This was checked with a test probe: a null-returning callback at that priority turned the refused request into a 200. Steadhand cannot prevent that, and it is one of the places where code running in the same PHP process is trusted.
 
 These are MCP Adapter filters, which run on the adapter's tool-call path:
 

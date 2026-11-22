@@ -75,17 +75,21 @@ final class Server {
 	/**
 	 * Transport gate: whether the current request may reach the Steadhand endpoint at all.
 	 *
-	 * Checks the Steadhand connect capability directly rather than current_user_can(). Administrators
-	 * do not hold Steadhand capabilities automatically, so an administrator must be granted access
-	 * explicitly through the agent role.
+	 * The user must be a dedicated agent (the agent role is its only role; see Agents::is_agent()) and must
+	 * hold the Steadhand connect capability. The capability is checked directly rather than with
+	 * current_user_can(). Administrators do not hold Steadhand capabilities automatically, so an
+	 * administrator must be granted access explicitly through the agent role.
 	 *
 	 * @param mixed $request The REST request passed by the MCP Adapter. Unused.
-	 * @return bool True when a logged-in user holds the Steadhand connect capability.
+	 * @return bool True when the current user is a dedicated agent that holds the Steadhand connect capability.
 	 */
 	public function can_connect( $request = null ): bool {
 		unset( $request );
 
+		$user = wp_get_current_user();
+
 		return is_user_logged_in()
-			&& Capabilities::user_has( wp_get_current_user(), Capabilities::CONNECT );
+			&& Agents::is_agent( $user )
+			&& Capabilities::user_has( $user, Capabilities::CONNECT );
 	}
 }
