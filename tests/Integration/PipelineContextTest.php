@@ -69,6 +69,8 @@ final class PipelineContextTest extends TestCase {
 
 	public function test_flag_is_false_after_a_run_whose_logger_fails(): void {
 		wp_set_current_user( $this->make_agent() );
+		// A successful read is not logged by default, so the logger is only reached when the read is opted in.
+		add_filter( 'steadhand_log_read_calls', '__return_true' );
 
 		$result = ( new Pipeline( new SpyLogger( false ) ) )->run( new ProbeAbility(), array() );
 

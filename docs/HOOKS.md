@@ -1,12 +1,12 @@
 # Steadhand extension points
 
-**Status:** Steadhand defines one filter so far, `steadhand_allowed_post_types` (see [Filters](#filters)). This page is the reference for the public extension points that Steadhand Pro and third-party code will build on. It fills in as each extension point is built. The plan is in [SPEC.md](SPEC.md), section 9.1.
+**Status:** Steadhand defines three filters and one action so far (see [Filters](#filters) and [Actions](#actions)). This page is the reference for the public extension points that Steadhand Pro and third-party code will build on. It fills in as each extension point is built. The plan is in [SPEC.md](SPEC.md), section 9.1.
 
 ## Current extension points
 
-Steadhand defines one filter, documented in [Filters](#filters). It defines no actions yet.
+Steadhand defines three filters, documented in [Filters](#filters), and one action, documented in [Actions](#actions).
 
-To check, run this from the repository root. It lists Steadhand's own hook, `steadhand_allowed_post_types` (see [Filters](#filters)), and the WordPress hook that Steadhand invokes, `the_content`, which `get-rendered` runs on purpose. Any other `apply_filters()` or `do_action()` call in this output is a mistake, or a new extension point that needs a section here:
+To check, run this from the repository root. It lists Steadhand's own hooks: the filters `steadhand_allowed_post_types`, `steadhand_log_read_calls` and `steadhand_log_retention_days`, and the action `steadhand_log_entry_stored`. It also lists the WordPress hook that Steadhand invokes, `the_content`, which `get-rendered` runs on purpose. Today the output has five lines: one for each of the four Steadhand hooks, and one for `the_content`. Any other `apply_filters()` or `do_action()` call in this output is a mistake, or a new extension point that needs a section here:
 
 ```
 grep -rnE "apply_filters\(|do_action\(" includes steadhand.php uninstall.php --exclude-dir=vendor
@@ -27,7 +27,7 @@ These rules apply to every extension point listed here once it exists:
 
 Chooses which post types Steadhand's post tools may use. It is applied by `Steadhand\PostTypes::allowed()`.
 
-- **Since:** 0.2.0.
+- **Since:** 0.1.0.
 - **Type:** filter.
 - **Parameter:** `$post_types` (`string[]`). The default is `array( 'post', 'page' )`.
 - **Return:** `string[]`, a list of post type names. Whatever the filter returns, Steadhand checks it before use:
@@ -58,6 +58,109 @@ add_filter(
 
 This filter is public API. The [stability policy](#stability-policy) above applies: it will not be renamed, removed or changed in signature without a deprecation notice and a [CHANGELOG.md](../CHANGELOG.md) entry. Any new parameter will go at the end.
 
+### `steadhand_log_read_calls`
+
+Turns on change-log entries for successful calls to read-only abilities that need `steadhand_read`. Those calls are not logged by default. It is applied in `Steadhand\Pipeline\Pipeline::should_log()`.
+
+- **Since:** 0.2.0.
+- **Type:** filter.
+- **Parameters:**
+  - `$log` (`bool`), the current decision. The default is `false`.
+  - `$ability_name` (`string`), the ability that was called, for example `steadhand/get-post`.
+- **Return:** `bool`. Only `true`, by strict comparison, turns logging on. `1`, `'1'`, `'yes'`, `null` and every other value leave the call unlogged.
+- **When it applies:** only to a call that succeeded, whose ability is read-only and whose capability is `steadhand_read`. Both must hold. Refused calls and failed calls are always logged, whatever this filter returns. Successful calls to any other ability are always logged too.
+- **If a callback throws:** the value counts as `false` and the call is not affected. An exception stops the callbacks on this filter that come after the one that threw, so they do not run.
+- **What it does not do:** it does not skip the input redaction or the 16 KB input cap, which apply to every entry that is stored. It does not change the refusal throttle. If the entry for a read call cannot be stored, the call returns `steadhand_log_failed` instead of its data. It is called once for each successful read call, so keep the callback cheap.
+
+The filter is evaluated on every successful read call. This example logs every successful call to `steadhand/get-post`:
+
+```php
+add_filter(
+	'steadhand_log_read_calls',
+	static function ( bool $log, string $ability_name ): bool {
+		return 'steadhand/get-post' === $ability_name ? true : $log;
+	},
+	10,
+	2
+);
+```
+
+This filter is public API. The [stability policy](#stability-policy) above applies. Any new parameter will go at the end.
+
+### `steadhand_log_retention_days`
+
+Sets how many days change-log entries are kept. It is applied in `Steadhand\Log\DbLogger` when pruning runs.
+
+- **Since:** 0.2.0.
+- **Type:** filter.
+- **Parameter:** `$days` (`int`). The default is 30.
+- **Return:** `int`, a whole number of days. Steadhand checks it before use:
+  - A string made only of digits, such as `'14'`, is converted to an integer. Any other string is not used, and the default of 30 applies.
+  - A value that is not an integer, or is less than 1, is replaced by 30. This covers zero, negative numbers, floats, booleans, `null` and arrays. A filter therefore cannot make entries expire at once, and it cannot turn pruning off by returning 0.
+  - A value above 3650 is reduced to 3650, which is ten years. Entries cannot be kept longer than that through this filter.
+  - If a callback throws, 30 is used.
+- **When it applies:** pruning runs at most once a day, and only as part of storing an entry. It deletes entries older than the number of days returned, in batches of 1,000 rows, up to 20 batches per pass. A pass that runs out of batches is continued by the next write. The batch size and the batch count cannot be changed by a filter. A new value takes effect at the next prune run, so entries older than the new value are not removed until then. While no entry is being stored, no pruning happens at all.
+- **What it does not do:** it does not schedule anything with WP-Cron, and it does not change which calls are logged. It does not delete entries on any other event.
+
+This example keeps entries for at least 90 days:
+
+```php
+add_filter(
+	'steadhand_log_retention_days',
+	static fn( int $days ): int => max( $days, 90 )
+);
+```
+
+This filter is public API. The [stability policy](#stability-policy) above applies. Any new parameter will go at the end.
+
+## Actions
+
+### `steadhand_log_entry_stored`
+
+Runs after Steadhand has stored a change-log entry. It is applied in `Steadhand\Log\DbLogger`.
+
+- **Since:** 0.2.0.
+- **Type:** action.
+- **Parameters:**
+  - `$id` (`int`), the ID of the new row.
+  - `$row` (`array<string, mixed>`), the stored row. Its keys are listed here in the order the code builds them:
+    - `id` (`int`): the same value as `$id`. It is put first.
+    - `created_at` (`string`): the time the entry was written, in UTC, as `Y-m-d H:i:s`.
+    - `user_id` (`int`): the agent user ID, or 0.
+    - `agent_label` (`string`): the name of the Application Password that made the call, or `''`.
+    - `ability` (`string`): the ability name, for example `steadhand/get-post`.
+    - `object_type` (`string`): `post`, `attachment`, or `''` when the call names no object.
+    - `object_id` (`int`): the ID the call named, or 0.
+    - `input` (`string`): the stored input as JSON text. It is a string, not an array. It is either the redacted input or a summary (`{"truncated":true,"bytes":N,"keys":[...]}`).
+    - `result` (`string`): `ok`, `blocked`, `fixed` or `error`.
+    - `message` (`string`): the message for a refused or failed call, or `''`.
+    - `guardrail_notes` (`string`): always `''` today, because no guardrail runs yet.
+    - `snapshot_id` (`int`): always 0 today.
+    - `undoable` (`int`): 0 or 1. It is an integer, not a boolean.
+    - `undone_by` (`int`): always 0 today.
+- **Values:** every string value and every key of the input is already redacted, and every string is size-capped, before it is stored. The listener receives exactly what was stored. The agent label is cut at 191 bytes. The message and guardrail note are cut at 2000 bytes. The input is capped as described above. Redaction is best-effort, so a listener must not assume that a value has no secret in it.
+- **When it runs:** once for each row that is inserted, after the insert succeeds. That includes the refusal-throttle marker row. It does not run for an entry that the throttle drops, or for an entry whose insert fails. It runs before the pruning step of the same call.
+- **If a listener throws:** the exception is caught and ignored. The entry stays stored, and the call's result is not changed. An exception also stops the listeners on this action that come after the one that threw, so they do not run for that entry.
+- **Trust:** listeners are trusted code, and they run inside the agent's request. The exception handling above contains a thrown exception only. Output that a listener prints goes into the agent's response, and a call to `exit` ends the request before the call returns. Neither is contained.
+- **What it does not do:** it cannot change or delete the row, change whether the entry is stored, or change the result that the agent receives. It has no return value. It runs synchronously inside the agent's request, so a slow listener makes that call slower.
+
+This example writes a line to the PHP error log for each refused call:
+
+```php
+add_action(
+	'steadhand_log_entry_stored',
+	static function ( int $id, array $row ): void {
+		if ( 'blocked' === $row['result'] ) {
+			error_log( sprintf( 'Steadhand refused %s (entry %d)', $row['ability'], $id ) );
+		}
+	},
+	10,
+	2
+);
+```
+
+This action is public API. The [stability policy](#stability-policy) above applies. Any new parameter will go at the end.
+
 ## Planned (not implemented)
 
 Nothing in this section exists in the code today. The names and behaviour may change until each one ships.
@@ -69,7 +172,7 @@ SPEC section 9.1 says Free will provide these extension points for Pro. Their ho
 - Tool registration.
 - Guardrail rule registration.
 - Pre-execute interception, used for approvals.
-- Log retention and export filters.
+- Log export filters.
 - Admin screen slots.
 
 ## Hooks from WordPress and the MCP Adapter that Steadhand uses

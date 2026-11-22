@@ -23,26 +23,40 @@ defined( 'ABSPATH' ) || exit;
  * Two entry points, and each logs what it sees:
  *
  * - run() is the full path: normalize, fill defaults, validate, sanitize, authorize,
- *   execute, log. Every outcome it reaches writes exactly one log entry (ok, blocked or
- *   error). If that entry cannot be written, the result is withheld and the call fails
- *   with steadhand_log_failed; logging never fails open. The ability receives only the
- *   sanitized input.
+ *   execute, log. Every outcome it reaches writes one log entry (ok, blocked or error),
+ *   except a successful read call (see should_log()). If a required entry cannot be
+ *   written, the result is withheld and the call fails with steadhand_log_failed; logging
+ *   never fails open. The ability receives only the sanitized input. Each entry carries the
+ *   input (the sanitized input once it has passed validation, otherwise the caller's raw
+ *   input) and the object the call is about (see Ability::log_object()). An object is
+ *   recorded only when the input passed validation.
  * - check() is the permission callback path. Core and the MCP Adapter call it before
  *   execute_callback, so run() is never reached for a refused call. check() prepares the
  *   input the same way run() does, logs a refusal as one blocked entry and returns the
  *   refusal even if that write fails. It logs nothing when the call is allowed, because
  *   run() logs the outcome then.
  *
+ * A successful call to a read-only ability that needs steadhand_read is not logged by default. The steadhand_log_read_calls
+ * filter turns that on. Refused and failed read calls are always logged.
+ *
  * Pipeline::is_running() is true from the start of authorize() until the end of execute()
  * in run(), and around authorize() in check(). MetaCaps uses it to limit the post
  * capability mapping to Steadhand calls (SPEC §14.1).
  *
  * Input rejected by core's own schema validation, before the permission callback runs,
- * is not logged yet. That gap closes in M2.
+ * is not logged. This gap is still open.
  *
  * Guardrails and snapshot stages are added in M2, between authorize and execute.
  */
 final class Pipeline {
+
+	/**
+	 * The object recorded for a call whose input did not pass validation, or whose ability names no object.
+	 */
+	private const NO_TARGET = array(
+		'type' => '',
+		'id'   => 0,
+	);
 
 	/**
 	 * How many Steadhand calls are inside authorize() or execute() right now. A counter, not a flag, so a nested
@@ -170,7 +184,7 @@ final class Pipeline {
 	public function check( Ability $ability, array $input ): bool|\WP_Error {
 		$prepared = $this->prepare( $ability, $input );
 		if ( is_wp_error( $prepared ) ) {
-			$this->write_entry( $ability, Entry::RESULT_BLOCKED, $prepared->get_error_message() );
+			$this->write_entry( $ability, Entry::RESULT_BLOCKED, $prepared->get_error_message(), $input );
 			return $prepared;
 		}
 
@@ -182,7 +196,7 @@ final class Pipeline {
 		}
 
 		if ( is_wp_error( $authorized ) ) {
-			$this->write_entry( $ability, Entry::RESULT_BLOCKED, $authorized->get_error_message() );
+			$this->write_entry( $ability, Entry::RESULT_BLOCKED, $authorized->get_error_message(), $prepared, $this->target_for( $ability, $prepared ) );
 			return $authorized;
 		}
 
@@ -209,8 +223,10 @@ final class Pipeline {
 
 		$prepared = $this->prepare( $ability, $input );
 		if ( is_wp_error( $prepared ) ) {
-			return $this->finish( $ability, Entry::RESULT_BLOCKED, $prepared );
+			return $this->finish( $ability, Entry::RESULT_BLOCKED, $prepared, $input );
 		}
+
+		$target = $this->target_for( $ability, $prepared );
 
 		// The context flag is set from authorize() to the end of execute(), including the log write. It is cleared on
 		// every exit path.
@@ -219,7 +235,7 @@ final class Pipeline {
 			// (c) Authorize.
 			$authorized = $this->authorize( $ability, $prepared );
 			if ( is_wp_error( $authorized ) ) {
-				return $this->finish( $ability, Entry::RESULT_BLOCKED, $authorized );
+				return $this->finish( $ability, Entry::RESULT_BLOCKED, $authorized, $prepared, $target );
 			}
 
 			// (d) Execute. Never leak an exception message to the caller.
@@ -229,16 +245,18 @@ final class Pipeline {
 				return $this->finish(
 					$ability,
 					Entry::RESULT_ERROR,
-					new \WP_Error( 'steadhand_error', __( 'The ability failed to complete. Try again, or check the site error log.', 'steadhand' ), array( 'status' => 500 ) )
+					new \WP_Error( 'steadhand_error', __( 'The ability failed to complete. Try again, or check the site error log.', 'steadhand' ), array( 'status' => 500 ) ),
+					$prepared,
+					$target
 				);
 			}
 
 			if ( is_wp_error( $output ) ) {
-				return $this->finish( $ability, Entry::RESULT_ERROR, $output );
+				return $this->finish( $ability, Entry::RESULT_ERROR, $output, $prepared, $target );
 			}
 
 			// (e) and (f) Log exactly once, then return the outcome only if it was logged.
-			return $this->finish( $ability, Entry::RESULT_OK, $output );
+			return $this->finish( $ability, Entry::RESULT_OK, $output, $prepared, $target );
 		} finally {
 			self::leave();
 		}
@@ -281,17 +299,83 @@ final class Pipeline {
 	}
 
 	/**
-	 * Writes the log entry for this outcome and returns the outcome, or a log failure.
+	 * Names the object a call is about, for the change log. An ability that throws, or that returns a malformed
+	 * object, gets the empty object, so the entry is still written. The type must be a string and the ID an integer of
+	 * at least 0; any other value is replaced by its default.
+	 *
+	 * @param Ability              $ability Ability that was called.
+	 * @param array<string, mixed> $input   Validated, sanitized input.
+	 * @return array{type: string, id: int}
+	 */
+	private function target_for( Ability $ability, array $input ): array {
+		try {
+			$target = $ability->log_object( $input );
+		} catch ( \Throwable ) {
+			return self::NO_TARGET;
+		}
+
+		$type = $target['type'] ?? '';
+		$id   = $target['id'] ?? 0;
+
+		return array(
+			'type' => is_string( $type ) ? $type : '',
+			'id'   => is_int( $id ) && $id >= 0 ? $id : 0,
+		);
+	}
+
+	/**
+	 * Whether a call to this ability only reads. Both must hold: the ability's readonly annotation is true, and it needs
+	 * the steadhand_read capability. An annotation alone does not make a call a read, so a write-capability call is never
+	 * treated as one.
+	 *
+	 * @param Ability $ability Ability that was called.
+	 * @return bool
+	 */
+	private function is_read_only( Ability $ability ): bool {
+		return true === ( $ability->annotations()['readonly'] ?? false ) && Capabilities::READ === $ability->capability();
+	}
+
+	/**
+	 * Decides whether an outcome is logged. Every outcome is, except a successful read: a successful call to an ability
+	 * that is read-only and needs steadhand_read (see is_read_only()). Such a call is logged only when the
+	 * steadhand_log_read_calls filter returns exactly true. A filter that throws counts as false.
 	 *
 	 * @param Ability $ability Ability that was called.
 	 * @param string  $result  One of the Entry::RESULT_* constants.
-	 * @param mixed   $outcome Output or WP_Error to return if the entry is stored.
+	 * @return bool
+	 */
+	private function should_log( Ability $ability, string $result ): bool {
+		if ( Entry::RESULT_OK !== $result || ! $this->is_read_only( $ability ) ) {
+			return true;
+		}
+
+		try {
+			return true === apply_filters( 'steadhand_log_read_calls', false, $ability->name() );
+		} catch ( \Throwable ) {
+			return false;
+		}
+	}
+
+	/**
+	 * Writes the log entry for this outcome and returns the outcome, or a log failure.
+	 *
+	 * When should_log() says the outcome is not logged, returns the outcome without writing anything.
+	 *
+	 * @param Ability                      $ability Ability that was called.
+	 * @param string                       $result  One of the Entry::RESULT_* constants.
+	 * @param mixed                        $outcome Output or WP_Error to return if the entry is stored.
+	 * @param array<string, mixed>         $input   The input to record (see run()).
+	 * @param array{type: string, id: int} $target  The object the call is about, or the empty target.
 	 * @return mixed $outcome, or a steadhand_log_failed WP_Error if the entry was not stored.
 	 */
-	private function finish( Ability $ability, string $result, mixed $outcome ): mixed {
+	private function finish( Ability $ability, string $result, mixed $outcome, array $input = array(), array $target = self::NO_TARGET ): mixed {
+		if ( ! $this->should_log( $ability, $result ) ) {
+			return $outcome;
+		}
+
 		$message = is_wp_error( $outcome ) ? $outcome->get_error_message() : '';
 
-		if ( ! $this->write_entry( $ability, $result, $message ) ) {
+		if ( ! $this->write_entry( $ability, $result, $message, $input, $target ) ) {
 			return new \WP_Error( 'steadhand_log_failed', __( 'The action was not performed because it could not be recorded in the change log.', 'steadhand' ), array( 'status' => 500 ) );
 		}
 
@@ -301,14 +385,25 @@ final class Pipeline {
 	/**
 	 * Builds and stores the log entry. Treats a thrown exception as a failed write.
 	 *
-	 * @param Ability $ability Ability that was called.
-	 * @param string  $result  One of the Entry::RESULT_* constants.
-	 * @param string  $message Error message, or ''.
+	 * @param Ability                      $ability Ability that was called.
+	 * @param string                       $result  One of the Entry::RESULT_* constants.
+	 * @param string                       $message Error message, or ''.
+	 * @param array<string, mixed>         $input   The input to record.
+	 * @param array{type: string, id: int} $target  The object the call is about, or the empty target.
 	 * @return bool True only if the logger reported success.
 	 */
-	private function write_entry( Ability $ability, string $result, string $message ): bool {
+	private function write_entry( Ability $ability, string $result, string $message, array $input = array(), array $target = self::NO_TARGET ): bool {
 		$user_id = get_current_user_id();
-		$entry   = new Entry( $user_id, $this->agent_label( $user_id ), $ability->name(), $result, $message );
+		$entry   = new Entry(
+			$user_id,
+			$this->agent_label( $user_id ),
+			$ability->name(),
+			$result,
+			$message,
+			$input,
+			(string) $target['type'],
+			(int) $target['id']
+		);
 
 		try {
 			return true === $this->logger->log( $entry );

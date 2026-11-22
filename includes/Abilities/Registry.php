@@ -9,6 +9,7 @@ declare( strict_types=1 );
 
 namespace Steadhand\Abilities;
 
+use Steadhand\Log\DbLogger;
 use Steadhand\Pipeline\Pipeline;
 
 defined( 'ABSPATH' ) || exit;
@@ -26,11 +27,21 @@ final class Registry {
 	public const CATEGORY = 'steadhand';
 
 	/**
+	 * The change log that GetChangeLog reads from.
+	 *
+	 * @var DbLogger
+	 */
+	private DbLogger $change_log;
+
+	/**
 	 * Constructor.
 	 *
-	 * @param Pipeline $pipeline Pipeline every ability call goes through.
+	 * @param Pipeline      $pipeline   Pipeline every ability call goes through.
+	 * @param DbLogger|null $change_log The change log for get-change-log. Defaults to a new DbLogger.
 	 */
-	public function __construct( private Pipeline $pipeline ) {}
+	public function __construct( private Pipeline $pipeline, ?DbLogger $change_log = null ) {
+		$this->change_log = $change_log ?? new DbLogger();
+	}
 
 	/**
 	 * Returns every Steadhand ability.
@@ -51,6 +62,7 @@ final class Registry {
 			new ListMedia(),
 			new GetMedia(),
 			new GetDiagnostics(),
+			new GetChangeLog( $this->change_log ),
 		);
 	}
 

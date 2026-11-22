@@ -31,7 +31,7 @@ includes/
   Diagnostics/           # get-diagnostics helpers: PHP error log reader and parser, cron, Site Health, plugins, environment, self-check
   Pipeline/              # validate → authorize → guardrails → snapshot → execute → log
   Guardrails/            # engine + rules + presets
-  Log/                   # change log, snapshots, undo
+  Log/                   # change log (Schema, DbLogger, Logger), snapshots, undo
   Admin/                 # settings screens (agents, guardrails, log)
   Dev/                   # dev-only updater (Updater.php) and its Plugin Update Checker library; excluded from the WordPress.org build
 tests/

@@ -6,7 +6,7 @@ Steadhand is an access and governance layer, not an AI plugin. It never calls an
 
 ## Status
 
-Pre-release, in a private repository. Milestone M1 (read-only tools) is complete: version 0.1.0 is tagged and installed on rickearley.me. The plugin registers twelve read-only tools. None of them changes site content. `steadhand/get-rendered` runs the site's own blocks and shortcodes to produce HTML. While it renders, Steadhand blocks outbound HTTP requests and embed-cache writes, so embeds appear as plain URLs, and it omits login/logout blocks, avatar blocks and mis-referenced navigation blocks. It also omits every avatar image wherever it is printed, so no Gravatar hash of an email address and no author-archive link appears in the output. Third-party shortcodes may still have side effects of their own:
+Pre-release, in a private repository. Milestone M1 (read-only tools) is complete: version 0.1.0 is tagged and installed on rickearley.me. The plugin registers thirteen tools, all read-only. None of them changes site content; the only thing Steadhand writes is its own change-log table. `steadhand/get-rendered` runs the site's own blocks and shortcodes to produce HTML. While it renders, Steadhand blocks outbound HTTP requests and embed-cache writes, so embeds appear as plain URLs, and it omits login/logout blocks, avatar blocks and mis-referenced navigation blocks. It also omits every avatar image wherever it is printed, so no Gravatar hash of an email address and no author-archive link appears in the output. Third-party shortcodes may still have side effects of their own:
 
 - `steadhand/get-site-info`: site name, URL, versions, active theme and this agent's capabilities.
 - `steadhand/list-posts`: a page of posts of one allowed type (`post` and `page` by default), in the statuses the agent asks for, by any author.
@@ -20,8 +20,9 @@ Pre-release, in a private repository. Milestone M1 (read-only tools) is complete
 - `steadhand/list-media`: a page of media items the media rule allows, newest first, with public URLs, alt text, captions, dimensions where stored, and the parent post ID. Trashed media is never listed.
 - `steadhand/get-media`: one media item, with its description as plain text and its generated image sizes. Server file paths and image metadata (EXIF, IPTC, GPS) are never returned.
 - `steadhand/get-diagnostics`: a read-only health report: environment, theme, active plugins, recent PHP engine errors from WordPress's own debug log, overdue cron events, the Site Health counts already stored, and Steadhand's self-check. See [What get-diagnostics returns and what it never returns](#what-get-diagnostics-returns-and-what-it-never-returns).
+- `steadhand/get-change-log`: this agent's own change-log entries, newest first. It never returns another agent's entries or any stored input. See [Change log](#change-log).
 
-The change log, guardrails, undo, the admin screens and every write tool are not built yet. Do not use it on a production site, except internal dogfooding sites set up as described in [Dev builds on internal sites](#dev-builds-on-internal-sites).
+The change log is built, with no admin screen yet (see [Change log](#change-log)). Guardrails, undo, snapshots, the admin screens and every write tool are not built yet. Do not use it on a production site, except internal dogfooding sites set up as described in [Dev builds on internal sites](#dev-builds-on-internal-sites).
 
 The plan is in [docs/SPEC.md](docs/SPEC.md). Release notes are in [CHANGELOG.md](CHANGELOG.md).
 
@@ -52,7 +53,7 @@ Steadhand has eight capabilities. The table shows the defaults for a new agent. 
 | Capability | Default for a new agent | Effect today |
 |---|---|---|
 | `steadhand_connect` | on | Lets the agent reach the endpoint |
-| `steadhand_read` | on | Lets the agent call the twelve read tools |
+| `steadhand_read` | on | Lets the agent call the thirteen read tools |
 | `steadhand_write_drafts` | on | None yet (no write tools in M1) |
 | `steadhand_publish` | off | None yet |
 | `steadhand_media` | off | None yet |
@@ -61,6 +62,24 @@ Steadhand has eight capabilities. The table shows the defaults for a new agent. 
 | `steadhand_settings` | off | None yet |
 
 There is no admin screen for agents or capabilities yet. That is planned for milestone M3.
+
+## Change log
+
+Steadhand writes its change log to one table, `{prefix}steadhand_log` (`wp_steadhand_log` with the default prefix). Activation creates it. It is also created on the first request after an update, if the table's recorded version is missing or different. If that create fails, Steadhand retries no more than once an hour.
+
+**What is recorded.** Every refused call and every failed call, to every Steadhand tool, with a result of `blocked` or `error`. Each entry has the time (UTC), the agent user, the agent label (the name of the Application Password the agent used), the tool, the post or media ID the call named (even when the call was refused), the message the agent received, and the call's input. The input is redacted on a best-effort basis, keys as well as values, and stored up to 16 KB. A larger input is stored as a summary: its size and its top-level key names. Input over 256 KB is not scanned at all.
+
+**What is not recorded.** Successful calls to read-only tools that need `steadhand_read`, unless a site turns them on with the `steadhand_log_read_calls` filter (see [docs/HOOKS.md](docs/HOOKS.md)). Calls that core rejects on their input before Steadhand's permission check runs, such as input that fails the schema check. That is a known gap.
+
+**Limits.** At most 60 refused calls per agent are stored in any rolling minute. Then one marker row is stored, and nothing more until the minute has passed. Errors are never dropped. Entries are kept 30 days. Old entries are pruned when a new entry is written, at most once a day, in batches of 1,000 rows, up to 20 batches per pass. If old entries remain after that, the next write continues the pruning. Nothing runs on a schedule, so old entries remain while nothing is written. The period can be changed with the `steadhand_log_retention_days` filter.
+
+**Who can see it.** An agent can read only its own entries, with `steadhand-get-change-log`. There is no admin screen yet; it comes in milestone M3. Until then, an administrator can read the table directly, for example:
+
+```
+wp db query "SELECT id, created_at, agent_label, ability, result, message FROM wp_steadhand_log ORDER BY id DESC LIMIT 20"
+```
+
+Use the table prefix from `wp-config.php`. The table holds every agent's entries and the stored input, so treat it as sensitive. On the local development site, run it with `npx wp-env run cli wp db query "..."`.
 
 ## Local development
 
@@ -118,7 +137,7 @@ Create an agent user and an Application Password on the local development site:
 bin/create-agent.sh [username] [label]
 ```
 
-The defaults are `steadhand-agent` for the username and `Local agent` for the label. The label becomes the name of the Application Password. Steadhand records it as the agent label. Until the change log lands in M2, the log is a placeholder that keeps nothing. The script:
+The defaults are `steadhand-agent` for the username and `Local agent` for the label. The label becomes the name of the Application Password. Steadhand records it as the agent label, in the change log. The script:
 
 1. Activates Steadhand if it is not active.
 2. Creates the user with the `steadhand_agent` role. If a user with that name already exists and holds exactly that role, the script reuses it. It refuses any other user.
@@ -151,7 +170,7 @@ To check the connection, ask the client to call the tool `steadhand-get-site-inf
 - `steadhand_version`.
 - `capabilities`: each of the eight Steadhand capabilities set to `true` or `false` for this agent.
 
-The other eleven read tools are listed below. Each takes the arguments shown and refuses any other.
+The other twelve read tools are listed below. Each takes the arguments shown and refuses any other.
 
 - `steadhand-list-posts` takes `post_type` (default `post`; must be an allowed type), `status` (one or more of `publish`, `future`, `draft`, `pending`, `private`; default all five), `search` (up to 200 characters), `after` and `before` (ISO 8601 dates), `orderby` (`date`, `modified` or `title`), `order`, `page` (1 to 10000) and `per_page` (1 to 50). It returns `items`, `total`, `total_pages`, `page` and `per_page`. Trashed and auto-draft posts are never returned.
 - `steadhand-get-post` takes `id`. It returns the post's fields and its raw `content`, exactly as stored.
@@ -166,6 +185,7 @@ The other eleven read tools are listed below. Each takes the arguments shown and
 - `steadhand-get-media` takes `id`. It returns the same fields as an item, plus `description` (the content as plain text, cut at 5000 bytes, with `truncated` set when it was cut) and `sizes` (the generated image sizes, at most 30, each with `name`, `url`, `width`, `height` and `mime_type`; empty for non-images).
 
 - `steadhand-get-diagnostics` takes `max_errors` (1 to 50, default 20). It returns seven sections, described in [What get-diagnostics returns and what it never returns](#what-get-diagnostics-returns-and-what-it-never-returns).
+- `steadhand-get-change-log` takes `page` (1 to 10000, default 1), `per_page` (1 to 50, default 20), `result` (`ok`, `blocked`, `fixed` or `error`), `ability` (a Steadhand ability name, such as `steadhand/get-post`), and `after` and `before` (ISO 8601 date-times, inclusive; a value without an offset is UTC). It returns `items`, `total`, `total_pages`, `page` and `per_page`. Each item has `id`, `created_at`, `ability`, `object_type`, `object_id`, `result`, `message`, `guardrail_notes`, `undoable` and `undone`. It returns only this agent's own entries, and never the stored input of a call.
 
 Content over 256 KB is cut, and the response then says `truncated: true` and gives the full size.
 
@@ -189,7 +209,7 @@ Refused and missing posts get the same message, so the tools cannot be used to f
 - `php_errors`: recent PHP engine errors (warnings, notices, deprecations, and fatal or parse errors), newest first, with a count for each repeated error.
 - `cron`: how many scheduled events are overdue, the most overdue hook names, and when the next event is due.
 - `site_health`: the Site Health counts that were stored the last time Site Health ran. No Site Health test is run from here.
-- `steadhand`: Steadhand's own self-check: its version, the MCP Adapter's version, and whether its ability category, abilities, MCP server and lockdown are registered.
+- `steadhand`: Steadhand's own self-check: its version, the MCP Adapter's version, whether its ability category, abilities, MCP server and lockdown are registered, and whether the change-log table exists.
 
 It never returns:
 
@@ -291,17 +311,18 @@ On the local development site, the same commands run as `npx wp-env run cli wp .
 
 ## Uninstall
 
-Deleting Steadhand runs `uninstall.php`, which removes the agent role and its access:
+Deleting Steadhand runs `uninstall.php`, which removes the agent role, its access and the change log:
 
 - Removes the `steadhand_agent` role.
 - Removes every Steadhand capability from every user.
+- Drops the change-log table, `{prefix}steadhand_log`, and removes the options `steadhand_db_version` and `steadhand_log_last_prune`.
 - Deletes the Application Passwords of users whose only role was `steadhand_agent`. Those passwords exist only for agent access. Such a user is left with no role.
 
-Users are never deleted. A user who also holds another role keeps their Application Passwords and loses only the agent role and the Steadhand capabilities. M0 creates no database tables and no options of its own.
+Users are never deleted. A user who also holds another role keeps their Application Passwords and loses only the agent role and the Steadhand capabilities.
 
-Deactivating Steadhand, as opposed to uninstalling it, keeps the role, its capabilities and the Application Passwords. Steadhand registers no deactivation hook.
+Deactivating Steadhand, as opposed to uninstalling it, keeps the role, its capabilities, the Application Passwords and the change-log table. Steadhand registers no deactivation hook.
 
-`uninstall.php` loads the Composer autoloader before it does anything. In a source checkout without `vendor/`, uninstall does nothing and the role and its grants remain. Release zips always include `vendor/`.
+`uninstall.php` loads the Composer autoloader before it does anything. In a source checkout without `vendor/`, uninstall does nothing: the role, its grants and the change-log table remain. Release zips always include `vendor/`.
 
 ## Contributing and security
 

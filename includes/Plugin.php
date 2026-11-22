@@ -48,8 +48,9 @@ final class Plugin {
 	 * Constructor. Builds the service graph; registers no hooks.
 	 */
 	public function __construct() {
-		$pipeline        = new Pipeline\Pipeline( new Log\NullLogger() );
-		$this->registry  = new Abilities\Registry( $pipeline );
+		$change_log      = new Log\DbLogger();
+		$pipeline        = new Pipeline\Pipeline( $change_log );
+		$this->registry  = new Abilities\Registry( $pipeline, $change_log );
 		$this->server    = new Server( $this->registry );
 		$this->lockdown  = new Lockdown();
 		$this->meta_caps = new MetaCaps();
@@ -90,6 +91,9 @@ final class Plugin {
 			add_action( 'admin_notices', array( $requirements, 'render_notice' ) );
 			return false;
 		}
+
+		// Before any ability is registered, so the table exists when the first call is logged.
+		Log\Schema::maybe_upgrade();
 
 		$this->meta_caps->register();
 		add_action( 'wp_abilities_api_categories_init', array( $this->registry, 'register_category' ) );

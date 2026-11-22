@@ -104,6 +104,19 @@ final class GetPost extends Ability {
 	}
 
 	/**
+	 * Names the post this call is about, for the change log.
+	 *
+	 * @param array<string, mixed> $input Validated, sanitized input.
+	 * @return array{type: string, id: int}
+	 */
+	public function log_object( array $input ): array {
+		return array(
+			'type' => 'post',
+			'id'   => (int) ( $input['id'] ?? 0 ),
+		);
+	}
+
+	/**
 	 * Returns the Steadhand capability required to call this ability.
 	 *
 	 * @return string

@@ -343,9 +343,10 @@ final class GetDiagnosticsTest extends TestCase {
 		$this->assertSame( STEADHAND_VERSION, $steadhand['version'] );
 		$this->assertSame( McpAdapter::VERSION, $steadhand['mcp_adapter_version'] );
 		$this->assertTrue( $steadhand['ability_category_registered'] );
-		$this->assertSame( 12, $steadhand['abilities_registered'] );
+		$this->assertSame( 13, $steadhand['abilities_registered'] );
 		$this->assertTrue( $steadhand['server_registered'] );
 		$this->assertTrue( $steadhand['lockdown_active'] );
+		$this->assertTrue( $steadhand['change_log_ready'] );
 	}
 
 	public function test_php_errors_is_well_formed_whatever_the_test_log_setting_is(): void {

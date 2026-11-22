@@ -24,6 +24,8 @@ final class PipelineTest extends TestCase {
 	public function test_successful_call_is_logged_with_agent_and_ability(): void {
 		$agent_id = $this->make_agent();
 		wp_set_current_user( $agent_id );
+		// A successful read is not logged by default. These tests check the entry itself, so they opt in.
+		add_filter( 'steadhand_log_read_calls', '__return_true' );
 		$logger = new SpyLogger();
 
 		$result = ( new Pipeline( $logger ) )->run( new GetSiteInfo(), array() );
@@ -47,6 +49,11 @@ final class PipelineTest extends TestCase {
 		$this->assertSame( Entry::RESULT_BLOCKED, $logger->entries[0]->result );
 	}
 
+	/**
+	 * Covers the direct path only: run() refuses the input and logs it as blocked. Over MCP, input that fails the schema
+	 * is refused by the adapter before the permission callback, and is not logged. That is the known gap pinned by
+	 * PipelineLoggingTest::test_known_gap_schema_refusals_over_mcp_are_not_logged.
+	 */
 	public function test_invalid_input_is_refused_before_authorization(): void {
 		wp_set_current_user( $this->make_agent() );
 		$logger = new SpyLogger();
@@ -60,6 +67,8 @@ final class PipelineTest extends TestCase {
 
 	public function test_result_is_withheld_when_the_log_write_fails(): void {
 		wp_set_current_user( $this->make_agent() );
+		// A successful read is not logged by default. These tests check the entry itself, so they opt in.
+		add_filter( 'steadhand_log_read_calls', '__return_true' );
 
 		$result = ( new Pipeline( new SpyLogger( false ) ) )->run( new GetSiteInfo(), array() );
 
@@ -74,7 +83,8 @@ final class PipelineTest extends TestCase {
 		// Core records the application password used for the request in this global.
 		// The name is fixed by core, so it cannot carry a Steadhand prefix.
 		$GLOBALS['wp_rest_application_password_uuid'] = $item['uuid']; // phpcs:ignore WordPress.NamingConventions.PrefixAllGlobals.NonPrefixedVariableFound -- Core's own global name; see the comment above.
-		$logger                                       = new SpyLogger();
+		add_filter( 'steadhand_log_read_calls', '__return_true' );
+		$logger = new SpyLogger();
 
 		( new Pipeline( $logger ) )->run( new GetSiteInfo(), array() );
 		unset( $GLOBALS['wp_rest_application_password_uuid'] );
@@ -84,6 +94,7 @@ final class PipelineTest extends TestCase {
 
 	public function test_registered_ability_callbacks_run_through_the_pipeline(): void {
 		wp_set_current_user( $this->make_agent() );
+		add_filter( 'steadhand_log_read_calls', '__return_true' );
 		$logger   = new SpyLogger();
 		$registry = new Registry( new Pipeline( $logger ) );
 
