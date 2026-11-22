@@ -24,9 +24,11 @@ includes/
   Plugin.php             # wiring
   Server.php             # MCP server registration + transport gate
   Capabilities.php       # Steadhand capability names and agent-role defaults
+  Redactor.php           # redaction helper: text() and value() (pure; the change log will use it too)
   Roles.php              # steadhand_agent role: install and uninstall
   Requirements.php       # dependency checks and the missing-dependency notice
   Abilities/             # one class per ability
+  Diagnostics/           # get-diagnostics helpers: PHP error log reader and parser, cron, Site Health, plugins, environment, self-check
   Pipeline/              # validate → authorize → guardrails → snapshot → execute → log
   Guardrails/            # engine + rules + presets
   Log/                   # change log, snapshots, undo

@@ -6,7 +6,7 @@ Steadhand is an access and governance layer, not an AI plugin. It never calls an
 
 ## Status
 
-Pre-release. This is milestone M1 (read tools) in progress, in a private repository. The plugin registers eleven read-only tools. None of them changes site content. `steadhand/get-rendered` runs the site's own blocks and shortcodes to produce HTML. While it renders, Steadhand blocks outbound HTTP requests and embed-cache writes, so embeds appear as plain URLs, and it omits login/logout blocks, avatar blocks and mis-referenced navigation blocks. It also omits every avatar image wherever it is printed, so no Gravatar hash of an email address and no author-archive link appears in the output. Third-party shortcodes may still have side effects of their own:
+Pre-release, in a private repository. Milestone M1 (read-only tools) is complete in this repository; its exit step, installing on rickearley.me, is tracked separately. The plugin registers twelve read-only tools. None of them changes site content. `steadhand/get-rendered` runs the site's own blocks and shortcodes to produce HTML. While it renders, Steadhand blocks outbound HTTP requests and embed-cache writes, so embeds appear as plain URLs, and it omits login/logout blocks, avatar blocks and mis-referenced navigation blocks. It also omits every avatar image wherever it is printed, so no Gravatar hash of an email address and no author-archive link appears in the output. Third-party shortcodes may still have side effects of their own:
 
 - `steadhand/get-site-info`: site name, URL, versions, active theme and this agent's capabilities.
 - `steadhand/list-posts`: a page of posts of one allowed type (`post` and `page` by default), in the statuses the agent asks for, by any author.
@@ -19,6 +19,7 @@ Pre-release. This is milestone M1 (read tools) in progress, in a private reposit
 - `steadhand/get-menu`: one classic menu as a flat list of up to 500 items in menu order, or one block navigation post with its content and block tree.
 - `steadhand/list-media`: a page of media items the media rule allows, newest first, with public URLs, alt text, captions, dimensions where stored, and the parent post ID. Trashed media is never listed.
 - `steadhand/get-media`: one media item, with its description as plain text and its generated image sizes. Server file paths and image metadata (EXIF, IPTC, GPS) are never returned.
+- `steadhand/get-diagnostics`: a read-only health report: environment, theme, active plugins, recent PHP engine errors from WordPress's own debug log, overdue cron events, the Site Health counts already stored, and Steadhand's self-check. See [What get-diagnostics returns and what it never returns](#what-get-diagnostics-returns-and-what-it-never-returns).
 
 The change log, guardrails, undo, the admin screens and every write tool are not built yet. Do not use it on a production site, except internal dogfooding sites set up as described in [Dev builds on internal sites](#dev-builds-on-internal-sites).
 
@@ -51,7 +52,7 @@ Steadhand has eight capabilities. The table shows the defaults for a new agent. 
 | Capability | Default for a new agent | Effect today |
 |---|---|---|
 | `steadhand_connect` | on | Lets the agent reach the endpoint |
-| `steadhand_read` | on | Lets the agent call the eleven read tools |
+| `steadhand_read` | on | Lets the agent call the twelve read tools |
 | `steadhand_write_drafts` | on | None yet (no write tools in M1) |
 | `steadhand_publish` | off | None yet |
 | `steadhand_media` | off | None yet |
@@ -150,7 +151,7 @@ To check the connection, ask the client to call the tool `steadhand-get-site-inf
 - `steadhand_version`.
 - `capabilities`: each of the eight Steadhand capabilities set to `true` or `false` for this agent.
 
-The other ten read tools are listed below. Each takes the arguments shown and refuses any other.
+The other eleven read tools are listed below. Each takes the arguments shown and refuses any other.
 
 - `steadhand-list-posts` takes `post_type` (default `post`; must be an allowed type), `status` (one or more of `publish`, `future`, `draft`, `pending`, `private`; default all five), `search` (up to 200 characters), `after` and `before` (ISO 8601 dates), `orderby` (`date`, `modified` or `title`), `order`, `page` (1 to 10000) and `per_page` (1 to 50). It returns `items`, `total`, `total_pages`, `page` and `per_page`. Trashed and auto-draft posts are never returned.
 - `steadhand-get-post` takes `id`. It returns the post's fields and its raw `content`, exactly as stored.
@@ -164,6 +165,8 @@ The other ten read tools are listed below. Each takes the arguments shown and re
 - `steadhand-list-media` takes `media_type` (`image`, `video`, `audio`, `application` or `text`), `search` (up to 200 characters), `parent` (0 for unattached media, or a post ID you can read; any other parent is refused with the standard message), `after` and `before` (ISO 8601 dates, checked as real calendar dates), `orderby` (`date` or `title`), `order`, `page` (1 to 10000) and `per_page` (1 to 50). It returns `items`, `total`, `total_pages`, `page` and `per_page`. Each item has `id`, `title`, `slug`, `mime_type`, `media_type`, `url`, `alt`, `caption`, `date_gmt`, `modified_gmt`, `author` (`id` and display name), `parent`, `width` and `height` (images and videos), `filesize` and `duration` (audio and video), each null when it is not stored. Titles, alt text and captions are plain text, cut at 1000 bytes. Only media the rule below allows is listed, and `total` counts only those.
 - `steadhand-get-media` takes `id`. It returns the same fields as an item, plus `description` (the content as plain text, cut at 5000 bytes, with `truncated` set when it was cut) and `sizes` (the generated image sizes, at most 30, each with `name`, `url`, `width`, `height` and `mime_type`; empty for non-images).
 
+- `steadhand-get-diagnostics` takes `max_errors` (1 to 50, default 20). It returns seven sections, described in [What get-diagnostics returns and what it never returns](#what-get-diagnostics-returns-and-what-it-never-returns).
+
 Content over 256 KB is cut, and the response then says `truncated: true` and gives the full size.
 
 **Policies in plain words.**
@@ -175,6 +178,33 @@ Content over 256 KB is cut, and the response then says `truncated: true` and giv
 - **Counts and caps.** A term's `count` and a menu's `item_count` are the numbers WordPress stores. Lists take at most 50 posts or media items, or 100 terms, per page; get-post-terms returns at most 500 terms per taxonomy; get-menu returns at most 500 items of a classic menu; list-menus returns at most 200 menus.
 
 Refused and missing posts get the same message, so the tools cannot be used to find out which IDs exist. An administrator account is refused at the endpoint, with or without `steadhand_connect`, because only a dedicated agent connects.
+
+### What get-diagnostics returns and what it never returns
+
+`steadhand-get-diagnostics` takes `max_errors` and nothing else. It returns these sections:
+
+- `environment`: the WordPress, PHP and database versions (the database kind and version only), memory and execution limits, the upload limit, whether the site is multisite, the environment type, the debug flags (whether `WP_DEBUG_LOG` is on, never where it writes), the object cache, whether the home URL is https, the timezone and the locale.
+- `theme`: the active theme's name and version, and whether it is a child or a block theme.
+- `plugins`: the active plugins by name and version, up to 100. Whether an update is already known comes from the update check WordPress stored earlier. No update check runs.
+- `php_errors`: recent PHP engine errors (warnings, notices, deprecations, and fatal or parse errors), newest first, with a count for each repeated error.
+- `cron`: how many scheduled events are overdue, the most overdue hook names, and when the next event is due.
+- `site_health`: the Site Health counts that were stored the last time Site Health ran. No Site Health test is run from here.
+- `steadhand`: Steadhand's own self-check: its version, the MCP Adapter's version, and whether its ability category, abilities, MCP server and lockdown are registered.
+
+It never returns:
+
+- **Anything except PHP engine errors from WordPress's own debug log.** That log is read only when `WP_DEBUG_LOG` is on. The server-wide PHP error log and every other file are never read, and a log file reached through a symlink, or a path outside the content folder and the WordPress root, is refused unless the site owner typed that exact path.
+- **Free-form log output and stack traces.** Lines that are not PHP engine errors, such as `error_log()` output from plugins and themes and the trace lines after a fatal error, are skipped and only counted. That output is where dumped data, SQL and credentials tend to end up.
+- **Absolute server paths.** Site directories are removed from messages, and file names are relative to the site. Any other absolute path left in a message (POSIX, Windows drive or UNC) is reduced to its file name, so `/home/x/wp-config.php` appears as `wp-config.php`. URLs are not changed.
+- **Database credentials, the table prefix or the authentication keys and salts.** In a connection error the database user and host are masked (`for user '[redacted]'@'[redacted]'`), so the account and the server name do not appear.
+- **Cron hook arguments.** A stack trace in a message is cut at its first `Stack trace:` or `#0` frame, so the arguments of the calls in it do not appear.
+- **Plugin file paths, plugin authors, or inactive plugins.**
+
+Messages are cut to 500 bytes, and the messages of uncaught exceptions are returned after redaction, so they may include text that the throwing code put there. Redaction is best-effort. Messages pass through `Steadhand\Redactor`, which masks common secret formats: authorization and cookie headers; passwords, tokens, keys and session values in key/value pairs, query strings, JSON, PHP array dumps and serialized data, with bracketed values masked whole; the WordPress session cookies; credentials in URLs (up to the last `@` before the host); the Basic, Bearer, Negotiate and Digest authentication schemes; JSON Web Tokens; private keys; password hashes; common API token formats; WordPress application passwords; long random strings; and card numbers that pass the Luhn check. Email addresses, including internationalised ones, are replaced with `[email]`. Redaction reduces the chance that a secret leaks. It cannot guarantee that none does, so a secret that no pattern recognises can still appear in a message.
+
+The redaction does **not** catch: an unlabelled short password in free text; a secret under a key in a non-Latin script, or under a key with look-alike or zero-width characters; a key whose name is URL-encoded; a password given to `curl -u user:pass`; base64 of `user:pass` without a scheme name; the short lines of a PGP private key block; a secret shorter than 32 characters with no label, prefix or known shape; and phone numbers and IP addresses, which are not masked by design.
+
+The plugin list reveals the installed plugin versions to anyone who holds an agent credential with `steadhand_read`. The tool writes nothing and makes no outbound HTTP request. Its log messages and names are site data, not instructions.
 
 ## Builds and releases
 
