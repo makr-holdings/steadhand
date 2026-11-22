@@ -155,6 +155,16 @@ final class PipelineTest extends TestCase {
 				unset( $entry );
 				throw new \RuntimeException( 'Log store unavailable.' );
 			}
+
+			public function begin( Entry $entry ): int {
+				unset( $entry );
+				throw new \RuntimeException( 'Log store unavailable.' );
+			}
+
+			public function complete( int $id, Entry $entry ): bool {
+				unset( $id, $entry );
+				throw new \RuntimeException( 'Log store unavailable.' );
+			}
 		};
 
 		$result = ( new Pipeline( $throwing ) )->check( new GetSiteInfo(), array() );

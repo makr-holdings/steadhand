@@ -63,6 +63,8 @@ final class Registry {
 			new GetMedia(),
 			new GetDiagnostics(),
 			new GetChangeLog( $this->change_log ),
+			new CreatePost(),
+			new UpdatePost(),
 		);
 	}
 
@@ -76,6 +78,22 @@ final class Registry {
 			static fn( Ability $ability ): string => $ability->name(),
 			$this->abilities()
 		);
+	}
+
+	/**
+	 * Returns the names of the abilities that can change something: every one that is not a read call.
+	 *
+	 * @return string[]
+	 */
+	public function write_names(): array {
+		$names = array();
+		foreach ( $this->abilities() as $ability ) {
+			if ( ! Pipeline::is_read_only_ability( $ability ) ) {
+				$names[] = $ability->name();
+			}
+		}
+
+		return $names;
 	}
 
 	/**

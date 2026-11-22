@@ -32,6 +32,12 @@ final class Capabilities {
 	/** Permission to manage media through Steadhand. */
 	public const MEDIA = 'steadhand_media';
 
+	/**
+	 * A name no user holds. MetaCaps answers with it when a post capability must be refused and core's check must not
+	 * pass by accident. CapabilityGuard forces it to false on every check, so no filter can grant it. Not in all().
+	 */
+	public const NO_GRANT = 'steadhand_no_grant';
+
 	/** Permission to change navigation menus through Steadhand. */
 	public const MENUS = 'steadhand_menus';
 

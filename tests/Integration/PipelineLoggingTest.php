@@ -268,7 +268,7 @@ final class PipelineLoggingTest extends LogTestCase {
 
 		$this->assertWPError( $result );
 		$this->assertSame( 'steadhand_log_failed', $result->get_error_code() );
-		$this->assertTrue( $probe->executed, 'The ability ran; only its outcome is withheld.' );
+		$this->assertFalse( $probe->executed, 'A write whose change cannot be reserved in the log must not run.' );
 	}
 
 	/**
@@ -289,7 +289,7 @@ final class PipelineLoggingTest extends LogTestCase {
 		wp_set_current_user( $this->make_agent() );
 		$probe = $this->write_probe( static fn(): array => array( 'done' => true ) );
 
-		$result = ( new Pipeline( new SpyLogger( false ) ) )->run( $probe, array() );
+		$result = ( new Pipeline( new SpyLogger( false, false ) ) )->run( $probe, array() );
 
 		$this->assertWPError( $result );
 		$this->assertSame( 'steadhand_log_failed', $result->get_error_code() );
@@ -299,7 +299,7 @@ final class PipelineLoggingTest extends LogTestCase {
 		wp_set_current_user( $this->make_agent() );
 		$probe = $this->write_probe( static fn(): \WP_Error => new \WP_Error( 'probe_failed', 'Probe failed.', array( 'status' => 500 ) ) );
 
-		$result = ( new Pipeline( new SpyLogger( false ) ) )->run( $probe, array() );
+		$result = ( new Pipeline( new SpyLogger( false, false ) ) )->run( $probe, array() );
 
 		$this->assertWPError( $result );
 		$this->assertSame( 'steadhand_log_failed', $result->get_error_code() );

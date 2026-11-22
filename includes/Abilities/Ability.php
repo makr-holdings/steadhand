@@ -73,6 +73,19 @@ abstract class Ability {
 	abstract public function capability(): string;
 
 	/**
+	 * Returns the Steadhand capabilities of which the caller must hold at least one to call this ability.
+	 *
+	 * The caller must hold at least one of these. The object check then decides which one this call actually needs. An
+	 * ability whose rule depends on the object (for example, a post that is a draft needs steadhand_write_drafts and a
+	 * published post needs steadhand_publish) overrides this. The default is capability() alone.
+	 *
+	 * @return string[] Steadhand capability names.
+	 */
+	public function capabilities_any(): array {
+		return array( $this->capability() );
+	}
+
+	/**
 	 * Checks the native WordPress capability for the specific object the input targets.
 	 *
 	 * For example, edit_post for a given post ID. Runs after the Steadhand capability check.
@@ -110,6 +123,67 @@ abstract class Ability {
 		return array(
 			'type' => '',
 			'id'   => 0,
+		);
+	}
+
+	/**
+	 * Names the object a call is about once it has run, for the change log. Only write tools that cannot name the object
+	 * before they run need this. Create is the example: the new post's ID exists only after execute().
+	 *
+	 * The default returns log_object( $input ). Called only when execute() returned an array, with the output it returned.
+	 *
+	 * @param array<string, mixed> $input  Validated, sanitized input.
+	 * @param array<string, mixed> $output The output execute() returned.
+	 * @return array{type: string, id: int} The object type and its ID.
+	 */
+	public function logged_object_after( array $input, array $output ): array {
+		unset( $output );
+		return $this->log_object( $input );
+	}
+
+	/**
+	 * The copy of the input kept in the change log. The default is the input itself. A write ability that stores a large
+	 * field (post content, for one) returns a short summary of it instead, so that the log is not a second copy of the
+	 * content. The revisions hold the content. Called with prepared input, or, when prepare() refused the call, with the
+	 * input as the caller sent it. So an implementation must accept any value in any field, and must not keep a text
+	 * field that it would replace with a digest once it is prepared.
+	 *
+	 * @param array<string, mixed> $input Prepared input, or the input as sent.
+	 * @return array<string, mixed> The input to store in the change log.
+	 */
+	public function log_input( array $input ): array {
+		return $input;
+	}
+
+	/**
+	 * Names the input fields that will be stored as post content, so that the content guardrails can check them.
+	 *
+	 * Each value is block markup the call will store. The default returns no fields, so a read ability never needs this.
+	 * A write ability that stores content must return every such field, or the content rules cannot see it.
+	 *
+	 * @param array<string, mixed> $input Validated, sanitized input.
+	 * @return array<string, string> The input fields that will be stored as post content, keyed by field name.
+	 */
+	public function guarded_content( array $input ): array {
+		unset( $input );
+		return array();
+	}
+
+	/**
+	 * Saves what is needed to undo this call. Runs after the call is authorized, guard-railed and reserved in the log,
+	 * immediately before execute().
+	 *
+	 * The default saves nothing: id 0, not undoable. Its result is checked only after it returns; a throw is an error,
+	 * and execute() does not run.
+	 *
+	 * @param array<string, mixed> $input Validated, sanitized input.
+	 * @return array{id: int, undoable: bool} The snapshot's ID (0 for none) and whether the call can be undone.
+	 */
+	public function snapshot( array $input ): array {
+		unset( $input );
+		return array(
+			'id'       => 0,
+			'undoable' => false,
 		);
 	}
 
