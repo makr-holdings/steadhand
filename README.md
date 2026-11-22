@@ -6,7 +6,15 @@ Steadhand is an access and governance layer, not an AI plugin. It never calls an
 
 ## Status
 
-Pre-release. This is milestone M0 (scaffold) in a private repository. The plugin registers one read-only tool, `steadhand/get-site-info`. The change log, guardrails, undo, the admin screens and every other tool are not built yet. Do not use it on a production site, except internal dogfooding sites set up as described in [Dev builds on internal sites](#dev-builds-on-internal-sites).
+Pre-release. This is milestone M1 (read tools) in progress, in a private repository. The plugin registers five read-only tools. None of them changes site content. `steadhand/get-rendered` runs the site's own blocks and shortcodes to produce HTML. While it renders, Steadhand blocks outbound HTTP requests and embed-cache writes, so embeds appear as plain URLs, and it omits login/logout, user-avatar and mis-referenced navigation blocks. Third-party shortcodes may still have side effects of their own:
+
+- `steadhand/get-site-info`: site name, URL, versions, active theme and this agent's capabilities.
+- `steadhand/list-posts`: a page of posts of one allowed type (`post` and `page` by default), in the statuses the agent asks for, by any author.
+- `steadhand/get-post`: one post with its raw content as stored.
+- `steadhand/get-blocks`: the block tree of one post, with an index path for each block.
+- `steadhand/get-rendered`: the HTML a post's content produces through the site's content filters, with the render limits above.
+
+The change log, guardrails, undo, the admin screens and every write tool are not built yet. Do not use it on a production site, except internal dogfooding sites set up as described in [Dev builds on internal sites](#dev-builds-on-internal-sites).
 
 The plan is in [docs/SPEC.md](docs/SPEC.md). Release notes are in [CHANGELOG.md](CHANGELOG.md).
 
@@ -32,13 +40,13 @@ Steadhand declares the MCP Adapter with `Requires Plugins`. If the Abilities API
   5. Limits: the lockdown runs only while Steadhand is active and loadable. If Steadhand is deactivated, or cannot load (PHP older than 8.1, or a source checkout without its autoloader), agent users and their Application Passwords still exist and work as ordinary low-privilege accounts on core REST and `wp-login.php` until they are revoked. Uninstalling revokes them. To take a site out of service safely, revoke the agents' Application Passwords first, or uninstall rather than deactivate.
   6. Do not give the agent role to a person's account. That account's Application Passwords stop working everywhere (point 2).
 
-Steadhand has eight capabilities. The table shows the defaults for a new agent. Only `steadhand_connect` and `steadhand_read` have any effect today, because M0 has only one read tool. The other capabilities are stored in the role and checked by nothing yet.
+Steadhand has eight capabilities. The table shows the defaults for a new agent. Only `steadhand_connect` and `steadhand_read` have any effect today, because M1 has only read tools. The other capabilities are stored in the role and checked by nothing yet.
 
 | Capability | Default for a new agent | Effect today |
 |---|---|---|
 | `steadhand_connect` | on | Lets the agent reach the endpoint |
-| `steadhand_read` | on | Lets the agent call `steadhand/get-site-info` |
-| `steadhand_write_drafts` | on | None yet (no write tools in M0) |
+| `steadhand_read` | on | Lets the agent call the five read tools |
+| `steadhand_write_drafts` | on | None yet (no write tools in M1) |
 | `steadhand_publish` | off | None yet |
 | `steadhand_media` | off | None yet |
 | `steadhand_menus` | off | None yet |
@@ -103,7 +111,7 @@ Create an agent user and an Application Password on the local development site:
 bin/create-agent.sh [username] [label]
 ```
 
-The defaults are `steadhand-agent` for the username and `Local agent` for the label. The label becomes the name of the Application Password. Steadhand records it as the agent label. In M0 the log is a placeholder that keeps nothing. The script:
+The defaults are `steadhand-agent` for the username and `Local agent` for the label. The label becomes the name of the Application Password. Steadhand records it as the agent label. Until the change log lands in M2, the log is a placeholder that keeps nothing. The script:
 
 1. Activates Steadhand if it is not active.
 2. Creates the user with the `steadhand_agent` role. If a user with that name already exists and holds exactly that role, the script reuses it. It refuses any other user.
@@ -136,7 +144,16 @@ To check the connection, ask the client to call the tool `steadhand-get-site-inf
 - `steadhand_version`.
 - `capabilities`: each of the eight Steadhand capabilities set to `true` or `false` for this agent.
 
-An administrator account is refused at the endpoint, with or without `steadhand_connect`, because only a dedicated agent connects. The MCP tool list shows only `steadhand-get-site-info`.
+The other four read tools are listed below. Each takes the arguments shown and refuses any other.
+
+- `steadhand-list-posts` takes `post_type` (default `post`; must be an allowed type), `status` (one or more of `publish`, `future`, `draft`, `pending`, `private`; default all five), `search` (up to 200 characters), `after` and `before` (ISO 8601 dates), `orderby` (`date`, `modified` or `title`), `order`, `page` (1 to 10000) and `per_page` (1 to 50). It returns `items`, `total`, `total_pages`, `page` and `per_page`. Trashed and auto-draft posts are never returned.
+- `steadhand-get-post` takes `id`. It returns the post's fields and its raw `content`, exactly as stored.
+- `steadhand-get-blocks` takes `id`. It returns the block tree. Each block has a `path` such as `0` or `1.0`, a `name`, `attrs`, `inner_html` and `inner_blocks`.
+- `steadhand-get-rendered` takes `id`. It returns the post's rendered `html` as a fragment, not a full page.
+
+Content over 256 KB is cut, and the response then says `truncated: true` and gives the full size.
+
+Refused and missing posts get the same message, so the tools cannot be used to find out which IDs exist. An administrator account is refused at the endpoint, with or without `steadhand_connect`, because only a dedicated agent connects.
 
 ## Builds and releases
 

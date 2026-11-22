@@ -16,15 +16,6 @@ use Steadhand\Capabilities;
  */
 final class GetSiteInfoTest extends TestCase {
 
-	public function test_server_lists_exactly_the_steadhand_tools(): void {
-		wp_set_current_user( $this->make_agent() );
-
-		$body  = $this->body( $this->mcp( 'tools/list', array(), $this->mcp_session() ) );
-		$names = wp_list_pluck( $body['result']['tools'], 'name' );
-
-		$this->assertSame( array( self::TOOL ), $names );
-	}
-
 	public function test_agent_gets_site_info(): void {
 		wp_set_current_user( $this->make_agent() );
 

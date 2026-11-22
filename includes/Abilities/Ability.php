@@ -83,6 +83,20 @@ abstract class Ability {
 	abstract public function authorize_object( array $input ): bool;
 
 	/**
+	 * Checks an input rule that the schema cannot express, such as a value that depends on a filter.
+	 *
+	 * Runs after the schema check and sanitization, before authorization. A refusal is logged as blocked and names the
+	 * rule. The default accepts every input that passed the schema.
+	 *
+	 * @param array<string, mixed> $input Validated, sanitized input.
+	 * @return bool|\WP_Error True to accept, or a steadhand_invalid_input WP_Error that says what is allowed.
+	 */
+	public function validate_input( array $input ): bool|\WP_Error {
+		unset( $input );
+		return true;
+	}
+
+	/**
 	 * Performs the ability. Called only after validation and authorization have passed.
 	 *
 	 * @param array<string, mixed> $input Validated input.

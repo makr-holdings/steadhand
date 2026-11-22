@@ -1,12 +1,12 @@
 # Steadhand extension points
 
-**Status: stub.** Steadhand defines no actions or filters yet. This page is the reference for the public extension points that Steadhand Pro and third-party code will build on. It fills in as each extension point is built. The plan is in [SPEC.md](SPEC.md), section 9.1.
+**Status:** Steadhand defines one filter so far, `steadhand_allowed_post_types` (see [Filters](#filters)). This page is the reference for the public extension points that Steadhand Pro and third-party code will build on. It fills in as each extension point is built. The plan is in [SPEC.md](SPEC.md), section 9.1.
 
 ## Current extension points
 
-Steadhand defines no actions or filters yet.
+Steadhand defines one filter, documented in [Filters](#filters). It defines no actions yet.
 
-To check, run this from the repository root. It should print nothing:
+To check, run this from the repository root. It lists Steadhand's own hook, `steadhand_allowed_post_types` (see [Filters](#filters)), and the WordPress hook that Steadhand invokes, `the_content`, which `get-rendered` runs on purpose. Any other `apply_filters()` or `do_action()` call in this output is a mistake, or a new extension point that needs a section here:
 
 ```
 grep -rnE "apply_filters\(|do_action\(" includes steadhand.php uninstall.php --exclude-dir=vendor
@@ -21,16 +21,45 @@ These rules apply to every extension point listed here once it exists:
 - Never rename, remove or change the signature of one without a deprecation. That means a `_deprecated_hook()` call, a [CHANGELOG.md](../CHANGELOG.md) entry and a version note on this page.
 - New parameters go at the end of the signature only.
 
+## Filters
+
+### `steadhand_allowed_post_types`
+
+Chooses which post types Steadhand's post tools may use. It is applied by `Steadhand\PostTypes::allowed()`.
+
+- **Since:** 0.2.0.
+- **Type:** filter.
+- **Parameter:** `$post_types` (`string[]`). The default is `array( 'post', 'page' )`.
+- **Return:** `string[]`, a list of post type names. Whatever the filter returns, Steadhand checks it before use:
+  - A value that is not an array falls back to the default list.
+  - A value that is not a string, is not unchanged by `sanitize_key()`, or is not a registered post type is dropped. Nothing is reported and no warning is raised.
+  - Duplicates are removed.
+- **Always removed:** `attachment`, `wp_template`, `wp_template_part`, `wp_navigation`, `wp_block`, `wp_global_styles`, `nav_menu_item` and `revision`. In addition, every built-in WordPress post type other than `post` and `page` is removed: every type registered with `_builtin` true, such as `custom_css`, `customize_changeset`, `oembed_cache`, `user_request`, `wp_font_family` and `wp_font_face`, and any built-in type added by a future WordPress release. These are removed even when the filter adds them, so no filter can bring them back. Media is handled by the media tools, and the rest are site-building and internal types. A custom post type that is not built in can still be added (see the example below).
+- **What it does not do:** adding a type only makes it eligible. A call still needs the Steadhand capability for the tool and the object-level checks, and the status rules in SPEC section 14.1 still apply.
+
+The filter is evaluated on every call, so a type must be registered before agents use it. This example adds a custom post type named `portfolio`:
+
+```php
+add_action(
+	'init',
+	static function (): void {
+		register_post_type( 'portfolio', array( 'public' => true, 'label' => 'Portfolio' ) );
+	}
+);
+
+add_filter(
+	'steadhand_allowed_post_types',
+	static function ( array $post_types ): array {
+		return array_merge( $post_types, array( 'portfolio' ) );
+	}
+);
+```
+
+This filter is public API. The [stability policy](#stability-policy) above applies: it will not be renamed, removed or changed in signature without a deprecation notice and a [CHANGELOG.md](../CHANGELOG.md) entry. Any new parameter will go at the end.
+
 ## Planned (not implemented)
 
 Nothing in this section exists in the code today. The names and behaviour may change until each one ships.
-
-### `steadhand_allowed_post_types` (filter, planned for milestone M1)
-
-Planned in SPEC sections 5 and 14.1. It would let a site owner or developer change which post types agents may read and write through the post tools.
-
-- Default: `post` and `page`.
-- Fixed exclusions. These can never be added through the filter, whatever the filter returns: `attachment`, `wp_template`, `wp_template_part`, `wp_navigation`, `wp_block`, `wp_global_styles`, `nav_menu_item` and `revision`. Media is handled by the media tools.
 
 ### Other planned extension points (no hook names yet)
 
@@ -57,10 +86,19 @@ Steadhand attaches to these hooks. Other plugins can see them too.
 | `determine_current_user` | filter | `includes/Lockdown.php` | At `PHP_INT_MAX`. A dedicated agent resolves to no user unless the request is a REST request for the Steadhand endpoint, authenticated by its own Application Password. A user with the agent role and another role resolves to no user when authenticated by its own Application Password |
 | `rest_pre_dispatch` | filter | `includes/Lockdown.php` | At `PHP_INT_MIN` (was priority 0), so it runs before other plugins' callbacks on this filter. Refuses every REST route to a blocked user except the Steadhand MCP endpoint |
 | `rest_request_before_callbacks` | filter | `includes/Lockdown.php` | New. At `PHP_INT_MAX`. Second check: for every matched REST request, including `/batch/v1` sub-requests, before the route's permission callback and callback. Refuses a blocked user on every route except the Steadhand endpoint |
+| `pre_http_request` | filter | `includes/Abilities/GetRendered.php` (`render_guards()`), during `get-rendered` only | Fails every request through the WordPress HTTP API with `steadhand_render_no_http`. Runs at `PHP_INT_MAX - 1`, so it runs after every other callback except one at `PHP_INT_MAX` |
+| `pre_oembed_result` | filter | same | Returns `false`, which core reads as "no result, do not fetch", at `PHP_INT_MAX` |
+| `embed_oembed_discover` | filter | same | Returns `false`: no link-tag discovery |
+| `add_post_metadata`, `update_post_metadata` | filter | same | Return `false` for meta keys that start with `_oembed_`, so no oEmbed cache is written |
+| `wp_insert_post_empty_content` | filter | same | Returns `true` for `oembed_cache` posts, so none is inserted or updated |
+| `post_password_required` | filter | same | Unlocks only the post being rendered, for the password check |
+| `pre_render_block` | filter | same | Omits `core/loginout`, `core/avatar` with a `userId`, and `core/navigation` with a `ref` that is not a published `wp_navigation` post. Other blocks render normally |
+
+The rows above are attached only for the duration of a `get-rendered` call. They are added at the start of the render and removed in a `finally` block, so none remains after the call, including after an error. Core's own callbacks on the same hooks are unchanged. The `pre_http_request`, `pre_oembed_result` and `embed_oembed_discover` rows stop outbound requests. The meta, `oembed_cache` and block rows stop stored data from being written or shown.
 
 Activation also runs Steadhand's install routine through `register_activation_hook()` in `steadhand.php`, which creates the `steadhand_agent` role.
 
-This table was produced with:
+This table was produced with the grep below. It lists the static calls only. The render guards in the table above are attached from a list in `GetRendered::render_guards()`, so their hook names do not appear in the grep output:
 
 ```
 grep -rnE "add_(action|filter)\(|register_(activation|deactivation|uninstall)_hook" includes steadhand.php uninstall.php --exclude-dir=vendor
@@ -75,6 +113,8 @@ Dev builds with a token only: `includes/Dev/Updater.php` hooks the library filte
 ## Hooks other code can use around Steadhand's abilities
 
 Any plugin on the site can hook these, and Steadhand cannot stop it. They run in the same PHP process as Steadhand, so code that hooks them is trusted by necessity.
+
+While `get-rendered` renders a post, the post's shortcodes and blocks, and any filters on `the_content` added by other plugins, run inside a Steadhand call. They see the same read grant the agent has, because the post capability mapping applies while the pipeline runs. The temporary filters in the table above are attached for that time. A callback added at a higher priority than Steadhand's can still undo one of them (for example, a `pre_http_request` callback at `PHP_INT_MAX` that returns `false`), and that is one of the places where code in the same PHP process is trusted.
 
 These are WordPress core hooks. All of them except `wp_before_execute_ability` were added in WordPress 7.1, so they do not exist on 6.9. `wp_before_execute_ability` exists on 6.9, and its `$ability` parameter was added in 7.1.
 

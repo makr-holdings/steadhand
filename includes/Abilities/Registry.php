@@ -38,7 +38,13 @@ final class Registry {
 	 * @return Ability[]
 	 */
 	public function abilities(): array {
-		return array( new GetSiteInfo() );
+		return array(
+			new GetSiteInfo(),
+			new ListPosts(),
+			new GetPost(),
+			new GetBlocks(),
+			new GetRendered(),
+		);
 	}
 
 	/**
