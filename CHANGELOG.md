@@ -6,6 +6,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). The
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-11-22
+
+First tagged build, for internal testing. It is read-only: an agent can connect and read, and nothing in it writes to a site.
+
 ### Added
 - Plugin bootstrap with dependency checks. If the Abilities API or the MCP Adapter is missing, Steadhand shows an admin notice and does nothing else; it never fatals.
 - `steadhand_agent` role and Steadhand capabilities, created on activation. Uninstall removes the role, strips every Steadhand capability from every user, and revokes the application passwords of users whose only role was the agent role. Users are never deleted, and users who also hold another role keep their application passwords.
@@ -23,10 +27,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). The
 - `steadhand_allowed_post_types` filter, the first public extension point, for choosing the post types the post tools may use. The default is `post` and `page`. Attachments, block templates, reusable blocks, navigation menus and revisions are always excluded, and so is every other built-in WordPress post type (for example custom CSS, privacy requests and the oEmbed cache), whatever the filter returns.
 - Agents can read allowed post types in any status except trash (drafts, pending, private, scheduled, published and password-protected posts, by any author), but only inside a Steadhand call. Outside Steadhand, WordPress's own rules are unchanged.
 - Four read-only post tools, each through the shared pipeline: `steadhand/list-posts` (paged, filtered by status, search and date; allowed post types only), `steadhand/get-post` (one post with its raw content as stored), `steadhand/get-blocks` (the block tree, with the index path each block is addressed by) and `steadhand/get-rendered` (the HTML a post renders to, through the content filters). Content over 256 KB is cut on a UTF-8 boundary and flagged. Refused, trashed and missing posts get the same message.
-
 - Four read-only term and menu tools, each through the shared pipeline: `steadhand/list-terms` (a page of the terms of one allowed taxonomy, with counts, search, parent and ordering), `steadhand/get-post-terms` (the allowed terms of one post, grouped by taxonomy, at most 500 per taxonomy, with a `total` and `truncated` for each), `steadhand/list-menus` (classic menus and block navigation menus, with the item count WordPress stores for each classic menu and theme locations) and `steadhand/get-menu` (one classic menu as a flat list of up to 500 items, or one block navigation post with its content and block tree).
 - A taxonomy is readable only when it is public, attached to an allowed post type, and not a navigation, link or theme taxonomy. The allowed post types decide the taxonomies, so the existing `steadhand_allowed_post_types` filter covers them too, and no new filter was added.
-
 - Two read-only media tools, each through the shared pipeline: `steadhand/list-media` (a page of media library items, newest first, filtered by media type, search, parent post and date range) and `steadhand/get-media` (one item, with its description as plain text and its generated image sizes). Both return public URLs and never server file paths, image metadata (EXIF, IPTC, GPS) or user email or login. Only media the media rule allows is returned: its own status must be `inherit`, and it must be unattached, attached to a post that no longer exists, or attached to a post of an allowed type that is not in the trash. Trashed media is never listed, and `total` counts only the media that is listed.
 - Media output is clamped: a title, alt text or caption is plain text cut at 1000 bytes, a MIME type longer than 100 characters is cut, and metadata that is not a finite, non-negative duration or a positive dimension or file size is returned as null. A generated size with an overlong name or MIME type, or with no usable file name, is left out. One odd attachment therefore never fails a call.
 - Media URLs are returned only for stored, relative file locations. A file with no stored location, or with an absolute server path, has an empty `url` and no sizes.
