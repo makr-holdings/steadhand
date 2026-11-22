@@ -92,8 +92,9 @@ Steadhand attaches to these hooks. Other plugins can see them too.
 | `add_post_metadata`, `update_post_metadata` | filter | same | Return `false` for meta keys that start with `_oembed_`, so no oEmbed cache is written |
 | `wp_insert_post_empty_content` | filter | same | Returns `true` for `oembed_cache` posts, so none is inserted or updated |
 | `post_password_required` | filter | same | Unlocks only the post being rendered, for the password check |
-| `pre_render_block` | filter | same | Omits `core/loginout`, and `core/navigation` with a `ref` that is not a published `wp_navigation` post. Other blocks render normally |
+| `pre_render_block` | filter | same | Omits `core/loginout`, every `core/avatar` (with or without a `userId`, since its `isLink` wrapper would name the user's author archive), and `core/navigation` with a `ref` that is not a published `wp_navigation` post. Other blocks render normally |
 | `pre_get_avatar` | filter | same | Returns an empty string, so `get_avatar()` prints nothing, whatever another plugin returns from this filter, at `PHP_INT_MAX` |
+| `get_avatar` | filter | same | Returns an empty string, at `PHP_INT_MAX`. The early `pre_get_avatar` return still passes through this filter (`pluggable.php`), so another plugin's markup here would otherwise print |
 | `pre_get_avatar_data`, `get_avatar_data` | filter | same | Set the avatar `url` to an empty string and `found_avatar` to `false`, at `PHP_INT_MAX`. `get_avatar_url()` and markup built from `get_avatar_data()` get no Gravatar URL. `get_avatar_data` is the last filter on every path |
 
 The rows above are attached only for the duration of a `get-rendered` call. They are added at the start of the render and removed in a `finally` block, so none remains after the call, including after an error. Core's own callbacks on the same hooks are unchanged. The `pre_http_request`, `pre_oembed_result` and `embed_oembed_discover` rows stop outbound requests. The meta, `oembed_cache` and block rows stop stored data from being written or shown.
