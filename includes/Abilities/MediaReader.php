@@ -331,11 +331,15 @@ final class MediaReader {
 	 * when it is relative: core would embed an absolute server path in a URL. Upload-directory errors also give ''.
 	 * Other hosts are not checked, because offloaded media legitimately uses them.
 	 *
+	 * Two guards, and each is needed on its own. Core tests the stored value for truthiness, so "0" makes it fall back to
+	 * the GUID, and a blank value is refused here before core is asked. The second guard catches a URL equal to the GUID
+	 * that does not name the stored file (see is_unverified_guid()), whatever the cause.
+	 *
 	 * @param \WP_Post $post Attachment.
 	 */
 	public static function url( \WP_Post $post ): string {
 		$file = get_post_meta( (int) $post->ID, '_wp_attached_file', true );
-		if ( ! is_string( $file ) || '' === $file || self::is_absolute_path( $file ) ) {
+		if ( ! is_string( $file ) || ! $file || '' === trim( $file ) || self::is_absolute_path( $file ) ) {
 			return '';
 		}
 
@@ -345,8 +349,42 @@ final class MediaReader {
 		}
 
 		$url = wp_get_attachment_url( (int) $post->ID );
+		if ( ! is_string( $url ) || '' === $url || self::is_unverified_guid( $url, $post, $file ) ) {
+			return '';
+		}
 
-		return is_string( $url ) ? PostReader::utf8( $url ) : '';
+		return PostReader::utf8( $url );
+	}
+
+	/**
+	 * Whether a URL core returned is the attachment's GUID while the GUID does not name the stored file.
+	 *
+	 * A fresh upload's GUID is its own file URL, so it ends with the file name and is kept. A GUID set to anything else,
+	 * such as an internal host's address, is refused. The scheme is ignored in the comparison, because core may switch
+	 * http to https on the front end.
+	 *
+	 * @param string   $url  URL from wp_get_attachment_url().
+	 * @param \WP_Post $post Attachment.
+	 * @param string   $file Stored value of _wp_attached_file.
+	 */
+	private static function is_unverified_guid( string $url, \WP_Post $post, string $file ): bool {
+		$guid = (string) get_the_guid( $post->ID );
+		if ( self::without_scheme( $url ) !== self::without_scheme( $guid ) ) {
+			return false;
+		}
+
+		$name = wp_basename( $file );
+
+		return '' === $name || ! str_ends_with( $url, $name );
+	}
+
+	/**
+	 * A URL with its http or https scheme removed, for comparison.
+	 *
+	 * @param string $url URL.
+	 */
+	private static function without_scheme( string $url ): string {
+		return (string) preg_replace( '#^https?://#i', '', $url );
 	}
 
 	/**

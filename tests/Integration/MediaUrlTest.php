@@ -19,6 +19,11 @@ final class MediaUrlTest extends MediaToolTestCase {
 	private const LIST_TOOL = 'steadhand-list-media';
 
 	/**
+	 * A GUID that names an internal host. It must never appear in any output of the media tools.
+	 */
+	private const INTERNAL_GUID = 'http://internal.corp.local/secret/x.mp4';
+
+	/**
 	 * Reads an attachment through both tools, asserts both succeed, and returns the get-media output.
 	 *
 	 * @param int $id Attachment ID.
@@ -35,6 +40,42 @@ final class MediaUrlTest extends MediaToolTestCase {
 		return $detail;
 	}
 
+	/**
+	 * The list-media output, as the tool returns it.
+	 *
+	 * @return array<string, mixed>
+	 */
+	private function list_output(): array {
+		return $this->output( self::LIST_TOOL, array( 'per_page' => 50 ) );
+	}
+
+	/**
+	 * Stores a GUID on an attachment, as a site could have it, and clears the cache so core reads the new value.
+	 *
+	 * @param int    $id   Attachment ID.
+	 * @param string $guid GUID to store.
+	 */
+	private function set_guid( int $id, string $guid ): void {
+		global $wpdb;
+		$wpdb->update( $wpdb->posts, array( 'guid' => $guid ), array( 'ID' => $id ) ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery -- Sets a GUID that the API will not store; the test needs exactly this row.
+		clean_post_cache( $id );
+	}
+
+	/**
+	 * An attachment whose stored file is $file and whose GUID is $guid.
+	 *
+	 * @param string $mime MIME type.
+	 * @param string $file Stored value of _wp_attached_file.
+	 * @param string $guid GUID to store.
+	 */
+	private function attachment_with_file_and_guid( string $mime, string $file, string $guid ): int {
+		$id = $this->plain( $mime );
+		update_post_meta( $id, '_wp_attached_file', $file );
+		$this->set_guid( $id, $guid );
+
+		return $id;
+	}
+
 	public function test_a_normal_upload_returns_its_url_and_its_size_urls(): void {
 		$this->act_as_agent();
 		$id      = $this->image();
@@ -43,6 +84,7 @@ final class MediaUrlTest extends MediaToolTestCase {
 		$detail = $this->detail( $id );
 
 		$this->assertSame( wp_get_attachment_url( $id ), $detail['url'] );
+		$this->assertSame( get_the_guid( $id ), $detail['url'], 'A fresh upload\'s GUID is its file URL, so the GUID guard must keep it.' );
 		$this->assertStringStartsWith( $uploads['baseurl'], $detail['url'] );
 		$this->assertNotEmpty( $detail['sizes'] );
 		foreach ( $detail['sizes'] as $size ) {
@@ -73,6 +115,70 @@ final class MediaUrlTest extends MediaToolTestCase {
 
 		$this->assertSame( '', $detail['url'] );
 		$this->assertSame( array(), $detail['sizes'] );
+	}
+
+	public function test_a_stored_file_of_zero_gets_an_empty_url_even_when_its_guid_is_set(): void {
+		$this->act_as_agent();
+		$id = $this->attachment_with_file_and_guid( 'video/mp4', '0', self::INTERNAL_GUID );
+		$this->assertSame( self::INTERNAL_GUID, wp_get_attachment_url( $id ), 'Control: core falls back to the GUID for "0".' );
+
+		$detail = $this->detail( $id );
+
+		$this->assertSame( '', $detail['url'] );
+		$this->assertStringNotContainsString( 'internal.corp.local', (string) wp_json_encode( array( $detail, $this->list_output() ) ) );
+	}
+
+	public function test_a_stored_file_of_one_space_gets_an_empty_url_even_when_its_guid_is_set(): void {
+		$this->act_as_agent();
+		$id      = $this->attachment_with_file_and_guid( 'video/mp4', ' ', self::INTERNAL_GUID );
+		$uploads = wp_get_upload_dir();
+		$this->assertStringStartsWith( $uploads['baseurl'], wp_get_attachment_url( $id ), 'Control: core builds an uploads URL from " ", which is neither empty nor the GUID.' );
+
+		$detail = $this->detail( $id );
+
+		$this->assertSame( '', $detail['url'] );
+		$this->assertStringNotContainsString( 'internal.corp.local', (string) wp_json_encode( array( $detail, $this->list_output() ) ) );
+	}
+
+	/**
+	 * Isolates the GUID guard: the file is real, so the falsy-value rule does not apply, and a filter makes core's URL
+	 * the GUID itself.
+	 */
+	public function test_a_real_file_whose_url_is_the_guid_and_not_the_file_is_refused(): void {
+		$this->act_as_agent();
+		$id = $this->image();
+		$this->set_guid( $id, self::INTERNAL_GUID );
+		$filter = static fn (): string => self::INTERNAL_GUID;
+		add_filter( 'wp_get_attachment_url', $filter );
+
+		try {
+			$detail = $this->detail( $id );
+		} finally {
+			remove_filter( 'wp_get_attachment_url', $filter );
+		}
+
+		$this->assertSame( '', $detail['url'] );
+		$this->assertSame( array(), $detail['sizes'] );
+		$this->assertStringNotContainsString( 'internal.corp.local', (string) wp_json_encode( array( $detail, $this->list_output() ) ) );
+	}
+
+	/**
+	 * Isolates the falsy-value rule: core is not consulted for "0", so a URL a filter supplies for it must not pass.
+	 */
+	public function test_a_falsy_stored_file_is_refused_even_when_a_filter_supplies_a_url(): void {
+		$this->act_as_agent();
+		$id     = $this->attachment_with_file_and_guid( 'video/mp4', '0', 'https://other.example/clip.mp4' );
+		$filter = static fn (): string => self::INTERNAL_GUID;
+		add_filter( 'wp_get_attachment_url', $filter );
+
+		try {
+			$detail = $this->detail( $id );
+		} finally {
+			remove_filter( 'wp_get_attachment_url', $filter );
+		}
+
+		$this->assertSame( '', $detail['url'] );
+		$this->assertStringNotContainsString( 'internal.corp.local', (string) wp_json_encode( array( $detail, $this->list_output() ) ) );
 	}
 
 	/**
