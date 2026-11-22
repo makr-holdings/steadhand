@@ -161,20 +161,11 @@ final class MetaCapsTest extends TestCase {
 
 	public function test_inside_a_call_an_agent_cannot_read_excluded_types_or_a_missing_post(): void {
 		wp_set_current_user( $this->make_agent() );
-		$attachment = wp_insert_post(
-			array(
-				'post_type'      => 'attachment',
-				'post_status'    => 'inherit',
-				'post_title'     => 'Image',
-				'post_mime_type' => 'image/jpeg',
-			)
-		);
-		$block      = $this->other_authors_post( 'wp_block', 'publish' );
-		$menu_item  = $this->other_authors_post( 'nav_menu_item', 'publish' );
-		$parent     = $this->other_authors_post( 'post', 'publish' );
-		$revision   = $this->other_authors_post( 'revision', 'inherit', array( 'post_parent' => $parent ) );
+		$block     = $this->other_authors_post( 'wp_block', 'publish' );
+		$menu_item = $this->other_authors_post( 'nav_menu_item', 'publish' );
+		$parent    = $this->other_authors_post( 'post', 'publish' );
+		$revision  = $this->other_authors_post( 'revision', 'inherit', array( 'post_parent' => $parent ) );
 
-		$this->assertFalse( $this->pipeline_can_read( $attachment ), 'attachment' );
 		$this->assertFalse( $this->pipeline_can_read( $block ), 'wp_block' );
 		$this->assertFalse( $this->pipeline_can_read( $menu_item ), 'nav_menu_item' );
 		$this->assertFalse( $this->pipeline_can_read( $revision ), 'revision' );
@@ -336,6 +327,184 @@ final class MetaCapsTest extends TestCase {
 		$this->assertFalse( user_can( $subscriber_id, 'read_post', $draft ) );
 	}
 
+
+	/**
+	 * Creates an attachment by another author, attached to $parent (0 for none), and returns its ID.
+	 *
+	 * @param int    $parent_id Parent post ID, or 0.
+	 * @param string $status Attachment status: inherit, or trash.
+	 */
+	private function other_authors_attachment( int $parent_id = 0, string $status = 'inherit' ): int {
+		$author = self::factory()->user->create( array( 'role' => 'author' ) );
+		$id     = wp_insert_attachment(
+			array(
+				'post_type'      => 'attachment',
+				'post_status'    => $status,
+				'post_title'     => 'File',
+				'post_mime_type' => 'application/pdf',
+				'post_author'    => $author,
+			),
+			false,
+			$parent_id
+		);
+		$this->assertGreaterThan( 0, $id, 'The attachment fixture must be created.' );
+
+		return (int) $id;
+	}
+
+	/**
+	 * The attachment rule (SPEC §14.1, layer two): inside a call an agent reads a non-trashed attachment whatever its
+	 * parent's status or author. Core answers outside a call, and for every other user.
+	 */
+	public function test_inside_a_call_an_agent_reads_an_attachment_of_another_authors_draft(): void {
+		$attachment = $this->other_authors_attachment( $this->other_authors_post( 'post', 'draft' ) );
+		wp_set_current_user( $this->make_agent() );
+
+		$this->assertTrue( $this->pipeline_can_read( $attachment ) );
+	}
+
+	public function test_inside_a_call_an_agent_reads_an_unattached_attachment_and_one_on_a_private_page(): void {
+		$unattached = $this->other_authors_attachment();
+		$private    = $this->other_authors_attachment( $this->other_authors_post( 'page', 'private' ) );
+		wp_set_current_user( $this->make_agent() );
+
+		$this->assertTrue( $this->pipeline_can_read( $unattached ), 'unattached' );
+		$this->assertTrue( $this->pipeline_can_read( $private ), 'attached to a private page' );
+	}
+
+	public function test_inside_a_call_an_agent_cannot_read_a_trashed_attachment(): void {
+		$trashed = $this->other_authors_attachment();
+		wp_trash_post( $trashed );
+		wp_set_current_user( $this->make_agent() );
+
+		$this->assertFalse( $this->pipeline_can_read( $trashed ) );
+	}
+
+	public function test_outside_a_call_the_same_agent_gets_core_answers_for_attachments(): void {
+		$draft_parent = $this->other_authors_attachment( $this->other_authors_post( 'post', 'draft' ) );
+		$unattached   = $this->other_authors_attachment();
+		wp_set_current_user( $this->make_agent() );
+
+		$this->assertFalse( current_user_can( 'read_post', $draft_parent ), 'Core refuses a draft parent.' );
+		$this->assertTrue( current_user_can( 'read_post', $unattached ), 'Core treats an unattached file as published.' );
+	}
+
+	public function test_inside_a_call_edit_publish_and_delete_are_never_granted_on_an_attachment(): void {
+		wp_set_current_user( $this->make_agent() );
+		$own   = $this->make_agent_owned_attachment();
+		$other = $this->other_authors_attachment( $this->other_authors_post( 'post', 'draft' ) );
+
+		foreach ( array( 'edit_post', 'publish_post', 'delete_post' ) as $cap ) {
+			foreach ( array( $own, $other ) as $attachment ) {
+				$this->assertFalse( $this->pipeline_can( $cap, $attachment ), "$cap must not be granted on attachment $attachment." );
+			}
+		}
+	}
+
+	public function test_outside_a_call_edit_publish_and_delete_are_never_granted_on_an_attachment(): void {
+		wp_set_current_user( $this->make_agent() );
+		$own   = $this->make_agent_owned_attachment();
+		$other = $this->other_authors_attachment();
+
+		foreach ( array( 'edit_post', 'publish_post', 'delete_post' ) as $cap ) {
+			foreach ( array( $own, $other ) as $attachment ) {
+				$this->assertFalse( current_user_can( $cap, $attachment ), "$cap must not be granted outside a call (attachment $attachment)." );
+			}
+		}
+	}
+
+	public function test_inside_a_call_an_agent_without_steadhand_read_is_refused_an_attachment(): void {
+		$attachment = $this->other_authors_attachment( $this->other_authors_post( 'post', 'draft' ) );
+		wp_set_current_user( $this->make_agent( array( Capabilities::READ => false ) ) );
+
+		$result = $this->run_probe(
+			static fn( array $input ): array => array( 'can' => current_user_can( 'read_post', $input['post_id'] ) ),
+			array( 'post_id' => $attachment ),
+			Capabilities::CONNECT
+		);
+
+		$this->assertFalse( $result['can'] );
+	}
+
+	public function test_inside_a_call_an_administrator_and_a_subscriber_get_core_answers_for_attachments(): void {
+		$admin_id      = self::factory()->user->create( array( 'role' => 'administrator' ) );
+		$subscriber_id = self::factory()->user->create( array( 'role' => 'subscriber' ) );
+		$draft_parent  = $this->other_authors_attachment( $this->other_authors_post( 'post', 'draft' ) );
+		$unattached    = $this->other_authors_attachment();
+		wp_set_current_user( $this->make_agent() );
+
+		foreach ( array( $draft_parent, $unattached ) as $attachment ) {
+			$admin_inside      = $this->as_user_inside_a_call( $admin_id, static fn(): bool => current_user_can( 'read_post', $attachment ) );
+			$subscriber_inside = $this->as_user_inside_a_call( $subscriber_id, static fn(): bool => current_user_can( 'read_post', $attachment ) );
+
+			$this->assertSame( user_can( $admin_id, 'read_post', $attachment ), $admin_inside, "admin, attachment $attachment" );
+			$this->assertSame( user_can( $subscriber_id, 'read_post', $attachment ), $subscriber_inside, "subscriber, attachment $attachment" );
+		}
+		$this->assertFalse( $this->as_user_inside_a_call( $subscriber_id, static fn(): bool => current_user_can( 'read_post', $draft_parent ) ) );
+	}
+
+	public function test_inside_a_call_an_agent_is_refused_an_attachment_whose_parent_the_rule_excludes(): void {
+		register_post_type( self::CUSTOM, array( 'public' => false ) );
+		wp_set_current_user( $this->make_agent() );
+		$trashed = $this->other_authors_post( 'post', 'publish' );
+		wp_trash_post( $trashed );
+
+		$cases = array(
+			'private parent of a registered type that is not allowed' => $this->other_authors_post( self::CUSTOM, 'private' ),
+			'wp_block parent'            => $this->other_authors_post( 'wp_block', 'publish' ),
+			'draft wp_navigation parent' => $this->other_authors_post( 'wp_navigation', 'draft' ),
+			'trashed parent'             => $trashed,
+		);
+		foreach ( $cases as $case => $parent ) {
+			$this->assertFalse( $this->pipeline_can_read( $this->other_authors_attachment( $parent ) ), $case );
+		}
+	}
+
+	public function test_inside_a_call_an_attachment_with_its_own_status_private_is_refused(): void {
+		wp_set_current_user( $this->make_agent() );
+		$attachment = $this->other_authors_attachment();
+		wp_update_post(
+			array(
+				'ID'          => $attachment,
+				'post_status' => 'private',
+			)
+		);
+
+		$this->assertFalse( $this->pipeline_can_read( $attachment ) );
+	}
+
+	public function test_inside_a_call_an_attachment_whose_parent_is_missing_or_of_an_allowed_type_is_readable(): void {
+		register_post_type( self::CUSTOM, array( 'public' => false ) );
+		add_filter(
+			'steadhand_allowed_post_types',
+			static fn( array $types ): array => array_merge( $types, array( self::CUSTOM ) )
+		);
+		$missing        = $this->other_authors_attachment();
+		$allowed_parent = $this->other_authors_attachment( $this->other_authors_post( self::CUSTOM, 'private' ) );
+		global $wpdb;
+		$wpdb->update( $wpdb->posts, array( 'post_parent' => 999999999 ), array( 'ID' => $missing ) ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery -- Stores a parent ID that no post has, which the API cannot do.
+		clean_post_cache( $missing );
+		wp_set_current_user( $this->make_agent() );
+
+		$this->assertTrue( $this->pipeline_can_read( $missing ), 'a parent that no longer exists' );
+		$this->assertTrue( $this->pipeline_can_read( $allowed_parent ), 'a parent of an allowed type' );
+	}
+
+	/**
+	 * Creates an attachment authored by the current agent user.
+	 */
+	private function make_agent_owned_attachment(): int {
+		return (int) wp_insert_attachment(
+			array(
+				'post_type'      => 'attachment',
+				'post_status'    => 'inherit',
+				'post_title'     => 'Own file',
+				'post_mime_type' => 'application/pdf',
+				'post_author'    => get_current_user_id(),
+			),
+			false
+		);
+	}
 
 	/**
 	 * Guards Plugin::boot(): the MetaCaps filter is registered when the requirements are met. The bootstrap runs
