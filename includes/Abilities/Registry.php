@@ -63,6 +63,8 @@ final class Registry {
 			new GetMedia(),
 			new GetDiagnostics(),
 			new GetChangeLog( $this->change_log ),
+			new CreatePost(),
+			new UpdatePost(),
 		);
 	}
 

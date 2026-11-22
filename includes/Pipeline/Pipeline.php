@@ -245,15 +245,41 @@ final class Pipeline {
 			);
 		}
 
-		$capability = $ability->capability();
-		if ( ! Capabilities::user_has( $user, $capability ) ) {
+		$capabilities = $this->capabilities_for( $ability );
+		$held         = array_filter(
+			$capabilities,
+			static fn( string $capability ): bool => Capabilities::user_has( $user, $capability )
+		);
+		if ( array() === $held ) {
 			return $this->forbidden(
-				/* translators: 1: Steadhand capability name, e.g. steadhand_read. 2: Ability name, e.g. steadhand/get-site-info. */
-				sprintf( __( 'This user needs the %1$s capability to call %2$s.', 'steadhand' ), $capability, $ability->name() )
+				/* translators: 1: Steadhand capability names joined by " or ", e.g. steadhand_read. 2: Ability name, e.g. steadhand/get-site-info. */
+				sprintf( __( 'This user needs the %1$s capability to call %2$s.', 'steadhand' ), implode( ' or ', $capabilities ), $ability->name() )
 			);
 		}
 
 		return true;
+	}
+
+	/**
+	 * The Steadhand capabilities that let a caller reach an ability's object check: the ability's capabilities_any(), with
+	 * every name that is not a known Steadhand capability removed. An empty result, or a result that is not a list, falls
+	 * back to the ability's capability().
+	 *
+	 * @param Ability $ability Ability being called.
+	 * @return string[] Non-empty list of Steadhand capability names.
+	 */
+	private function capabilities_for( Ability $ability ): array {
+		$declared = $ability->capabilities_any();
+		$known    = array();
+		if ( is_array( $declared ) ) {
+			foreach ( $declared as $capability ) {
+				if ( is_string( $capability ) && in_array( $capability, Capabilities::all(), true ) && ! in_array( $capability, $known, true ) ) {
+					$known[] = $capability;
+				}
+			}
+		}
+
+		return array() === $known ? array( $ability->capability() ) : $known;
 	}
 
 	/**

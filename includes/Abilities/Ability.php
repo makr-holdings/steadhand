@@ -73,6 +73,19 @@ abstract class Ability {
 	abstract public function capability(): string;
 
 	/**
+	 * Returns the Steadhand capabilities of which the caller must hold at least one to call this ability.
+	 *
+	 * The caller must hold at least one of these. The object check then decides which one this call actually needs. An
+	 * ability whose rule depends on the object (for example, a post that is a draft needs steadhand_write_drafts and a
+	 * published post needs steadhand_publish) overrides this. The default is capability() alone.
+	 *
+	 * @return string[] Steadhand capability names.
+	 */
+	public function capabilities_any(): array {
+		return array( $this->capability() );
+	}
+
+	/**
 	 * Checks the native WordPress capability for the specific object the input targets.
 	 *
 	 * For example, edit_post for a given post ID. Runs after the Steadhand capability check.

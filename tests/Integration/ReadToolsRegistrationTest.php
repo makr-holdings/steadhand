@@ -51,14 +51,48 @@ final class ReadToolsRegistrationTest extends TestCase {
 		'steadhand-get-change-log',
 	);
 
-	public function test_server_lists_exactly_the_thirteen_read_tools(): void {
+	/**
+	 * The two write tools, which come after the read tools in the registry.
+	 */
+	private const WRITE_ABILITIES = array(
+		'steadhand/create-post',
+		'steadhand/update-post',
+	);
+
+	private const WRITE_TOOLS = array(
+		'steadhand-create-post',
+		'steadhand-update-post',
+	);
+
+	/**
+	 * Every ability the registry holds, read and write. The sweeps below that do not depend on the annotations use it.
+	 */
+	private const ALL_ABILITIES = array(
+		'steadhand/get-site-info',
+		'steadhand/list-posts',
+		'steadhand/get-post',
+		'steadhand/get-blocks',
+		'steadhand/get-rendered',
+		'steadhand/list-terms',
+		'steadhand/get-post-terms',
+		'steadhand/list-menus',
+		'steadhand/get-menu',
+		'steadhand/list-media',
+		'steadhand/get-media',
+		'steadhand/get-diagnostics',
+		'steadhand/get-change-log',
+		'steadhand/create-post',
+		'steadhand/update-post',
+	);
+
+	public function test_server_lists_exactly_the_read_and_write_tools(): void {
 		wp_set_current_user( $this->make_agent() );
 
 		$body  = $this->body( $this->mcp( 'tools/list', array(), $this->mcp_session() ) );
 		$names = wp_list_pluck( $body['result']['tools'], 'name' );
 
 		sort( $names );
-		$expected = self::TOOLS;
+		$expected = array_merge( self::TOOLS, self::WRITE_TOOLS );
 		sort( $expected );
 		$this->assertSame( $expected, $names );
 	}
@@ -66,7 +100,17 @@ final class ReadToolsRegistrationTest extends TestCase {
 	public function test_registry_lists_the_abilities_in_the_documented_order(): void {
 		$registry = new Registry( new Pipeline( new NullLogger() ) );
 
-		$this->assertSame( self::ABILITIES, $registry->names() );
+		$this->assertSame( array_merge( self::ABILITIES, self::WRITE_ABILITIES ), $registry->names() );
+	}
+
+	public function test_every_write_tool_is_not_readonly_and_the_update_is_destructive(): void {
+		foreach ( self::WRITE_ABILITIES as $name ) {
+			$meta = wp_get_ability( $name )->get_meta();
+
+			$this->assertFalse( $meta['annotations']['readonly'], $name );
+		}
+		$this->assertTrue( wp_get_ability( 'steadhand/update-post' )->get_meta()['annotations']['destructive'] );
+		$this->assertFalse( wp_get_ability( 'steadhand/create-post' )->get_meta()['annotations']['destructive'] );
 	}
 
 	public function test_every_read_tool_is_readonly_not_destructive_and_idempotent(): void {
@@ -80,7 +124,7 @@ final class ReadToolsRegistrationTest extends TestCase {
 	}
 
 	public function test_no_read_tool_is_public_or_exposed_outside_the_steadhand_server(): void {
-		foreach ( self::ABILITIES as $name ) {
+		foreach ( self::ALL_ABILITIES as $name ) {
 			$ability = wp_get_ability( $name );
 
 			$this->assertFalse( McpAbilityExposure::is_public( $ability ), "$name must not reach the adapter default server." );
@@ -90,7 +134,7 @@ final class ReadToolsRegistrationTest extends TestCase {
 	}
 
 	public function test_every_schema_forbids_unknown_properties_at_every_object_level(): void {
-		foreach ( self::ABILITIES as $name ) {
+		foreach ( self::ALL_ABILITIES as $name ) {
 			$ability = wp_get_ability( $name );
 
 			$this->assert_strict_objects( $ability->get_input_schema(), "$name input" );
@@ -99,7 +143,7 @@ final class ReadToolsRegistrationTest extends TestCase {
 	}
 
 	public function test_every_input_is_bounded(): void {
-		foreach ( self::ABILITIES as $name ) {
+		foreach ( self::ALL_ABILITIES as $name ) {
 			$this->assert_bounded_input( wp_get_ability( $name )->get_input_schema(), $name );
 		}
 	}
