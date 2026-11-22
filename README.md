@@ -6,7 +6,7 @@ Steadhand is an access and governance layer, not an AI plugin. It never calls an
 
 ## Status
 
-Pre-release. This is milestone M1 (read tools) in progress, in a private repository. The plugin registers five read-only tools. None of them changes site content. `steadhand/get-rendered` runs the site's own blocks and shortcodes to produce HTML. While it renders, Steadhand blocks outbound HTTP requests and embed-cache writes, so embeds appear as plain URLs, and it omits login/logout, user-avatar and mis-referenced navigation blocks. Third-party shortcodes may still have side effects of their own:
+Pre-release. This is milestone M1 (read tools) in progress, in a private repository. The plugin registers five read-only tools. None of them changes site content. `steadhand/get-rendered` runs the site's own blocks and shortcodes to produce HTML. While it renders, Steadhand blocks outbound HTTP requests and embed-cache writes, so embeds appear as plain URLs, and it omits login/logout and mis-referenced navigation blocks. It also omits user avatars wherever they are printed, so no Gravatar hash of an email address appears in the output. Third-party shortcodes may still have side effects of their own:
 
 - `steadhand/get-site-info`: site name, URL, versions, active theme and this agent's capabilities.
 - `steadhand/list-posts`: a page of posts of one allowed type (`post` and `page` by default), in the statuses the agent asks for, by any author.

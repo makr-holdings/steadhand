@@ -26,7 +26,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). The
 
 ### Security
 - The read tools share one object check, which allows only a post that exists, is not trashed, has an allowed type and passes `read_post`. Custom CSS posts, privacy requests and private posts of a type registered with `map_meta_cap` off are refused, whether published or trashed.
-- `get-rendered` blocks outbound HTTP requests, oEmbed fetches and oEmbed cache writes while it renders, so rendering a post does not contact other hosts or change its meta. It omits login/logout, user-avatar and navigation blocks whose output would reveal data the agent cannot read directly.
+- `get-rendered` blocks outbound HTTP requests, oEmbed fetches and oEmbed cache writes while it renders, so rendering a post does not contact other hosts or change its meta. It omits login/logout and navigation blocks whose output would reveal data the agent cannot read directly, and it suppresses user avatars wherever they are printed, so no Gravatar hash of an email address appears in the output.
 - The post capability mapping never turns another component's `do_not_allow` into a grant, and it is off once WordPress is shutting down.
 - The input rule for a tool runs only after the caller's Steadhand capability is checked, so a caller without `steadhand_read` learns nothing about the allowed post types.
 - The agent lockdown is registered even when the MCP Adapter or the Abilities API is missing, and a later `rest_pre_dispatch` filter can no longer lift it.
