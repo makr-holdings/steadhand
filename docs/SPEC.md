@@ -248,7 +248,7 @@ Principle: **Free must be genuinely safe on its own.** Pro adds control and conv
 | # | Milestone | Done when | Status |
 |---|---|---|---|
 | M0 | Scaffold | See §13.1 | **Done** (2026-11-21) |
-| M1 | Read-only | Agent user + Application Password connects from Claude; all read tools work; agent credentials refused on core REST, XML-RPC, wp-admin and the MCP Adapter's default server, everywhere except the Steadhand MCP endpoint (D6); installed on rickearley.me | **Done** (2026-11-22, `v0.1.0`). All twelve tools pass the test suite; seven were also called from Claude against rickearley.me, and the self-check there reported twelve tools, the server and the lockdown registered |
+| M1 | Read-only | Agent user + Application Password connects from Claude; all read tools work; agent credentials refused on core REST, XML-RPC, wp-admin and the MCP Adapter's default server, everywhere except the Steadhand MCP endpoint (D6); installed on rickearley.me | **Done** (2026-11-22, `v0.1.0`). All twelve tools were called from Claude against rickearley.me and returned correctly, and the self-check there reported twelve tools, the server and the lockdown registered |
 | M2 | Safe writes | Draft/update/blocks/terms/media tools; guardrail engine with built-ins; change log | Not started |
 | M3 | Undo + admin UI | Log screen, undo, agent management UI; **AI Engine MCP turned off on both MAKR sites** | Not started |
 | M4 | WordPress.org | Readme, assets, Plugin Check clean, pentest pass, submitted; repo made public, with branch protection, required checks and private vulnerability reporting turned on | Not started |
