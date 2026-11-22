@@ -38,13 +38,21 @@ final class Plugin {
 	private Lockdown $lockdown;
 
 	/**
+	 * Post capability mapping for dedicated agents (read_post in M1).
+	 *
+	 * @var MetaCaps
+	 */
+	private MetaCaps $meta_caps;
+
+	/**
 	 * Constructor. Builds the service graph; registers no hooks.
 	 */
 	public function __construct() {
-		$pipeline       = new Pipeline\Pipeline( new Log\NullLogger() );
-		$this->registry = new Abilities\Registry( $pipeline );
-		$this->server   = new Server( $this->registry );
-		$this->lockdown = new Lockdown();
+		$pipeline        = new Pipeline\Pipeline( new Log\NullLogger() );
+		$this->registry  = new Abilities\Registry( $pipeline );
+		$this->server    = new Server( $this->registry );
+		$this->lockdown  = new Lockdown();
+		$this->meta_caps = new MetaCaps();
 	}
 
 	/**
@@ -83,6 +91,7 @@ final class Plugin {
 			return false;
 		}
 
+		$this->meta_caps->register();
 		add_action( 'wp_abilities_api_categories_init', array( $this->registry, 'register_category' ) );
 		add_action( 'wp_abilities_api_init', array( $this->registry, 'register_abilities' ) );
 		add_action( 'mcp_adapter_init', array( $this->server, 'register' ) );
