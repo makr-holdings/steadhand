@@ -227,17 +227,24 @@ final class MetaCapsTest extends TestCase {
 		}
 	}
 
-	public function test_inside_a_call_edit_publish_and_delete_are_never_granted_to_an_agent(): void {
+	/**
+	 * Milestone M2 maps edit_post for drafts to steadhand_write_drafts, which the default agent holds (SPEC §14.1). The
+	 * assertions that remain here are the ones that did not change: publish_post and delete_post are never granted to
+	 * the default agent, and edit_post is not granted on a published post, which needs steadhand_publish. The M2
+	 * mappings have their own tests in MetaCapsWriteTest.
+	 */
+	public function test_inside_a_call_publish_delete_and_edit_of_a_published_post_are_not_granted_to_the_default_agent(): void {
 		wp_set_current_user( $this->make_agent() );
 		$own_draft = $this->make_agent_owned_draft();
 		$other     = $this->other_authors_post( 'post', 'draft' );
 		$published = $this->other_authors_post( 'post', 'publish' );
 
-		foreach ( array( 'edit_post', 'publish_post', 'delete_post' ) as $cap ) {
-			foreach ( array( $own_draft, $other, $published ) as $post_id ) {
-				$this->assertFalse( $this->pipeline_can( $cap, $post_id ), "$cap must not be granted to an agent (post $post_id)." );
-			}
+		foreach ( array( $own_draft, $other, $published ) as $post_id ) {
+			$this->assertFalse( $this->pipeline_can( 'publish_post', $post_id ), "publish_post must not be granted to an agent (post $post_id)." );
+			$this->assertFalse( $this->pipeline_can( 'delete_post', $post_id ), "delete_post must not be granted to an agent (post $post_id)." );
 		}
+
+		$this->assertFalse( $this->pipeline_can( 'edit_post', $published ), 'edit_post on a published post needs steadhand_publish, which the default agent lacks.' );
 	}
 
 	public function test_inside_a_call_an_administrator_gets_core_answers(): void {

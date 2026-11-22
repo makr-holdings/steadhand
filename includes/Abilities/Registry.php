@@ -79,6 +79,22 @@ final class Registry {
 	}
 
 	/**
+	 * Returns the names of the abilities that can change something: every one that is not a read call.
+	 *
+	 * @return string[]
+	 */
+	public function write_names(): array {
+		$names = array();
+		foreach ( $this->abilities() as $ability ) {
+			if ( ! Pipeline::is_read_only_ability( $ability ) ) {
+				$names[] = $ability->name();
+			}
+		}
+
+		return $names;
+	}
+
+	/**
 	 * Registers the Steadhand ability category.
 	 */
 	public function register_category(): void {

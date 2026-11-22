@@ -166,9 +166,30 @@ final class DbLogger implements Logger {
 	 * @return bool
 	 */
 	private function store( Entry $entry, string $input_json ): bool {
-		global $wpdb;
+		$row = $this->row( $entry, $input_json, $entry->result, $entry->message );
+		$id  = $this->insert( $row );
+		if ( $id <= 0 ) {
+			return false;
+		}
 
-		$row = array(
+		$this->announce( $id, array( 'id' => $id ) + $row );
+		$this->prune_if_due();
+
+		return true;
+	}
+
+	/**
+	 * Builds the column values of one row. Every text value is redacted and capped here, so begin(), complete() and
+	 * log() store the same things in the same way.
+	 *
+	 * @param Entry  $entry      The entry the row describes.
+	 * @param string $input_json Stored input, already redacted and capped.
+	 * @param string $result     The result to store.
+	 * @param string $message    The message to store, before redaction.
+	 * @return array<string, mixed>
+	 */
+	private function row( Entry $entry, string $input_json, string $result, string $message ): array {
+		return array(
 			'created_at'      => gmdate( 'Y-m-d H:i:s' ),
 			'user_id'         => max( 0, $entry->user_id ),
 			'agent_label'     => PostReader::cut_utf8( Redactor::text( $entry->agent_label ), self::MAX_LABEL_BYTES ),
@@ -176,13 +197,23 @@ final class DbLogger implements Logger {
 			'object_type'     => PostReader::cut_utf8( sanitize_key( $entry->object_type ), self::MAX_OBJECT_TYPE_BYTES ),
 			'object_id'       => max( 0, $entry->object_id ),
 			'input'           => $input_json,
-			'result'          => $entry->result,
-			'message'         => PostReader::cut_utf8( Redactor::text( $entry->message ), self::MAX_MESSAGE_BYTES ),
+			'result'          => $result,
+			'message'         => PostReader::cut_utf8( Redactor::text( $message ), self::MAX_MESSAGE_BYTES ),
 			'guardrail_notes' => PostReader::cut_utf8( Redactor::text( $entry->guardrail_notes ), self::MAX_MESSAGE_BYTES ),
 			'snapshot_id'     => max( 0, $entry->snapshot_id ),
 			'undoable'        => $entry->undoable ? 1 : 0,
 			'undone_by'       => 0,
 		);
+	}
+
+	/**
+	 * Inserts one row.
+	 *
+	 * @param array<string, mixed> $row Column values from row().
+	 * @return int The new row ID, or 0 if the insert failed.
+	 */
+	private function insert( array $row ): int {
+		global $wpdb;
 
 		$inserted = $this->quietly(
 			static fn(): mixed => $wpdb->insert( // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery -- Inserts into the change-log table; $wpdb->insert() escapes every value.
@@ -193,15 +224,199 @@ final class DbLogger implements Logger {
 		);
 
 		$id = (int) $wpdb->insert_id;
-		if ( 1 !== $inserted || $id <= 0 ) {
+
+		return 1 === $inserted && $id > 0 ? $id : 0;
+	}
+
+	/**
+	 * Reserves a row for a write that is about to run (see Logger::begin()).
+	 *
+	 * The row says the call started. Its result is error whatever the entry says, and it is never throttled.
+	 *
+	 * @param Entry $entry The call.
+	 * @return int The row ID, or 0 if it could not be stored.
+	 */
+	public function begin( Entry $entry ): int {
+		try {
+			if ( 1 !== preg_match( self::ABILITY_PATTERN, $entry->ability ) ) {
+				return 0;
+			}
+
+			$row = $this->row(
+				$entry,
+				$this->input_json( $entry->input ),
+				Entry::RESULT_ERROR,
+				/* translators: Message stored in the change log for a call whose outcome has not been recorded yet. */
+				__( 'The call started, but no outcome was recorded.', 'steadhand' )
+			);
+
+			$id = $this->insert( $row );
+			if ( $id > 0 ) {
+				$this->prune_if_due();
+			}
+
+			return $id;
+		} catch ( \Throwable ) {
+			return 0;
+		}
+	}
+
+	/**
+	 * Records the outcome of a reserved write (see Logger::complete()).
+	 *
+	 * The outcome must be ok, fixed or error. The row is updated only when its ID and user ID both match. An update that
+	 * changes nothing still succeeds when the row already holds exactly these values. The change-log listeners run once,
+	 * here, when the row changed. Never throws.
+	 *
+	 * @param int   $id    The row ID that begin() returned.
+	 * @param Entry $entry The outcome.
+	 * @return bool
+	 */
+	public function complete( int $id, Entry $entry ): bool {
+		try {
+			return $this->update_row( $id, $entry );
+		} catch ( \Throwable ) {
+			return false;
+		}
+	}
+
+	/**
+	 * Applies an outcome to a reserved row.
+	 *
+	 * @param int   $id    Row ID.
+	 * @param Entry $entry Outcome.
+	 * @return bool
+	 */
+	private function update_row( int $id, Entry $entry ): bool {
+		global $wpdb;
+
+		$results = array( Entry::RESULT_OK, Entry::RESULT_FIXED, Entry::RESULT_ERROR );
+		if ( $id <= 0 || ! in_array( $entry->result, $results, true ) || 1 !== preg_match( self::ABILITY_PATTERN, $entry->ability ) ) {
 			return false;
 		}
 
-		$row = array( 'id' => $id ) + $row;
-		$this->announce( $id, $row );
-		$this->prune_if_due();
+		$user_id = max( 0, $entry->user_id );
+
+		// The same values row() would store, so a completed row reads the same as one written by log().
+		$values = array(
+			'result'          => $entry->result,
+			'message'         => PostReader::cut_utf8( Redactor::text( $entry->message ), self::MAX_MESSAGE_BYTES ),
+			'object_type'     => PostReader::cut_utf8( sanitize_key( $entry->object_type ), self::MAX_OBJECT_TYPE_BYTES ),
+			'object_id'       => max( 0, $entry->object_id ),
+			'guardrail_notes' => PostReader::cut_utf8( Redactor::text( $entry->guardrail_notes ), self::MAX_MESSAGE_BYTES ),
+			'snapshot_id'     => max( 0, $entry->snapshot_id ),
+			'undoable'        => $entry->undoable ? 1 : 0,
+		);
+
+		$table   = Schema::table();
+		$updated = $this->quietly(
+			static fn(): mixed => $wpdb->update( // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching -- Updates one row of the change-log table; $wpdb->update() escapes every value.
+				$table,
+				$values,
+				array(
+					'id'      => $id,
+					'user_id' => $user_id,
+				),
+				array( '%s', '%s', '%s', '%d', '%s', '%d', '%d' ),
+				array( '%d', '%d' )
+			)
+		);
+
+		if ( false === $updated ) {
+			return false;
+		}
+
+		// Read the row back. Zero rows changed is fine when the row already holds these values; it is a failure when the
+		// row is missing or holds something else.
+		$stored = $this->quietly(
+			function () use ( $wpdb, $table, $id, $user_id ): mixed {
+				// The table name is fixed (see Schema::table()); every value is bound by prepare().
+				return $wpdb->get_row( // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching -- A live read of the row just written.
+					$wpdb->prepare( "SELECT * FROM {$table} WHERE id = %d AND user_id = %d", $id, $user_id ), // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- See the comment above.
+					ARRAY_A
+				);
+			}
+		);
+
+		if ( ! is_array( $stored ) ) {
+			return false;
+		}
+
+		foreach ( $values as $column => $value ) {
+			if ( (string) ( $stored[ $column ] ?? '' ) !== (string) $value ) {
+				return false;
+			}
+		}
+
+		if ( 1 === (int) $updated ) {
+			$this->announce( $id, $stored );
+		}
 
 		return true;
+	}
+
+	/**
+	 * Counts the calls this user made to the listed abilities in the last N seconds, that were stored as ok, fixed or
+	 * error. Refusals are not counted.
+	 *
+	 * Fails closed: a malformed ability name or a failed query returns PHP_INT_MAX, so a caller that compares the count
+	 * with a limit refuses. An empty list returns 0.
+	 *
+	 * @param int      $user_id   Agent user ID.
+	 * @param string[] $abilities Ability names, each in the form steadhand/<name>.
+	 * @param int      $seconds   Length of the window, in seconds.
+	 * @return int
+	 */
+	public function count_recent( int $user_id, array $abilities, int $seconds ): int {
+		try {
+			return $this->count_since( $user_id, $abilities, $seconds );
+		} catch ( \Throwable ) {
+			return PHP_INT_MAX;
+		}
+	}
+
+	/**
+	 * Runs the count for count_recent().
+	 *
+	 * @param int      $user_id   Agent user ID.
+	 * @param string[] $abilities Ability names.
+	 * @param int      $seconds   Window, in seconds.
+	 * @return int
+	 */
+	private function count_since( int $user_id, array $abilities, int $seconds ): int {
+		global $wpdb;
+
+		if ( array() === $abilities ) {
+			return 0;
+		}
+
+		$names = array();
+		foreach ( $abilities as $ability ) {
+			if ( ! is_string( $ability ) || 1 !== preg_match( self::ABILITY_PATTERN, $ability ) ) {
+				return PHP_INT_MAX;
+			}
+			$names[] = $ability;
+		}
+
+		$counted = array( Entry::RESULT_OK, Entry::RESULT_FIXED, Entry::RESULT_ERROR );
+		// The placeholders are built from counts only. Every value is bound by prepare().
+		$result_marks  = implode( ', ', array_fill( 0, count( $counted ), '%s' ) );
+		$ability_marks = implode( ', ', array_fill( 0, count( $names ), '%s' ) );
+		$table         = Schema::table();
+		$since         = gmdate( 'Y-m-d H:i:s', time() - max( 0, $seconds ) );
+		$sql           = "SELECT COUNT(*) FROM {$table} WHERE user_id = %d AND result IN ({$result_marks}) AND ability IN ({$ability_marks}) AND created_at >= %s"; // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- The table name is fixed and the placeholders come from counts; every value is bound by prepare().
+		$args          = array_merge( array( max( 0, $user_id ) ), $counted, $names, array( $since ) );
+
+		return $this->quietly(
+			static function () use ( $wpdb, $sql, $args ): int {
+				$wpdb->last_error = '';
+				$count            = $wpdb->get_var( // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching -- A live count must not be cached.
+					$wpdb->prepare( $sql, ...$args ) // phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared -- See the comment above.
+				);
+
+				return '' === (string) $wpdb->last_error && null !== $count ? (int) $count : PHP_INT_MAX;
+			}
+		);
 	}
 
 	/**

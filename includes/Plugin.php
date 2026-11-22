@@ -48,8 +48,21 @@ final class Plugin {
 	 * Constructor. Builds the service graph; registers no hooks.
 	 */
 	public function __construct() {
-		$change_log      = new Log\DbLogger();
-		$pipeline        = new Pipeline\Pipeline( $change_log );
+		$change_log = new Log\DbLogger();
+
+		// The rate limit reads the registry's write names when a write is checked, so it is built after the registry.
+		$engine = new Guardrails\Engine(
+			array(
+				new Guardrails\Rules\RateLimit( $change_log, fn(): array => $this->registry->write_names() ),
+				new Guardrails\Rules\EditLock(),
+			),
+			array(
+				new Guardrails\Rules\ContentLimits(),
+				new Guardrails\Rules\BlockMarkup(),
+			)
+		);
+
+		$pipeline        = new Pipeline\Pipeline( $change_log, $engine );
 		$this->registry  = new Abilities\Registry( $pipeline, $change_log );
 		$this->server    = new Server( $this->registry );
 		$this->lockdown  = new Lockdown();
