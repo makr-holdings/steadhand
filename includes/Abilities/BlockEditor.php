@@ -1,0 +1,575 @@
+<?php
+/**
+ * Finds the byte span of each block in stored post content, and splices operations into it by block path.
+ *
+ * @package Steadhand
+ */
+
+declare( strict_types=1 );
+
+namespace Steadhand\Abilities;
+
+use Steadhand\Guardrails\Rules\BlockMarkup;
+
+defined( 'ABSPATH' ) || exit;
+
+/**
+ * The pure logic behind steadhand/edit-blocks. Holds no state and makes no WordPress writes.
+ *
+ * Paths are the ones PostReader::walk() gives: dot-separated indexes, whitespace-only freeform text is not counted, and
+ * freeform nodes exist only at the root. Offsets are bytes.
+ *
+ * Trust: spans() scans the content with core's own delimiter grammar (BlockMarkup::TOKEN) and then compares its tree with
+ * parse_blocks(), name by name and level by level. Any disagreement, or any markup that is not balanced, makes spans() return
+ * null, and apply() refuses the call as unsupported. Each span is computed from the same tokens core reads, so a per-block
+ * check against core adds nothing the whole-tree comparison does not already prove.
+ */
+final class BlockEditor {
+
+	/** The operations an agent may send. */
+	public const OPERATIONS = array( 'replace', 'insert_before', 'insert_after', 'remove', 'append' );
+
+	/** Most operations one call may send. */
+	public const MAX_OPERATIONS = 20;
+
+	/** Longest path, in bytes. */
+	public const MAX_PATH_BYTES = 100;
+
+	/** Longest block name, in bytes. */
+	public const MAX_NAME_BYTES = 200;
+
+	/**
+	 * The path grammar without anchors: an index, or dot-separated indexes with no leading zero, at most 20 levels. Used
+	 * with \A and \z in code, and with ^ and $ in the schema.
+	 */
+	public const PATH_BODY = '(0|[1-9][0-9]*)(\.(0|[1-9][0-9]*)){0,19}';
+
+	/** Bytes that count as whitespace when deciding whether a separator is needed. */
+	private const WHITESPACE = " \t\n\r\f\v";
+
+	/** The separator added between inserted markup and adjacent content that is not whitespace. */
+	private const SEPARATOR = "\n\n";
+
+	/** Order of edits that start at the same byte: insert_after, then insert_before, then spans, then append. */
+	private const RANK_AFTER  = 0;
+	private const RANK_BEFORE = 1;
+	private const RANK_SPAN   = 2;
+	private const RANK_APPEND = 3;
+
+	/**
+	 * Scans the content into a tree of blocks, each with its path and byte span. Root freeform text that is not
+	 * whitespace-only is a node with name null. Returns null when the markup is not balanced, when a delimiter's attributes
+	 * are not JSON, when the content is not UTF-8, or when core's parser disagrees with the scan.
+	 *
+	 * @param string $content Stored post content.
+	 * @return array<int, array{path: string, name: string|null, start: int, end: int, children: array<int, mixed>}>|null
+	 */
+	public static function spans( string $content ): ?array {
+		if ( ! mb_check_encoding( $content, 'UTF-8' ) ) {
+			return null;
+		}
+
+		$frames = array();
+		$roots  = array();
+		$offset = 0;
+
+		while ( true ) {
+			$matches = null;
+			$found   = preg_match( BlockMarkup::TOKEN, $content, $matches, PREG_OFFSET_CAPTURE, $offset );
+			if ( false === $found || PREG_NO_ERROR !== preg_last_error() ) {
+				return null;
+			}
+			if ( 0 === $found ) {
+				break;
+			}
+
+			list( $text, $start ) = $matches[0];
+			$end                  = $start + strlen( $text );
+			$is_closer            = null !== self::group( $matches, 'closer' );
+			$is_void              = null !== self::group( $matches, 'void' );
+			$attrs                = self::group( $matches, 'attrs' );
+			$namespace            = self::group( $matches, 'namespace' );
+			$name                 = ( null === $namespace ? 'core/' : $namespace[0] ) . $matches['name'][0];
+
+			if ( null !== $attrs && ! $is_closer && null === json_decode( $attrs[0], true ) ) {
+				return null;
+			}
+
+			if ( $is_void ) {
+				self::attach(
+					$frames,
+					$roots,
+					array(
+						'name'     => $name,
+						'start'    => $start,
+						'end'      => $end,
+						'children' => array(),
+					)
+				);
+			} elseif ( $is_closer ) {
+				if ( array() === $frames ) {
+					return null;
+				}
+
+				$frame = array_pop( $frames );
+				if ( $frame['name'] !== $name ) {
+					return null;
+				}
+
+				self::attach(
+					$frames,
+					$roots,
+					array(
+						'name'     => $name,
+						'start'    => $frame['start'],
+						'end'      => $end,
+						'children' => $frame['children'],
+					)
+				);
+			} else {
+				$frames[] = array(
+					'name'     => $name,
+					'start'    => $start,
+					'children' => array(),
+				);
+			}
+
+			$offset = $end;
+		}
+
+		if ( array() !== $frames ) {
+			return null;
+		}
+
+		$nodes  = array();
+		$cursor = 0;
+		foreach ( $roots as $root ) {
+			if ( '' !== trim( substr( $content, $cursor, $root['start'] - $cursor ) ) ) {
+				$nodes[] = self::freeform( $cursor, $root['start'] );
+			}
+			$nodes[] = $root;
+			$cursor  = $root['end'];
+		}
+		if ( '' !== trim( substr( $content, $cursor ) ) ) {
+			$nodes[] = self::freeform( $cursor, strlen( $content ) );
+		}
+
+		$tree = self::number( $nodes, '' );
+
+		return self::same( self::kept( parse_blocks( $content ) ), $tree ) ? $tree : null;
+	}
+
+	/**
+	 * Checks the shape of the operations: the count, the fields each operation needs or refuses, the path and name
+	 * grammar, markup text, and the rule that no path names a block another operation names, or lies inside one.
+	 *
+	 * @param array<int, mixed> $operations Operations as sent.
+	 * @return \WP_Error|null Null when they are valid, otherwise a steadhand_invalid_input error.
+	 */
+	public static function check_operations( array $operations ): ?\WP_Error {
+		$count = count( $operations );
+		if ( $count < 1 || $count > self::MAX_OPERATIONS ) {
+			return self::invalid(
+				/* translators: %d: the most operations one call may send. */
+				sprintf( __( 'Send between 1 and %d operations.', 'steadhand' ), self::MAX_OPERATIONS )
+			);
+		}
+
+		$paths = array();
+		foreach ( array_values( $operations ) as $number => $operation ) {
+			$where = $number + 1;
+			if ( ! is_array( $operation ) ) {
+				return self::invalid(
+					/* translators: %d: the number of the operation, counting from 1. */
+					sprintf( __( 'Operation %d must be an object with op and the fields that op takes.', 'steadhand' ), $where )
+				);
+			}
+
+			$op = $operation['op'] ?? null;
+			if ( ! is_string( $op ) || ! in_array( $op, self::OPERATIONS, true ) ) {
+				return self::invalid(
+					/* translators: %d: the number of the operation, counting from 1. */
+					sprintf( __( 'Operation %d needs op: replace, insert_before, insert_after, remove or append.', 'steadhand' ), $where )
+				);
+			}
+
+			if ( 'append' === $op ) {
+				if ( array_key_exists( 'path', $operation ) || array_key_exists( 'name', $operation ) ) {
+					return self::invalid(
+						/* translators: %d: the number of the operation, counting from 1. */
+						sprintf( __( 'Operation %d is append, which takes no path and no name. It adds its markup to the end of the content.', 'steadhand' ), $where )
+					);
+				}
+			} else {
+				$path = $operation['path'] ?? null;
+				if ( ! is_string( $path ) || strlen( $path ) > self::MAX_PATH_BYTES || 1 !== preg_match( '/\A' . self::PATH_BODY . '\z/', $path ) ) {
+					return self::invalid(
+						/* translators: %d: the number of the operation, counting from 1. */
+						sprintf( __( 'Operation %d needs a path such as "0" or "2.1", as steadhand/get-blocks returns it.', 'steadhand' ), $where )
+					);
+				}
+
+				$name = $operation['name'] ?? null;
+				if ( ! array_key_exists( 'name', $operation ) || ( null !== $name && ( ! is_string( $name ) || strlen( $name ) > self::MAX_NAME_BYTES ) ) ) {
+					return self::invalid(
+						/* translators: %d: the number of the operation, counting from 1. */
+						sprintf( __( 'Operation %d needs name: the block name get-blocks returned for its path, or null for classic HTML.', 'steadhand' ), $where )
+					);
+				}
+
+				$paths[] = $path;
+			}
+
+			if ( 'remove' === $op ) {
+				if ( array_key_exists( 'markup', $operation ) ) {
+					return self::invalid(
+						/* translators: %d: the number of the operation, counting from 1. */
+						sprintf( __( 'Operation %d is remove, which takes no markup.', 'steadhand' ), $where )
+					);
+				}
+				continue;
+			}
+
+			$markup = $operation['markup'] ?? null;
+			if ( ! is_string( $markup ) || '' === trim( $markup ) ) {
+				return self::invalid(
+					/* translators: %d: the number of the operation, counting from 1. */
+					sprintf( __( 'Operation %d needs markup: block markup or classic HTML that is not blank.', 'steadhand' ), $where )
+				);
+			}
+
+			if ( ! mb_check_encoding( $markup, 'UTF-8' ) ) {
+				return self::invalid(
+					/* translators: %d: the number of the operation, counting from 1. */
+					sprintf( __( 'The markup of operation %d must be valid UTF-8 text.', 'steadhand' ), $where )
+				);
+			}
+		}
+
+		foreach ( $paths as $i => $path ) {
+			foreach ( $paths as $j => $other ) {
+				if ( $i !== $j && ( $path === $other || str_starts_with( $other, $path . '.' ) ) ) {
+					return self::invalid(
+						__( 'Two operations name the same path, or one path is inside a block another operation names. Name each block once, and do not name a block inside another operation\'s block.', 'steadhand' )
+					);
+				}
+			}
+		}
+
+		return null;
+	}
+
+	/**
+	 * Applies the operations to the stored content and returns the new content. Every path refers to the content as stored
+	 * before the call, so the order of the operations does not change the result.
+	 *
+	 * Each operation is resolved against the scanned tree and checked against its name. Everything outside the spans the
+	 * operations replace or remove stays byte for byte. Inserted markup, and appended markup, get one "\n\n" between them and
+	 * an adjacent piece of content only when neither side of that boundary is whitespace and at least one side is the
+	 * inserted markup. Two inserted pieces that meet get one "\n\n" too. Replacement markup never gets a separator.
+	 *
+	 * @param string            $content    Stored post content.
+	 * @param array<int, mixed> $operations Operations, as checked by check_operations().
+	 * @return string|\WP_Error The new content, or a refusal: steadhand_refused_unsupported_markup,
+	 *                          steadhand_refused_block_mismatch, or steadhand_invalid_input.
+	 */
+	public static function apply( string $content, array $operations ): string|\WP_Error {
+		$invalid = self::check_operations( $operations );
+		if ( null !== $invalid ) {
+			return $invalid;
+		}
+
+		$tree = self::spans( $content );
+		if ( null === $tree ) {
+			return self::unsupported();
+		}
+
+		$nodes = array();
+		self::index( $tree, $nodes );
+
+		$edits = array();
+		foreach ( array_values( $operations ) as $number => $operation ) {
+			$op = (string) $operation['op'];
+
+			if ( 'append' === $op ) {
+				$edits[] = self::edit( strlen( $content ), strlen( $content ), self::RANK_APPEND, (string) $operation['markup'], true, $number );
+				continue;
+			}
+
+			$node = $nodes[ (string) $operation['path'] ] ?? null;
+			if ( null === $node || $node['name'] !== $operation['name'] ) {
+				return self::mismatch();
+			}
+
+			$markup = (string) ( $operation['markup'] ?? '' );
+			switch ( $op ) {
+				case 'replace':
+					$edits[] = self::edit( $node['start'], $node['end'], self::RANK_SPAN, $markup, false, $number );
+					break;
+				case 'remove':
+					$edits[] = self::edit( $node['start'], $node['end'], self::RANK_SPAN, '', false, $number );
+					break;
+				case 'insert_before':
+					$edits[] = self::edit( $node['start'], $node['start'], self::RANK_BEFORE, $markup, true, $number );
+					break;
+				default:
+					$edits[] = self::edit( $node['end'], $node['end'], self::RANK_AFTER, $markup, true, $number );
+					break;
+			}
+		}
+
+		usort(
+			$edits,
+			static fn( array $a, array $b ): int => array( $a['start'], $a['end'], $a['rank'], $a['order'] ) <=> array( $b['start'], $b['end'], $b['rank'], $b['order'] )
+		);
+
+		$pieces = array();
+		$cursor = 0;
+		foreach ( $edits as $edit ) {
+			if ( $edit['start'] < $cursor ) {
+				// Cannot happen once check_operations() has refused overlapping paths. Fail closed if it does.
+				return self::unsupported();
+			}
+
+			if ( $edit['start'] > $cursor ) {
+				$pieces[] = array(
+					'text'     => substr( $content, $cursor, $edit['start'] - $cursor ),
+					'inserted' => false,
+				);
+			}
+
+			$pieces[] = array(
+				'text'     => $edit['text'],
+				'inserted' => $edit['inserted'],
+			);
+			$cursor   = max( $cursor, $edit['end'] );
+		}
+
+		if ( $cursor < strlen( $content ) ) {
+			$pieces[] = array(
+				'text'     => substr( $content, $cursor ),
+				'inserted' => false,
+			);
+		}
+
+		return self::join( $pieces );
+	}
+
+	/**
+	 * Joins the pieces of the new content, adding the separator where an inserted piece meets content that is not whitespace.
+	 *
+	 * @param array<int, array{text: string, inserted: bool}> $pieces Pieces in output order.
+	 * @return string
+	 */
+	private static function join( array $pieces ): string {
+		$out  = '';
+		$prev = null;
+
+		foreach ( $pieces as $piece ) {
+			if ( '' === $piece['text'] ) {
+				continue;
+			}
+
+			if ( null !== $prev && ( $prev['inserted'] || $piece['inserted'] ) && ! self::is_space( substr( $prev['text'], -1 ) ) && ! self::is_space( $piece['text'][0] ) ) {
+				$out .= self::SEPARATOR;
+			}
+
+			$out .= $piece['text'];
+			$prev = $piece;
+		}
+
+		return $out;
+	}
+
+	/**
+	 * Whether one byte is whitespace.
+	 *
+	 * @param string $byte One byte.
+	 */
+	private static function is_space( string $byte ): bool {
+		return false !== strpos( self::WHITESPACE, $byte );
+	}
+
+	/**
+	 * Builds one edit.
+	 *
+	 * @param int    $start  Byte offset where the edit starts.
+	 * @param int    $end    Byte offset where the edit ends. Equal to $start for an insert.
+	 * @param int    $rank   Order among edits at the same offset.
+	 * @param string $text   Text that replaces the span.
+	 * @param bool   $inserted Whether the text is inserted markup, which takes separators.
+	 * @param int    $order  The operation's position in the call, for a stable sort.
+	 * @return array{start: int, end: int, rank: int, text: string, inserted: bool, order: int}
+	 */
+	private static function edit( int $start, int $end, int $rank, string $text, bool $inserted, int $order ): array {
+		return array(
+			'start'    => $start,
+			'end'      => $end,
+			'rank'     => $rank,
+			'text'     => $text,
+			'inserted' => $inserted,
+			'order'    => $order,
+		);
+	}
+
+	/**
+	 * Adds a closed block to the innermost open block, or to the root.
+	 *
+	 * @param array<int, array<string, mixed>> $frames Open blocks, by reference.
+	 * @param array<int, array<string, mixed>> $roots  Root blocks, by reference.
+	 * @param array<string, mixed>             $node   The closed block.
+	 */
+	private static function attach( array &$frames, array &$roots, array $node ): void {
+		if ( array() === $frames ) {
+			$roots[] = $node;
+			return;
+		}
+
+		$frames[ array_key_last( $frames ) ]['children'][] = $node;
+	}
+
+	/**
+	 * A root freeform node with no path yet.
+	 *
+	 * @param int $start Start offset.
+	 * @param int $end   End offset.
+	 * @return array{name: null, start: int, end: int, children: array<int, mixed>}
+	 */
+	private static function freeform( int $start, int $end ): array {
+		return array(
+			'name'     => null,
+			'start'    => $start,
+			'end'      => $end,
+			'children' => array(),
+		);
+	}
+
+	/**
+	 * Gives each node its path, counting only the nodes that are kept.
+	 *
+	 * @param array<int, array<string, mixed>> $nodes  Nodes at one level, all kept.
+	 * @param string                           $prefix Path of the parent, or '' at the root.
+	 * @return array<int, array<string, mixed>>
+	 */
+	private static function number( array $nodes, string $prefix ): array {
+		$out = array();
+		foreach ( array_values( $nodes ) as $index => $node ) {
+			$path = '' === $prefix ? (string) $index : $prefix . '.' . $index;
+
+			$node['path']     = $path;
+			$node['children'] = self::number( $node['children'], $path );
+			$out[]            = $node;
+		}
+
+		return $out;
+	}
+
+	/**
+	 * Maps every path to its node.
+	 *
+	 * @param array<int, array<string, mixed>>    $tree  Numbered nodes.
+	 * @param array<string, array<string, mixed>> $map Filled in place.
+	 */
+	private static function index( array $tree, array &$map ): void {
+		foreach ( $tree as $node ) {
+			$map[ (string) $node['path'] ] = $node;
+			self::index( $node['children'], $map );
+		}
+	}
+
+	/**
+	 * The nodes get-blocks keeps: parse_blocks() output with whitespace-only freeform text removed, at every level.
+	 *
+	 * @param array<int, mixed> $parsed Output of parse_blocks().
+	 * @return array<int, array{name: string|null, children: array<int, mixed>}>
+	 */
+	private static function kept( array $parsed ): array {
+		$out = array();
+		foreach ( $parsed as $node ) {
+			if ( ! is_array( $node ) ) {
+				continue;
+			}
+
+			$name = $node['blockName'] ?? null;
+			$html = (string) ( $node['innerHTML'] ?? '' );
+			if ( null === $name && '' === trim( $html ) ) {
+				continue;
+			}
+
+			$out[] = array(
+				'name'     => null === $name ? null : (string) $name,
+				'children' => self::kept( (array) ( $node['innerBlocks'] ?? array() ) ),
+			);
+		}
+
+		return $out;
+	}
+
+	/**
+	 * Whether two trees have the same names at every position.
+	 *
+	 * @param array<int, array{name: string|null, children: array<int, mixed>}> $a One tree.
+	 * @param array<int, array<string, mixed>>                                  $b The other tree.
+	 */
+	private static function same( array $a, array $b ): bool {
+		if ( count( $a ) !== count( $b ) ) {
+			return false;
+		}
+
+		foreach ( array_values( $a ) as $i => $node ) {
+			$other = $b[ $i ];
+			if ( $node['name'] !== $other['name'] || ! self::same( $node['children'], $other['children'] ) ) {
+				return false;
+			}
+		}
+
+		return true;
+	}
+
+	/**
+	 * The match for a named group of a preg_match() with PREG_OFFSET_CAPTURE, or null when the group did not take part.
+	 *
+	 * @param array<string, array{0: string, 1: int}> $matches Matches.
+	 * @param string                                  $group   Group name.
+	 * @return array{0: string, 1: int}|null
+	 */
+	private static function group( array $matches, string $group ): ?array {
+		return isset( $matches[ $group ] ) && -1 !== $matches[ $group ][1] ? $matches[ $group ] : null;
+	}
+
+	/**
+	 * A refusal for a non-whitespace shape the scan cannot trust.
+	 *
+	 * @return \WP_Error
+	 */
+	private static function unsupported(): \WP_Error {
+		return new \WP_Error(
+			'steadhand_refused_unsupported_markup',
+			__( 'Steadhand cannot read the block structure of this post the way WordPress does, so it cannot edit single blocks in it. Nothing was changed. Use steadhand/update-post with the complete new content instead.', 'steadhand' ),
+			array( 'status' => 409 )
+		);
+	}
+
+	/**
+	 * A refusal for a path that names no block with the name the call sent.
+	 *
+	 * @return \WP_Error
+	 */
+	private static function mismatch(): \WP_Error {
+		return new \WP_Error(
+			'steadhand_refused_block_mismatch',
+			__( 'The path does not name a block with the name you sent, in the post as it is stored. The post may have changed, or the path is wrong. Nothing was changed. Call steadhand/get-blocks again, and use the paths and names it returns.', 'steadhand' ),
+			array( 'status' => 409 )
+		);
+	}
+
+	/**
+	 * A steadhand_invalid_input refusal, with the message that says what is allowed.
+	 *
+	 * @param string $message Message for the caller.
+	 * @return \WP_Error
+	 */
+	private static function invalid( string $message ): \WP_Error {
+		return new \WP_Error( 'steadhand_invalid_input', $message, array( 'status' => 400 ) );
+	}
+}

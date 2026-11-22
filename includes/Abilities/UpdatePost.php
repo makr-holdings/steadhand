@@ -397,6 +397,16 @@ final class UpdatePost extends Ability {
 	}
 
 	/**
+	 * Drops what snapshot() recorded for one post, when the call will not reach execute(). Added for steadhand/edit-blocks,
+	 * which calls snapshot() and may then return before execute() on a race check. Nothing is written.
+	 *
+	 * @param int $post_id Post ID.
+	 */
+	public function discard( int $post_id ): void {
+		unset( $this->state[ $post_id ] );
+	}
+
+	/**
 	 * The refusal for a write that WordPress reported as failed. The post is read again, uncached, and compared with how it
 	 * was before the write. If it changed, the change was at least partly applied.
 	 *

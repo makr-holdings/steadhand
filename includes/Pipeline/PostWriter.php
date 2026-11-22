@@ -166,6 +166,44 @@ final class PostWriter {
 	}
 
 	/**
+	 * The content as WordPress would store it, with the save filters applied and nothing written. Used to check whether a save
+	 * would change the content, before the save.
+	 *
+	 * The filters are the ones update() runs: the four KSES filters, with every other filter the save runs on post_content
+	 * (sanitize_post_field() in the 'db' context: pre_post_content and content_save_pre, which carry the custom CSS strip,
+	 * invalid entity conversion, tag balancing when enabled, and any plugin filter). The emoji step is the one wp_insert_post()
+	 * runs after sanitize_post() when the content column is utf8 or utf8mb3. The result is unslashed, as wp_insert_post() unslashes
+	 * before the row is written.
+	 *
+	 * Must be called inside a write, because the filters it runs are the ones a write runs.
+	 *
+	 * @param int    $post_id Post ID. Passed to the filters, as the save passes it.
+	 * @param string $content Content, unslashed.
+	 * @return string The content as the save would store it.
+	 * @throws \LogicException When called outside a write.
+	 */
+	public static function filtered_content( int $post_id, string $content ): string {
+		self::assert_writing();
+
+		return (string) self::with_filters_added(
+			array_values( self::KSES_FILTERS ),
+			static function () use ( $post_id, $content ): string {
+				global $wpdb;
+
+				$value = sanitize_post_field( 'post_content', wp_slash( $content ), $post_id, 'db' );
+				$value = (string) $value;
+
+				$charset = $wpdb->get_col_charset( $wpdb->posts, 'post_content' );
+				if ( 'utf8' === $charset || 'utf8mb3' === $charset ) {
+					$value = wp_encode_emoji( $value );
+				}
+
+				return wp_unslash( $value );
+			}
+		);
+	}
+
+	/**
 	 * Whether a stored post's title, content or excerpt differs from what was submitted. Compares only the fields that
 	 * were submitted, byte for byte. A missing post counts as different.
 	 *
