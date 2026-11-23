@@ -229,8 +229,14 @@ final class GetRendered extends Ability {
 	 *   when the filter is truthy). This is the narrowest hook: it is checked for every insert and update, so the rule
 	 *   names the one type it stops.
 	 * - post_password_required: the target alone reads as unlocked (see the password rules in SPEC section 14.1).
-	 * - pre_render_block: blocks whose output is site data the agent could not read directly are omitted (see
-	 *   omit_block()).
+	 * - pre_render_block (PHP_INT_MAX): blocks whose output is site data the agent could not read directly are omitted
+	 *   before they render (see omit_block()). This is the first of two layers. Core's navigation, navigation-submenu,
+	 *   navigation-link and widget-group blocks render their inner blocks by calling $inner_block->render() directly,
+	 *   which never fires pre_render_block, so the second layer is needed too.
+	 * - render_block (PHP_INT_MAX, second layer): the same rule applied to the rendered output. WP_Block::render() applies
+	 *   render_block whether it was called by its parent or directly, so a guarded block nested in one of those wrappers
+	 *   renders as ''. The limit: on this layer the block's own render code still runs, and only its output is dropped.
+	 *   Both layers sit at PHP_INT_MAX so that a callback at a lower priority cannot undo them.
 	 * - pre_do_shortcode_tag: core's [gallery] and [playlist] render as nothing when they would fetch media the agent may
 	 *   not read. Core fetches by `ids`/`include` with no parent check (gallery_shortcode() and wp_playlist_shortcode(),
 	 *   wp-includes/media.php), and lists the children of `id` (or of the current post) under core's own rule, not
@@ -278,8 +284,14 @@ final class GetRendered extends Ability {
 			array(
 				'pre_render_block',
 				static fn( mixed $pre, mixed $block ): mixed => is_array( $block ) && self::omit_block( $block ) ? '' : $pre,
-				10,
+				PHP_INT_MAX,
 				3,
+			),
+			array(
+				'render_block',
+				static fn( mixed $content, mixed $block ): mixed => is_array( $block ) && self::omit_block( $block ) ? '' : $content,
+				PHP_INT_MAX,
+				2,
 			),
 			array(
 				'pre_do_shortcode_tag',
@@ -389,6 +401,10 @@ final class GetRendered extends Ability {
 	 *   legacy widget is omitted.
 	 * - Any block with a binding whose source is core/post-meta prints post meta, which the read tools never return
 	 *   (SPEC). Malformed metadata or bindings (not arrays) count as no bindings.
+	 * - core/navigation-link and core/navigation-submenu with a binding whose source is core/post-data or core/term-data
+	 *   read their own `id` attribute and return the link or date of that post or term under core's rule, not
+	 *   Steadhand's (block-bindings/post-data.php and term-data.php). Those two sources are not omitted on other blocks:
+	 *   core/post-date reads core/post-data for the current post, which the agent can already read.
 	 * - core/breadcrumbs prints the title and link of every ancestor, with no status check (blocks/breadcrumbs.php).
 	 * - core/post-author-biography prints the author's biography, which is user data. It is omitted whatever it holds.
 	 * - core/post-author prints the biography when showBio is set, and an author archive link (the nicename) when isLink
@@ -405,7 +421,7 @@ final class GetRendered extends Ability {
 	private static function omit_block( array $block ): bool {
 		$attrs = is_array( $block['attrs'] ?? null ) ? $block['attrs'] : array();
 
-		if ( self::has_post_meta_binding( $attrs ) ) {
+		if ( self::has_binding_from( $attrs, array( 'core/post-meta' ) ) ) {
 			return true;
 		}
 
@@ -431,6 +447,10 @@ final class GetRendered extends Ability {
 
 				return ( ! is_int( $id ) && ! is_string( $id ) ) || null === MediaReader::readable_attachment( (int) $id );
 
+			case 'core/navigation-link':
+			case 'core/navigation-submenu':
+				return self::has_binding_from( $attrs, array( 'core/post-data', 'core/term-data' ) );
+
 			case 'core/navigation':
 				if ( ! isset( $attrs['ref'] ) ) {
 					return false;
@@ -445,17 +465,18 @@ final class GetRendered extends Ability {
 	}
 
 	/**
-	 * Whether a block's metadata has a binding to core/post-meta. A non-array metadata or bindings value, and a binding
-	 * that is not an array or has no string source, count as no binding.
+	 * Whether a block's metadata has a binding whose source is one of the given sources. A non-array metadata or bindings
+	 * value, and a binding that is not an array or has no string source, count as no binding.
 	 *
-	 * @param array<string, mixed> $attrs Block attributes.
+	 * @param array<string, mixed> $attrs   Block attributes.
+	 * @param string[]             $sources Binding sources, e.g. core/post-meta.
 	 */
-	private static function has_post_meta_binding( array $attrs ): bool {
+	private static function has_binding_from( array $attrs, array $sources ): bool {
 		$metadata = is_array( $attrs['metadata'] ?? null ) ? $attrs['metadata'] : array();
 		$bindings = is_array( $metadata['bindings'] ?? null ) ? $metadata['bindings'] : array();
 
 		foreach ( $bindings as $binding ) {
-			if ( is_array( $binding ) && 'core/post-meta' === ( $binding['source'] ?? null ) ) {
+			if ( is_array( $binding ) && in_array( $binding['source'] ?? null, $sources, true ) ) {
 				return true;
 			}
 		}
