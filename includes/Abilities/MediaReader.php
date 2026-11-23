@@ -100,8 +100,9 @@ final class MediaReader {
 	/**
 	 * The parent condition of the media rule. An attachment passes when its parent is 0, when the parent post no longer
 	 * exists, or when the parent is of an allowed type (PostTypes::is_allowed()) and is not in the trash. Any other parent
-	 * status is fine, because the agent can read that post. list-media's SQL (ListMedia::parent_rule_clauses()) must match
-	 * this method, so the total counts the same rows the rows check keeps.
+	 * status is fine, because the agent can read that post. A parent of a type registered with map_meta_cap off is not
+	 * an allowed type, so its attachments are refused, published or private (SPEC §14.1). list-media's SQL
+	 * (ListMedia::parent_rule_clauses()) must match this method, so the total counts the same rows the rows check keeps.
 	 *
 	 * @param \WP_Post $attachment Attachment.
 	 */

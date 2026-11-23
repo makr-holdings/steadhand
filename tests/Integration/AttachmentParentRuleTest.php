@@ -157,7 +157,36 @@ final class AttachmentParentRuleTest extends MediaToolTestCase {
 		$this->assertSame( $readable, $past['total_pages'] );
 	}
 
-	public function test_an_attachment_under_a_type_the_filter_allows_becomes_readable(): void {
+	/**
+	 * A private parent of a type with map_meta_cap on is allowed once the filter adds it, and its file is then readable.
+	 */
+	public function test_an_attachment_under_a_mapped_type_the_filter_allows_becomes_readable(): void {
+		register_post_type( 'steadhand_media_test', array( 'public' => true ) );
+		try {
+			$parent     = $this->admin_post(
+				array(
+					'post_type'   => 'steadhand_media_test',
+					'post_status' => 'private',
+				)
+			);
+			$attachment = $this->plain( 'application/pdf', $parent );
+			add_filter(
+				'steadhand_allowed_post_types',
+				static fn( array $types ): array => array_merge( $types, array( 'steadhand_media_test' ) )
+			);
+			$this->act_as_agent();
+
+			$this->assertSame( $attachment, $this->output( self::GET_TOOL, array( 'id' => $attachment ) )['id'] );
+			$this->assertSame( array( $attachment ), wp_list_pluck( $this->output( self::LIST_TOOL, array( 'parent' => $parent ) )['items'], 'id' ) );
+		} finally {
+			unregister_post_type( 'steadhand_media_test' );
+		}
+	}
+
+	/**
+	 * A type registered with map_meta_cap off is never allowed, so the filter cannot make its files readable (SPEC §14.1).
+	 */
+	public function test_an_attachment_under_a_map_meta_cap_off_type_stays_refused_when_the_filter_adds_it(): void {
 		$parent     = $this->admin_post(
 			array(
 				'post_type'   => self::SECRET_TYPE,
@@ -171,7 +200,7 @@ final class AttachmentParentRuleTest extends MediaToolTestCase {
 		);
 		$this->act_as_agent();
 
-		$this->assertSame( $attachment, $this->output( self::GET_TOOL, array( 'id' => $attachment ) )['id'] );
-		$this->assertSame( array( $attachment ), wp_list_pluck( $this->output( self::LIST_TOOL, array( 'parent' => $parent ) )['items'], 'id' ) );
+		$this->assertSame( self::NOT_FOUND, $this->refusal_text( $this->tool_result( self::GET_TOOL, array( 'id' => $attachment ) ) ) );
+		$this->assertNotContains( $attachment, wp_list_pluck( $this->output( self::LIST_TOOL, array( 'per_page' => 50 ) )['items'], 'id' ) );
 	}
 }

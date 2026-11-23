@@ -15,7 +15,8 @@ defined( 'ABSPATH' ) || exit;
  * Post type allowlist (SPEC §5, §14.1). Default: post and page. Sites and developers may change the list through the
  * steadhand_allowed_post_types filter (documented in docs/HOOKS.md), but never add an always-excluded type back.
  * Every built-in type other than post and page is excluded too, so a type WordPress adds later is excluded without a
- * change here.
+ * change here. A type registered with map_meta_cap off is excluded as well, whatever the filter returns: core makes none
+ * of its per-post checks for such a type (SPEC §14.1).
  */
 final class PostTypes {
 
@@ -29,9 +30,9 @@ final class PostTypes {
 	 * Returns the post types agents may use, after the filter and the safety checks.
 	 *
 	 * Every value the filter returns is checked. A non-array result falls back to the default. Each value must be a
-	 * string that sanitize_key() leaves unchanged, that names a registered post type, that is not always excluded, and
-	 * that is not a built-in post type other than post and page. Duplicates are removed, and the result is a re-indexed
-	 * list.
+	 * string that sanitize_key() leaves unchanged, that names a registered post type, that is not always excluded, that
+	 * is not a built-in post type other than post and page, and that is registered with map_meta_cap on (see
+	 * uses_meta_caps()). Duplicates are removed, and the result is a re-indexed list.
 	 *
 	 * @return string[]
 	 */
@@ -41,9 +42,9 @@ final class PostTypes {
 		/**
 		 * Filters the post types that Steadhand's post tools may read and write.
 		 *
-		 * The default is post and page. The types in PostTypes::ALWAYS_EXCLUDED, and every built-in type other than
-		 * post and page, are removed whatever this filter returns. Values that are not strings, are not registered
-		 * post types, or are not sanitize_key() fixed points are dropped.
+		 * The default is post and page. The types in PostTypes::ALWAYS_EXCLUDED, every built-in type other than post
+		 * and page, and every type registered with map_meta_cap off are removed whatever this filter returns. Values
+		 * that are not strings, are not registered post types, or are not sanitize_key() fixed points are dropped.
 		 *
 		 * @since 0.2.0
 		 *
@@ -60,6 +61,11 @@ final class PostTypes {
 				continue;
 			}
 			if ( ! post_type_exists( $post_type ) || in_array( $post_type, self::ALWAYS_EXCLUDED, true ) || self::is_builtin_other_than_default( $post_type ) ) {
+				continue;
+			}
+			// Core makes none of its per-post checks for a type with map_meta_cap off, and may rename the capability
+			// to one the agent holds (for example read). Such a type is never allowed (SPEC §14.1).
+			if ( ! self::uses_meta_caps( $post_type ) ) {
 				continue;
 			}
 			$allowed[] = $post_type;
@@ -92,5 +98,18 @@ final class PostTypes {
 	 */
 	public static function is_allowed( string $post_type ): bool {
 		return in_array( $post_type, self::allowed(), true );
+	}
+
+	/**
+	 * Whether a post type is registered with map_meta_cap on, so that core runs its per-post checks for it. This is the
+	 * one definition: allowed() uses it, and so do MetaCaps and SetPostTerms. The test is truthy, as core's own is.
+	 *
+	 * @param string $post_type Post type name. An unregistered name returns false.
+	 * @return bool
+	 */
+	public static function uses_meta_caps( string $post_type ): bool {
+		$object = get_post_type_object( $post_type );
+
+		return $object instanceof \WP_Post_Type && ! empty( $object->map_meta_cap );
 	}
 }

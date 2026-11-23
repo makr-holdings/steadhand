@@ -69,10 +69,10 @@ final class PostReader {
 	 * read_post. Every single-post tool gets its post here, in authorize_object() and in execute(), and list-posts
 	 * checks each row here.
 	 *
-	 * The type and trash rules are checked here and not only in MetaCaps. For a post type registered with
-	 * map_meta_cap false whose read_post capability has another name (here: read), WordPress rewrites the capability
-	 * to that name before the map_meta_cap filter runs, so MetaCaps never sees read_post for such a type. For the other
-	 * types registered with map_meta_cap false, MetaCaps refuses read_post.
+	 * The type and trash rules are checked here and not only in MetaCaps. A post type registered with map_meta_cap off
+	 * is never allowed, so the type rule refuses it whatever its capability names are. WordPress can rename its
+	 * read_post capability to one the agent holds (for example read) before the map_meta_cap filter runs, so MetaCaps
+	 * would not see the call for such a type.
 	 *
 	 * @param int $post_id Post ID.
 	 * @return \WP_Post|null The post if the current user may read it, otherwise null. Refusals are not told apart.

@@ -1,6 +1,7 @@
 <?php
 /**
- * Post types registered with map_meta_cap false, once allowed, cannot be read or edited through Steadhand (SPEC §14.1).
+ * Post types registered with map_meta_cap off are never allowed, so no Steadhand tool reads or writes their posts or
+ * their attachments' parents (SPEC §14.1).
  *
  * @package Steadhand
  */
@@ -10,41 +11,70 @@ declare( strict_types=1 );
 namespace Steadhand\Tests\Integration;
 
 use Steadhand\Capabilities;
+use Steadhand\PostTypes;
+use Steadhand\Taxonomies;
 
 /**
- * Covers the MetaCaps refusal for a type with map_meta_cap off. Core makes none of its per-post checks for such a type,
- * so MetaCaps refuses read_post, edit_post and publish_post for it. Every decision goes through a real
- * current_user_can() call, or a real ability call, and the negative tests check that the post row does not change.
+ * Each negative type below is added through steadhand_allowed_post_types, and every tool must still refuse it. The
+ * positive controls are the same kind of registration with map_meta_cap on (true, and the truthy 1), and they are
+ * allowed and work. Core makes none of its per-post checks for a type with map_meta_cap off, and for some types it renames
+ * the capability to one the agent holds (read), so the allowlist is the layer that refuses them. MetaCaps refuses them too,
+ * as a second layer where core's capability name reaches it.
  */
 final class UnmappedPostTypeTest extends PostWriteTestCase {
 
 	/** Default capability_type, map_meta_cap false. */
 	private const UNMAPPED = 'steadhand_unmapped';
 
-	/** A custom capabilities array with capability_type post and map_meta_cap left at its default, false. */
+	/** Custom capabilities and no map_meta_cap, so map_meta_cap is false. */
 	private const CAPPED = 'steadhand_capped';
 
-	/** The same registration with map_meta_cap true: the positive control. */
+	/** Map_meta_cap false, with read_post renamed to core's read capability, which the agent holds. */
+	private const READ_CAP = 'steadhand_read_cap';
+
+	/** Map_meta_cap false, with read_post and edit_post renamed to read. */
+	private const FULL_READ = 'steadhand_full_read';
+
+	/** Capability_type page, map_meta_cap false. */
+	private const PAGE_CAP = 'steadhand_page_cap';
+
+	/** The positive control: map_meta_cap true. */
 	private const MAPPED = 'steadhand_mapped';
 
-	/**
-	 * A type with map_meta_cap false whose read_post is core's read capability, which the agent holds. See the exception test.
-	 */
-	private const SECRET_RO = 'steadhand_secret_ro';
+	/** The positive control: map_meta_cap 1, which is truthy. */
+	private const MAPPED_INT = 'steadhand_mapped_int';
 
-	/** The two registrations this suite negates. */
-	private const UNMAPPED_TYPES = array( self::UNMAPPED, self::CAPPED );
+	/** Types the rule must refuse. */
+	private const NEGATIVE_TYPES = array( self::UNMAPPED, self::CAPPED, self::READ_CAP, self::FULL_READ, self::PAGE_CAP );
 
-	private const GET_TOOL    = 'steadhand-get-post';
+	/** Types the rule must allow. */
+	private const POSITIVE_TYPES = array( self::MAPPED, self::MAPPED_INT );
+
+	/** A taxonomy attached to every type above and to post, with an assign capability the agent holds. */
+	private const TAX = 'steadhand_unmapped_tax';
+
+	/** A public taxonomy attached only to the negative types, so the taxonomy allowlist must refuse it. */
+	private const TAX_ONLY = 'steadhand_unmapped_only';
+
 	private const UPDATE      = 'steadhand/update-post';
 	private const EDIT_BLOCKS = 'steadhand/edit-blocks';
+	private const CREATE      = 'steadhand-create-post';
+	private const SET_TERMS   = 'steadhand-set-post-terms';
+	private const GET_POST    = 'steadhand-get-post';
+	private const GET_BLOCKS  = 'steadhand-get-blocks';
+	private const GET_RENDER  = 'steadhand-get-rendered';
+	private const TERMS_TOOL  = 'steadhand-get-post-terms';
+	private const LIST_POSTS  = 'steadhand-list-posts';
+	private const GET_MEDIA   = 'steadhand-get-media';
+	private const LIST_MEDIA  = 'steadhand-list-media';
 	private const NOT_FOUND   = 'Not found, or this agent may not access it.';
 
 	/** Two paragraphs, so that edit-blocks has a block to replace. */
 	private const CONTENT = "<!-- wp:paragraph -->\n<p>One</p>\n<!-- /wp:paragraph -->\n\n<!-- wp:paragraph -->\n<p>Two</p>\n<!-- /wp:paragraph -->";
 
 	/**
-	 * Registers the four types and allows them, so that only map_meta_cap decides what the agent may do.
+	 * Registers the seven types and the two taxonomies, and adds all seven types to the filter, so that only the rule
+	 * decides which of them the tools may use.
 	 */
 	protected function setUp(): void {
 		parent::setUp();
@@ -63,6 +93,33 @@ final class UnmappedPostTypeTest extends PostWriteTestCase {
 			)
 		);
 		register_post_type(
+			self::READ_CAP,
+			array(
+				'public'       => true,
+				'map_meta_cap' => false,
+				'capabilities' => array( 'read_post' => 'read' ),
+			)
+		);
+		register_post_type(
+			self::FULL_READ,
+			array(
+				'public'       => true,
+				'map_meta_cap' => false,
+				'capabilities' => array(
+					'read_post' => 'read',
+					'edit_post' => 'read',
+				),
+			)
+		);
+		register_post_type(
+			self::PAGE_CAP,
+			array(
+				'public'          => true,
+				'capability_type' => 'page',
+				'map_meta_cap'    => false,
+			)
+		);
+		register_post_type(
 			self::MAPPED,
 			array(
 				'public'       => true,
@@ -70,25 +127,37 @@ final class UnmappedPostTypeTest extends PostWriteTestCase {
 			)
 		);
 		register_post_type(
-			self::SECRET_RO,
+			self::MAPPED_INT,
 			array(
-				'public'          => true,
-				'map_meta_cap'    => false,
-				'capability_type' => 'secret_ro',
-				'capabilities'    => array( 'read_post' => 'read' ),
+				'public'       => true,
+				'map_meta_cap' => 1,
 			)
 		);
+		register_taxonomy(
+			self::TAX,
+			array_merge( array( 'post' ), self::NEGATIVE_TYPES, self::POSITIVE_TYPES ),
+			array(
+				'public'       => true,
+				'capabilities' => array( 'assign_terms' => Capabilities::READ ),
+			)
+		);
+		register_taxonomy( self::TAX_ONLY, self::NEGATIVE_TYPES, array( 'public' => true ) );
 		add_filter(
 			'steadhand_allowed_post_types',
-			static fn( array $types ): array => array_merge( $types, array( self::UNMAPPED, self::CAPPED, self::MAPPED, self::SECRET_RO ) )
+			static fn( array $types ): array => array_merge( $types, self::NEGATIVE_TYPES, self::POSITIVE_TYPES )
 		);
 	}
 
 	/**
-	 * Removes the types this file registers.
+	 * Removes the types and taxonomies this file registers.
 	 */
 	protected function tearDown(): void {
-		foreach ( array( self::UNMAPPED, self::CAPPED, self::MAPPED, self::SECRET_RO ) as $type ) {
+		foreach ( array( self::TAX, self::TAX_ONLY ) as $taxonomy ) {
+			if ( taxonomy_exists( $taxonomy ) ) {
+				unregister_taxonomy( $taxonomy );
+			}
+		}
+		foreach ( array_merge( self::NEGATIVE_TYPES, self::POSITIVE_TYPES ) as $type ) {
 			if ( post_type_exists( $type ) ) {
 				unregister_post_type( $type );
 			}
@@ -149,50 +218,89 @@ final class UnmappedPostTypeTest extends PostWriteTestCase {
 		return $this->in_write( static fn(): array => $check() );
 	}
 
-	public function test_update_post_is_refused_on_a_draft_and_the_row_is_unchanged(): void {
+	/**
+	 * The refusal text a tool gives for a post type that is not registered at all. Every type the allowlist refuses must
+	 * give this same text, so an agent cannot tell a refused type from a missing one.
+	 *
+	 * @param string $tool Tool name.
+	 * @param array  $args Arguments, with post_type set to the unregistered name.
+	 */
+	private function unregistered_type_text( string $tool, array $args ): string {
+		// Short enough for the post_type schema (20 characters), so the allowlist decides, as it does for a refused type.
+		return $this->refusal_text( $this->tool_result( $tool, array_merge( $args, array( 'post_type' => 'steadhand_nope' ) ) ) );
+	}
+
+	public function test_the_allowlist_never_contains_a_type_registered_with_map_meta_cap_off(): void {
+		foreach ( self::NEGATIVE_TYPES as $type ) {
+			$this->assertFalse( PostTypes::uses_meta_caps( $type ), "$type is registered with map_meta_cap off." );
+			$this->assertFalse( PostTypes::is_allowed( $type ), "$type must not be allowed, even though the filter adds it." );
+			$this->assertNotContains( $type, PostTypes::allowed() );
+		}
+
+		foreach ( self::POSITIVE_TYPES as $type ) {
+			$this->assertTrue( PostTypes::uses_meta_caps( $type ), "$type is registered with map_meta_cap on." );
+			$this->assertTrue( PostTypes::is_allowed( $type ), "$type must be allowed." );
+		}
+
+		$this->assertSame( array( 'post', 'page' ), array_values( array_intersect( PostTypes::allowed(), array( 'post', 'page' ) ) ) );
+		$this->assertEqualsCanonicalizing( array( 'post', 'page' ), array_values( array_diff( PostTypes::allowed(), self::POSITIVE_TYPES ) ) );
+		$this->assertFalse( PostTypes::uses_meta_caps( 'steadhand_never_registered' ), 'An unregistered name has no meta mapping.' );
+	}
+
+	public function test_the_taxonomy_allowlist_follows_the_post_type_allowlist(): void {
+		$this->assertTrue( Taxonomies::is_allowed( self::TAX ), 'Control: a taxonomy attached to post is allowed.' );
+		$this->assertFalse( Taxonomies::is_allowed( self::TAX_ONLY ), 'A taxonomy attached only to refused types is not allowed.' );
+	}
+
+	public function test_create_post_is_refused_for_a_draft_and_for_a_publish_of_every_negative_type_and_creates_no_row(): void {
 		$this->act_as_agent( $this->full_agent_overrides() );
 
-		foreach ( self::UNMAPPED_TYPES as $type ) {
-			$post   = $this->fixture( $type, 'draft' );
-			$before = $this->row( $post );
+		foreach ( self::NEGATIVE_TYPES as $type ) {
+			foreach ( array( 'draft', 'publish' ) as $status ) {
+				$before = $this->post_row_count();
 
-			$result = $this->execute_ability(
-				self::UPDATE,
-				array(
-					'id'    => $post,
-					'title' => 'Changed',
-				)
-			);
+				$this->refusal_text(
+					$this->tool_result(
+						self::CREATE,
+						array(
+							'post_type' => $type,
+							'title'     => 'Refused',
+							'status'    => $status,
+						)
+					)
+				);
 
-			$this->assertWPError( $result, "update-post on a draft of $type must be refused." );
-			$this->assertSame( $before, $this->row( $post ), "A refused update leaves the $type draft unchanged." );
+				$this->assertSame( $before, $this->post_row_count(), "create-post of a $status $type must write no row." );
+			}
 		}
 	}
 
-	public function test_update_post_is_refused_on_a_published_post_and_the_row_is_unchanged(): void {
+	public function test_update_post_is_refused_on_a_draft_and_on_a_published_post_and_the_row_is_unchanged(): void {
 		$this->act_as_agent( $this->full_agent_overrides() );
 
-		foreach ( self::UNMAPPED_TYPES as $type ) {
-			$post   = $this->fixture( $type, 'publish' );
-			$before = $this->row( $post );
+		foreach ( self::NEGATIVE_TYPES as $type ) {
+			foreach ( array( 'draft', 'publish' ) as $status ) {
+				$post   = $this->fixture( $type, $status );
+				$before = $this->row( $post );
 
-			$result = $this->execute_ability(
-				self::UPDATE,
-				array(
-					'id'    => $post,
-					'title' => 'Changed',
-				)
-			);
+				$result = $this->execute_ability(
+					self::UPDATE,
+					array(
+						'id'    => $post,
+						'title' => 'Changed',
+					)
+				);
 
-			$this->assertWPError( $result, "update-post on a published $type post must be refused." );
-			$this->assertSame( $before, $this->row( $post ), "A refused update leaves the published $type post unchanged." );
+				$this->assertWPError( $result, "update-post on a $status $type post must be refused." );
+				$this->assertSame( $before, $this->row( $post ), "A refused update leaves the $status $type post unchanged." );
+			}
 		}
 	}
 
-	public function test_update_post_cannot_publish_a_draft_of_such_a_type(): void {
+	public function test_update_post_cannot_publish_a_draft_of_a_negative_type(): void {
 		$this->act_as_agent( $this->full_agent_overrides() );
 
-		foreach ( self::UNMAPPED_TYPES as $type ) {
+		foreach ( self::NEGATIVE_TYPES as $type ) {
 			$post   = $this->fixture( $type, 'draft' );
 			$before = $this->row( $post );
 
@@ -205,7 +313,7 @@ final class UnmappedPostTypeTest extends PostWriteTestCase {
 			);
 
 			$this->assertWPError( $result, "Publishing a $type draft through update-post must be refused." );
-			$this->assertSame( $before, $this->row( $post ), "The $type draft stays a draft." );
+			$this->assertSame( $before, $this->row( $post ), "The $type draft stays unchanged." );
 			$this->assertSame( 'draft', get_post( $post )->post_status );
 		}
 	}
@@ -213,7 +321,7 @@ final class UnmappedPostTypeTest extends PostWriteTestCase {
 	public function test_edit_blocks_is_refused_on_a_draft_and_on_a_published_post_and_the_row_is_unchanged(): void {
 		$this->act_as_agent( $this->full_agent_overrides() );
 
-		foreach ( self::UNMAPPED_TYPES as $type ) {
+		foreach ( self::NEGATIVE_TYPES as $type ) {
 			foreach ( array( 'draft', 'publish' ) as $status ) {
 				$post   = $this->fixture( $type, $status );
 				$before = $this->row( $post );
@@ -226,26 +334,143 @@ final class UnmappedPostTypeTest extends PostWriteTestCase {
 		}
 	}
 
-	public function test_get_post_is_refused_for_a_published_post_a_private_post_and_another_authors_draft(): void {
+	public function test_get_post_is_refused_for_published_private_pending_and_another_authors_draft_and_for_trash(): void {
 		$this->act_as_agent( $this->full_agent_overrides() );
 
-		foreach ( self::UNMAPPED_TYPES as $type ) {
-			foreach ( array( 'publish', 'private', 'draft' ) as $status ) {
+		foreach ( self::NEGATIVE_TYPES as $type ) {
+			foreach ( array( 'publish', 'private', 'pending', 'draft', 'trash' ) as $status ) {
 				$post = $this->fixture( $type, $status );
 
 				$this->assertSame(
 					self::NOT_FOUND,
-					$this->refusal_text( $this->tool_result( self::GET_TOOL, array( 'id' => $post ) ) ),
-					"get-post on a $status $type post by another author must be refused."
+					$this->refusal_text( $this->tool_result( self::GET_POST, array( 'id' => $post ) ) ),
+					"get-post on a $status $type post must be refused."
 				);
 			}
 		}
 	}
 
-	public function test_inside_a_write_call_the_agent_holds_no_post_capability_on_such_a_type(): void {
+	public function test_get_blocks_get_rendered_and_get_post_terms_are_refused_for_published_private_and_another_authors_draft(): void {
 		$this->act_as_agent( $this->full_agent_overrides() );
 
-		foreach ( self::UNMAPPED_TYPES as $type ) {
+		foreach ( self::NEGATIVE_TYPES as $type ) {
+			foreach ( array( 'publish', 'private', 'draft' ) as $status ) {
+				$post = $this->fixture( $type, $status );
+
+				foreach ( array( self::GET_BLOCKS, self::GET_RENDER, self::TERMS_TOOL ) as $tool ) {
+					$this->assertSame(
+						self::NOT_FOUND,
+						$this->refusal_text( $this->tool_result( $tool, array( 'id' => $post ) ) ),
+						"$tool on a $status $type post must be refused."
+					);
+				}
+			}
+		}
+	}
+
+	public function test_set_post_terms_is_refused_on_every_negative_type_and_the_terms_are_unchanged(): void {
+		$this->act_as_agent( $this->full_agent_overrides() );
+		$term = (int) self::factory()->term->create( array( 'taxonomy' => self::TAX ) );
+
+		// Control: the same taxonomy and term are set on a post, so the refusals below come from the post type.
+		$post = $this->fixture( 'post', 'draft' );
+		$this->output_of(
+			self::SET_TERMS,
+			array(
+				'id'       => $post,
+				'taxonomy' => self::TAX,
+				'terms'    => array( $term ),
+			)
+		);
+		$this->assertSame( array( $term ), wp_get_object_terms( $post, self::TAX, array( 'fields' => 'ids' ) ), 'Control: set-post-terms works on a post.' );
+
+		foreach ( self::NEGATIVE_TYPES as $type ) {
+			foreach ( array( 'draft', 'publish' ) as $status ) {
+				$post = $this->fixture( $type, $status );
+
+				$this->assertSame(
+					self::NOT_FOUND,
+					$this->refusal_text(
+						$this->tool_result(
+							self::SET_TERMS,
+							array(
+								'id'       => $post,
+								'taxonomy' => self::TAX,
+								'terms'    => array( $term ),
+							)
+						)
+					),
+					"set-post-terms on a $status $type post must be refused."
+				);
+				$this->assertSame( array(), wp_get_object_terms( $post, self::TAX, array( 'fields' => 'ids' ) ), "The $type post gets no term." );
+			}
+		}
+	}
+
+	public function test_list_posts_refuses_every_negative_type_with_the_text_of_an_unregistered_type_even_with_a_search(): void {
+		$this->act_as_agent( $this->full_agent_overrides() );
+		foreach ( self::NEGATIVE_TYPES as $type ) {
+			$this->fixture( $type, 'publish' );
+			$this->fixture( $type, 'private' );
+		}
+
+		foreach ( self::NEGATIVE_TYPES as $type ) {
+			foreach ( array( array(), array( 'search' => 'Fixture' ) ) as $extra ) {
+				$args = array_merge( array( 'post_type' => $type ), $extra );
+
+				$this->assertSame(
+					$this->unregistered_type_text( self::LIST_POSTS, $extra ),
+					$this->refusal_text( $this->tool_result( self::LIST_POSTS, $args ) ),
+					"list-posts for $type must refuse exactly as it refuses an unregistered type."
+				);
+			}
+		}
+	}
+
+	public function test_get_media_refuses_an_attachment_whose_parent_is_a_published_or_private_negative_type_post(): void {
+		$this->act_as_agent( $this->full_agent_overrides() );
+
+		foreach ( self::NEGATIVE_TYPES as $type ) {
+			foreach ( array( 'publish', 'private' ) as $status ) {
+				$parent     = $this->fixture( $type, $status );
+				$attachment = $this->plain( $parent );
+
+				$this->assertSame(
+					self::NOT_FOUND,
+					$this->refusal_text( $this->tool_result( self::GET_MEDIA, array( 'id' => $attachment ) ) ),
+					"get-media of a file under a $status $type post must be refused."
+				);
+			}
+		}
+	}
+
+	public function test_list_media_omits_and_does_not_count_files_under_negative_type_parents(): void {
+		$this->act_as_agent( $this->full_agent_overrides() );
+		$unattached = $this->plain( 0 );
+		$mapped     = $this->plain( $this->fixture( self::MAPPED, 'publish' ) );
+		foreach ( self::NEGATIVE_TYPES as $type ) {
+			$this->plain( $this->fixture( $type, 'publish' ) );
+			$this->plain( $this->fixture( $type, 'private' ) );
+		}
+
+		$output = $this->output_of( self::LIST_MEDIA, array( 'per_page' => 50 ) );
+
+		$this->assertEqualsCanonicalizing( array( $unattached, $mapped ), wp_list_pluck( $output['items'], 'id' ) );
+		$this->assertSame( 2, $output['total'], 'total must not count the files under refused parents.' );
+		$this->assertSame( 1, $output['total_pages'] );
+	}
+
+	/**
+	 * Inside a write call, the agent's core answers on the types whose capability names core keeps are all false. MetaCaps
+	 * refuses them. READ_CAP and FULL_READ are left out on purpose: core renames their read_post and edit_post to read
+	 * before the map_meta_cap filter runs, so MetaCaps never sees the call and core answers true for the agent. Steadhand's
+	 * tools refuse those types through the allowlist, which the tests above check. That core answer is a known residual,
+	 * reported to the maintainer. It is not pinned here, so a change in core or in Steadhand does not have to match it.
+	 */
+	public function test_inside_a_write_call_the_agent_is_refused_edit_publish_and_delete_where_core_keeps_the_names(): void {
+		$this->act_as_agent( $this->full_agent_overrides() );
+
+		foreach ( array( self::UNMAPPED, self::CAPPED, self::PAGE_CAP ) as $type ) {
 			$draft     = $this->fixture( $type, 'draft' );
 			$published = $this->fixture( $type, 'publish' );
 
@@ -253,10 +478,8 @@ final class UnmappedPostTypeTest extends PostWriteTestCase {
 				static fn(): array => array(
 					'edit_draft'     => current_user_can( 'edit_post', $draft ),
 					'publish_draft'  => current_user_can( 'publish_post', $draft ),
-					'read_draft'     => current_user_can( 'read_post', $draft ),
 					'edit_published' => current_user_can( 'edit_post', $published ),
 					'publish_pub'    => current_user_can( 'publish_post', $published ),
-					'read_published' => current_user_can( 'read_post', $published ),
 					'delete_draft'   => current_user_can( 'delete_post', $draft ),
 				)
 			);
@@ -268,54 +491,118 @@ final class UnmappedPostTypeTest extends PostWriteTestCase {
 	}
 
 	/**
-	 * The same registration with map_meta_cap true is mapped. This shows that the refusals above are the new rule and not
-	 * some other failure of the fixtures.
+	 * Inside a write call, read_post is refused on a type whose read_post core keeps. As above, READ_CAP and FULL_READ are
+	 * left out, because core renames their read_post to read before the filter runs (see the test above).
 	 */
-	public function test_positive_control_a_mapped_type_is_edited_through_update_post(): void {
+	public function test_inside_a_write_call_the_agent_is_refused_read_post_where_core_keeps_the_name(): void {
 		$this->act_as_agent( $this->full_agent_overrides() );
-		$draft = $this->fixture( self::MAPPED, 'draft' );
 
-		$result = $this->execute_ability(
-			self::UPDATE,
-			array(
-				'id'    => $draft,
-				'title' => 'Changed',
-			)
-		);
+		foreach ( array( self::UNMAPPED, self::CAPPED, self::PAGE_CAP ) as $type ) {
+			$published = $this->fixture( $type, 'publish' );
 
-		$this->assertIsArray( $result, 'update-post on a draft of a map_meta_cap true type must run.' );
-		$this->assertSame( 'Changed', get_post( $draft )->post_title );
+			$this->assertFalse(
+				$this->inside_write( static fn(): array => array( 'read' => current_user_can( 'read_post', $published ) ) )['read'],
+				"read_post on a published $type post, inside a write call, must be false for the agent."
+			);
+		}
 	}
 
-	public function test_positive_control_a_mapped_type_is_granted_inside_a_write_call_and_readable(): void {
+	/**
+	 * The positive controls: both map_meta_cap registrations are allowed and work through the tools. The second one, with
+	 * map_meta_cap 1, shows that the rule is truthy and not a strict true check.
+	 */
+	public function test_positive_controls_both_mapped_registrations_are_created_edited_and_read_through_the_tools(): void {
 		$this->act_as_agent( $this->full_agent_overrides() );
-		$draft     = $this->fixture( self::MAPPED, 'draft' );
-		$published = $this->fixture( self::MAPPED, 'publish' );
 
-		$answers = $this->inside_write(
-			static fn(): array => array(
-				'edit_draft'     => current_user_can( 'edit_post', $draft ),
-				'read_published' => current_user_can( 'read_post', $published ),
+		foreach ( self::POSITIVE_TYPES as $type ) {
+			$created = $this->output_of(
+				self::CREATE,
+				array(
+					'post_type' => $type,
+					'title'     => 'Created',
+					'status'    => 'draft',
+				)
+			);
+			$this->assertSame( $type, get_post( $created['id'] )->post_type, "create-post of a $type draft must run." );
+
+			$draft = $this->fixture( $type, 'draft' );
+			$this->execute_ability(
+				self::UPDATE,
+				array(
+					'id'    => $draft,
+					'title' => 'Changed',
+				)
+			);
+			$this->assertSame( 'Changed', get_post( $draft )->post_title, "update-post on a $type draft must run." );
+
+			$published = $this->fixture( $type, 'publish' );
+			$this->assertSame( 'publish', $this->output_of( self::GET_POST, array( 'id' => $published ) )['status'], "get-post on a $type post must run." );
+		}
+	}
+
+	public function test_positive_controls_inside_a_write_call_the_agent_is_granted_on_both_mapped_registrations(): void {
+		$this->act_as_agent( $this->full_agent_overrides() );
+
+		foreach ( self::POSITIVE_TYPES as $type ) {
+			$draft     = $this->fixture( $type, 'draft' );
+			$published = $this->fixture( $type, 'publish' );
+
+			$answers = $this->inside_write(
+				static fn(): array => array(
+					'edit_draft'     => current_user_can( 'edit_post', $draft ),
+					'read_published' => current_user_can( 'read_post', $published ),
+				)
+			);
+
+			$this->assertTrue( $answers['edit_draft'], "edit_post on a draft of $type is granted inside a write call." );
+			$this->assertTrue( $answers['read_published'], "read_post on a published $type post is granted." );
+		}
+	}
+
+	public function test_positive_controls_a_file_under_a_mapped_parent_is_read_through_get_media_and_list_media(): void {
+		$this->act_as_agent( $this->full_agent_overrides() );
+
+		foreach ( self::POSITIVE_TYPES as $type ) {
+			$parent = $this->fixture( $type, 'publish' );
+			$file   = $this->plain( $parent );
+
+			$this->assertSame( $file, $this->output_of( self::GET_MEDIA, array( 'id' => $file ) )['id'], "get-media of a file under a $type parent must run." );
+			$this->assertSame( array( $file ), wp_list_pluck( $this->output_of( self::LIST_MEDIA, array( 'parent' => $parent ) )['items'], 'id' ) );
+		}
+	}
+
+	/**
+	 * Plain attachment row under the given parent, owned by the fixture administrator.
+	 *
+	 * @param int $parent_id Parent post ID, or 0.
+	 */
+	private function plain( int $parent_id ): int {
+		$id = self::factory()->attachment->create_object(
+			'steadhand-file.pdf',
+			$parent_id,
+			array(
+				'post_author'    => $this->admin_id(),
+				'post_mime_type' => 'application/pdf',
+				'post_title'     => 'Plain file',
+				'post_status'    => 'inherit',
 			)
 		);
+		$this->assertGreaterThan( 0, $id, 'The attachment fixture must be created.' );
 
-		$this->assertTrue( $answers['edit_draft'], 'edit_post on a draft of a map_meta_cap true type is granted.' );
-		$this->assertTrue( $answers['read_published'], 'read_post on a published post of a map_meta_cap true type is granted.' );
-		$this->assertSame( 'publish', $this->output_of( self::GET_TOOL, array( 'id' => $published ) )['status'] );
+		return (int) $id;
 	}
 
 	/**
 	 * The administrator is not a dedicated agent, so the mapping must return core's answer unchanged, inside a write call as
 	 * well as outside one. The expected answers are taken outside a Steadhand call, where MetaCaps does nothing. Core may
-	 * refuse the administrator some of these (edit_post on an unmapped type is not a primitive the admin role holds), so
-	 * the test compares with core, not with a fixed true or false.
+	 * refuse the administrator some of these, so the test compares with core, not with a fixed true or false.
 	 */
 	public function test_an_administrator_keeps_core_answers_on_such_a_type_inside_a_write_call(): void {
 		$agent = $this->full_agent();
 		wp_set_current_user( $agent );
 		$admin = $this->admin_id();
 
-		foreach ( self::UNMAPPED_TYPES as $type ) {
+		foreach ( self::NEGATIVE_TYPES as $type ) {
 			$draft     = $this->fixture( $type, 'draft' );
 			$published = $this->fixture( $type, 'publish' );
 
@@ -347,42 +634,6 @@ final class UnmappedPostTypeTest extends PostWriteTestCase {
 			$this->assertSame( $core, $inside, "An administrator's answers on a $type post inside a write call are core's answers." );
 			$this->assertContains( true, $core, "The comparison is not vacuous: core allows the administrator something on a $type post." );
 		}
-	}
-
-	/**
-	 * The one case where the type's own capabilities decide: a type whose read_post is core's read capability. Core asks
-	 * for read, not for read_post, so MetaCaps does not run, and the agent's steadhand_read is enough. Core's read does not
-	 * depend on the status, so every status except trash is readable. The object check (PostReader::readable_post()) still
-	 * refuses the trash.
-	 */
-	public function test_exception_a_type_whose_own_read_capability_is_read_is_readable_in_every_status_but_trash(): void {
-		$this->act_as_agent( $this->full_agent_overrides() );
-
-		foreach ( array( 'publish', 'draft', 'pending', 'private' ) as $status ) {
-			$post = $this->fixture( self::SECRET_RO, $status );
-			$this->assertSame( $status, $this->output_of( self::GET_TOOL, array( 'id' => $post ) )['status'], "A $status post of this type is readable." );
-		}
-
-		$draft  = $this->fixture( self::SECRET_RO, 'draft' );
-		$before = $this->row( $draft );
-		$this->assertWPError(
-			$this->execute_ability(
-				self::UPDATE,
-				array(
-					'id'    => $draft,
-					'title' => 'Changed',
-				)
-			),
-			'Editing a draft of this type is still refused: core answers with its own renamed capability, which the agent lacks.'
-		);
-		$this->assertSame( $before, $this->row( $draft ) );
-
-		$trashed = $this->fixture( self::SECRET_RO, 'trash' );
-		$this->assertSame(
-			self::NOT_FOUND,
-			$this->refusal_text( $this->tool_result( self::GET_TOOL, array( 'id' => $trashed ) ) ),
-			'A trashed post is still refused.'
-		);
 	}
 
 	/**
