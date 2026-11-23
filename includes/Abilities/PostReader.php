@@ -70,8 +70,9 @@ final class PostReader {
 	 * checks each row here.
 	 *
 	 * The type and trash rules are checked here and not only in MetaCaps. For a post type registered with
-	 * map_meta_cap false, WordPress rewrites the capability to the type's own read_post capability (here: read)
-	 * before the map_meta_cap filter runs, so MetaCaps never sees read_post for such a type.
+	 * map_meta_cap false whose read_post capability has another name (here: read), WordPress rewrites the capability
+	 * to that name before the map_meta_cap filter runs, so MetaCaps never sees read_post for such a type. For the other
+	 * types registered with map_meta_cap false, MetaCaps refuses read_post.
 	 *
 	 * @param int $post_id Post ID.
 	 * @return \WP_Post|null The post if the current user may read it, otherwise null. Refusals are not told apart.

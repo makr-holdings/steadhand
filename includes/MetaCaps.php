@@ -29,6 +29,11 @@ defined( 'ABSPATH' ) || exit;
  * For a post that is missing or in the trash, every mapped capability is refused. A post whose type is not allowed is
  * refused too. An attachment is handled by the media rule for read_post and refused for the other three.
  *
+ * A post type registered with map_meta_cap false is refused as well, once it is allowed. Core makes none of its per-post
+ * checks for such a type (author, status, privacy page), so there is nothing safe to map. For the post types that
+ * keep their own capability names, core renames the capability before this filter runs, so this layer never sees it.
+ * For the rest, the refusal here is the only layer (SPEC §14.1). See unmapped_refusal().
+ *
  * - read_post: steadhand_read.
  * - edit_post: steadhand_write_drafts for a draft, pending or auto-draft; steadhand_publish for a published, scheduled
  *   or private post; refused for any other status (see edit_capability()).
@@ -162,7 +167,49 @@ final class MetaCaps {
 			return array( 'do_not_allow' );
 		}
 
+		if ( ! self::uses_meta_caps( $post ) ) {
+			return self::unmapped_refusal( $cap, $caps );
+		}
+
 		return $this->map_post( $cap, $post, $caps );
+	}
+
+	/**
+	 * Whether the post's type is registered with map_meta_cap true, so that core runs its per-post checks for it.
+	 *
+	 * @param \WP_Post $post The post.
+	 * @return bool
+	 */
+	private static function uses_meta_caps( \WP_Post $post ): bool {
+		$type = get_post_type_object( (string) $post->post_type );
+
+		return $type instanceof \WP_Post_Type && true === $type->map_meta_cap;
+	}
+
+	/**
+	 * The answer for a post type registered with map_meta_cap false. Core skips its own per-post checks for such a type, so
+	 * Steadhand refuses read_post, edit_post and publish_post. delete_post is left to core, which the agent role never
+	 * satisfies (see map_post()). Only an allowed type gets here, so the refusal never reaches another type.
+	 *
+	 * Why not map it: for these types core does not check the author, the status or the privacy page. A mapping to a
+	 * Steadhand capability would then grant the post without any of those checks. SPEC §14.1.
+	 *
+	 * @param string $cap  The meta capability.
+	 * @param array  $caps Core's answer, returned unchanged for delete_post.
+	 * @return array
+	 */
+	private static function unmapped_refusal( string $cap, array $caps ): array {
+		switch ( $cap ) {
+			case 'read_post':
+				return array( 'do_not_allow' );
+
+			case 'edit_post':
+			case 'publish_post':
+				return array( self::NO_GRANT );
+
+			default:
+				return $caps;
+		}
 	}
 
 	/**
