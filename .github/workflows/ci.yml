@@ -9,11 +9,23 @@
 
 name: CI
 
+# Docs-only changes do not run CI: a change that touches only the files listed under paths-ignore is skipped,
+# on pull requests and on main. A change that touches any other file as well gets the full run.
+# CHANGELOG.md and SECURITY.md are not listed, because they ship in the release zips and the build job checks them.
+# Keep the two lists identical.
 on:
   pull_request:
+    paths-ignore:
+      - 'docs/**'
+      - 'README.md'
+      - 'CLAUDE.md'
   push:
     branches:
       - main
+    paths-ignore:
+      - 'docs/**'
+      - 'README.md'
+      - 'CLAUDE.md'
 
 permissions:
   contents: read
