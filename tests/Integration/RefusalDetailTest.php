@@ -10,6 +10,7 @@ declare( strict_types=1 );
 namespace Steadhand\Tests\Integration;
 
 use Steadhand\Abilities\Ability;
+use Steadhand\Abilities\PostReader;
 use Steadhand\Capabilities;
 use Steadhand\Pipeline\Pipeline;
 
@@ -158,47 +159,138 @@ final class RefusalDetailTest extends PostWriteTestCase {
 
 	public function test_a_readable_published_post_gets_the_publish_text_from_every_write_ability(): void {
 		[ $term, $image ] = $this->term_and_image();
+		$future           = gmdate( 'Y-m-d H:i:s', time() + 2 * DAY_IN_SECONDS );
 
-		foreach ( array( 'publish', 'private' ) as $status ) {
+		foreach ( array( 'publish', 'private', 'future' ) as $status ) {
 			foreach ( self::WRITE_ABILITIES as $ability ) {
 				$this->act_as_agent( array( Capabilities::MEDIA => true ) );
-				$post   = $this->admin_post( array( 'post_status' => $status ) );
+				$fields = array( 'post_status' => $status );
+				if ( 'future' === $status ) {
+					$fields['post_date']     = get_date_from_gmt( $future );
+					$fields['post_date_gmt'] = $future;
+				}
+				$post   = $this->admin_post( $fields );
 				$before = $this->row( $post );
+				$this->assertSame( $status, get_post_status( $post ), 'The fixture must keep the status under test.' );
 
 				$result = $this->execute_ability( $ability, $this->args( $ability, $post, $term, $image ) );
 				$this->assert_refused_with( $result, self::DETAIL );
 				$this->assertSame( $before, $this->row( $post ), "$ability must change nothing on a $status post." );
-				$this->assertSame( 'blocked', $this->latest_row( get_current_user_id() )['result'], "$ability must log one blocked row." );
+
+				$log = $this->latest_row( get_current_user_id() );
+				$this->assertSame( 'blocked', $log['result'], "$ability must log one blocked row." );
+				$this->assertSame( self::DETAIL, $log['message'], "$ability must log the refusal text." );
 			}
 		}
 	}
 
-	public function test_upload_media_names_the_capability_only_for_a_readable_live_parent(): void {
-		$parent_text = 'The parent post is published, scheduled or private. Attaching an image to it needs the steadhand_publish capability, which this agent does not hold. Nothing was uploaded.';
-		$upload      = static fn( int $parent_id ): array => array(
+	public function test_a_readable_published_post_gets_the_generic_text_when_the_read_check_is_denied_by_map_meta_cap(): void {
+		[ $term, $image ] = $this->term_and_image();
+		$this->act_as_agent( array( Capabilities::MEDIA => true ) );
+		$post = $this->admin_post( array( 'post_status' => 'publish' ) );
+
+		// The post is published and the agent lacks publish, but read_post is denied, so the post is not readable and the
+		// publish text must not reveal that it exists.
+		add_filter(
+			'map_meta_cap',
+			static fn( array $caps, string $cap ): array => 'read_post' === $cap ? array( 'do_not_allow' ) : $caps,
+			20,
+			2
+		);
+
+		foreach ( self::WRITE_ABILITIES as $ability ) {
+			$result = $this->execute_ability( $ability, $this->args( $ability, $post, $term, $image ) );
+			$this->assertWPError( $result, $ability );
+			$this->assertSame( self::GENERIC, $result->get_error_message(), "$ability must get the generic text." );
+		}
+	}
+
+	/**
+	 * Arguments for upload-media that send a small valid PNG with the given parent.
+	 *
+	 * @param int $parent_id Parent post ID.
+	 * @return array<string, mixed>
+	 */
+	private function upload_args( int $parent_id ): array {
+		return array(
 			'filename'    => 'detail.png',
 			'data_base64' => 'iVBORw0KGgoAAAANSUhEUgAAAAgAAAAICAIAAABLbSncAAAAEUlEQVR42mPQqDiBFTEMLQkAAtVaAbl+5LMAAAAASUVORK5CYII=',
 			'parent'      => $parent_id,
 		);
+	}
+
+	public function test_upload_media_names_the_capability_only_for_a_readable_live_parent(): void {
+		$parent_text = 'The parent post is published, scheduled or private. Attaching an image to it needs the steadhand_publish capability, which this agent does not hold. Nothing was uploaded.';
 
 		$this->act_as_agent( array( Capabilities::MEDIA => true ) );
 		$before = (int) wp_count_posts( 'attachment' )->inherit;
 
 		$published = $this->admin_post( array( 'post_status' => 'publish' ) );
-		$this->assert_refused_with( $this->execute_ability( 'steadhand/upload-media', $upload( $published ) ), $parent_text );
+		$this->assert_refused_with( $this->execute_ability( 'steadhand/upload-media', $this->upload_args( $published ) ), $parent_text );
 		$this->assertSame( 'blocked', $this->latest_row( get_current_user_id() )['result'] );
 
-		$missing = $this->execute_ability( 'steadhand/upload-media', $upload( 999999 ) );
+		$missing = $this->execute_ability( 'steadhand/upload-media', $this->upload_args( 999999 ) );
 		$this->assertWPError( $missing );
 		$this->assertSame( self::GENERIC, $missing->get_error_message(), 'A missing parent must get the generic text.' );
 
 		$trashed = $this->admin_post( array( 'post_status' => 'publish' ) );
 		wp_trash_post( $trashed );
-		$result = $this->execute_ability( 'steadhand/upload-media', $upload( $trashed ) );
+		$result = $this->execute_ability( 'steadhand/upload-media', $this->upload_args( $trashed ) );
 		$this->assertWPError( $result );
 		$this->assertSame( self::GENERIC, $result->get_error_message(), 'A trashed parent must get the generic text.' );
 
 		$this->assertSame( $before, (int) wp_count_posts( 'attachment' )->inherit, 'No refused upload may store an attachment.' );
+	}
+
+	public function test_upload_media_names_the_parent_capability_for_a_private_or_scheduled_parent(): void {
+		$parent_text = 'The parent post is published, scheduled or private. Attaching an image to it needs the steadhand_publish capability, which this agent does not hold. Nothing was uploaded.';
+		$future      = gmdate( 'Y-m-d H:i:s', time() + 2 * DAY_IN_SECONDS );
+
+		$this->act_as_agent( array( Capabilities::MEDIA => true ) );
+		$private = $this->admin_post( array( 'post_status' => 'private' ) );
+		$this->assert_refused_with( $this->execute_ability( 'steadhand/upload-media', $this->upload_args( $private ) ), $parent_text );
+
+		$scheduled = $this->admin_post(
+			array(
+				'post_status'   => 'future',
+				'post_date'     => get_date_from_gmt( $future ),
+				'post_date_gmt' => $future,
+			)
+		);
+		$this->assert_refused_with( $this->execute_ability( 'steadhand/upload-media', $this->upload_args( $scheduled ) ), $parent_text );
+	}
+
+	public function test_upload_media_names_the_parent_capability_for_an_agent_without_write_drafts(): void {
+		$parent_text = 'The parent post is published, scheduled or private. Attaching an image to it needs the steadhand_publish capability, which this agent does not hold. Nothing was uploaded.';
+
+		$this->act_as_agent(
+			array(
+				Capabilities::READ         => true,
+				Capabilities::MEDIA        => true,
+				Capabilities::WRITE_DRAFTS => false,
+			)
+		);
+		$published = $this->admin_post( array( 'post_status' => 'publish' ) );
+
+		$this->assert_refused_with( $this->execute_ability( 'steadhand/upload-media', $this->upload_args( $published ) ), $parent_text );
+	}
+
+	public function test_set_featured_image_names_the_publish_capability_for_a_live_post_and_a_missing_image(): void {
+		$this->act_as_agent( array( Capabilities::MEDIA => true ) );
+		$post   = $this->admin_post( array( 'post_status' => 'publish' ) );
+		$before = $this->row( $post );
+
+		// The media_id names no attachment, so the object check fails and the publish detail is the refusal. The
+		// publish text takes precedence over the missing image (SPEC §5, set-featured-image).
+		$result = $this->execute_ability(
+			'steadhand/set-featured-image',
+			array(
+				'id'       => $post,
+				'media_id' => 999999,
+			)
+		);
+		$this->assert_refused_with( $result, self::DETAIL );
+		$this->assertSame( $before, $this->row( $post ) );
 	}
 
 	public function test_a_missing_post_gets_the_generic_text_from_every_write_ability(): void {
@@ -385,5 +477,41 @@ final class RefusalDetailTest extends PostWriteTestCase {
 		$read = $this->execute_ability( 'steadhand/get-post', array( 'id' => $created['id'] ) );
 		$this->assertIsArray( $read );
 		$this->assertMatchesRegularExpression( '/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/', (string) $read['modified_gmt'] );
+	}
+
+	public function test_modified_utc_gives_null_when_the_local_date_is_not_a_date(): void {
+		$text = new \WP_Post(
+			(object) array(
+				'post_modified'     => 'not a date',
+				'post_modified_gmt' => '0000-00-00 00:00:00',
+			)
+		);
+		$this->assertNull( PostReader::modified_utc( $text ) );
+
+		$impossible = new \WP_Post(
+			(object) array(
+				'post_modified'     => '2026-02-30 10:00:00',
+				'post_modified_gmt' => '0000-00-00 00:00:00',
+			)
+		);
+		$this->assertNull( PostReader::modified_utc( $impossible ) );
+	}
+
+	public function test_modified_utc_converts_a_local_date_from_the_site_timezone_when_the_gmt_date_is_zero(): void {
+		$previous = get_option( 'timezone_string' );
+		update_option( 'timezone_string', 'America/New_York' );
+
+		try {
+			// 10:00 in New York on 23 November 2026 is standard time, UTC-5, so 15:00 UTC.
+			$post = new \WP_Post(
+				(object) array(
+					'post_modified'     => '2026-11-23 10:00:00',
+					'post_modified_gmt' => '0000-00-00 00:00:00',
+				)
+			);
+			$this->assertSame( '2026-11-23T15:00:00Z', PostReader::modified_utc( $post ) );
+		} finally {
+			update_option( 'timezone_string', $previous );
+		}
 	}
 }

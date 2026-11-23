@@ -19,7 +19,8 @@ defined( 'ABSPATH' ) || exit;
  * Output rules that every read tool follows:
  * - Titles and excerpts are plain text (entities decoded). They are never run through get_the_title() or the_excerpt(),
  *   so no "Private:" or "Protected:" prefix is added.
- * - Dates are ISO 8601 in UTC (for example 2026-11-21T10:00:00Z), or null when WordPress stores a zero GMT date.
+ * - Dates are ISO 8601 in UTC (for example 2026-11-21T10:00:00Z), or null when the stored date is zero or unreadable. The one
+ *   exception is modified_gmt, which falls back to the local modified date when WordPress stores a zero GMT date (modified_utc()).
  * - Passwords, emails, logins and post meta are never returned. The author is {id, name} with the display name only.
  * - Content and HTML are capped at MAX_CONTENT_BYTES and cut on a UTF-8 boundary. Large content never fails a call.
  */
@@ -284,7 +285,8 @@ final class PostReader {
 	 * The last-modified time of a post as ISO 8601 UTC, or null when none is stored.
 	 *
 	 * WordPress stores post_modified_gmt as zero on a draft that was never saved after creation, so when it is zero the
-	 * local post_modified is converted to GMT instead.
+	 * local post_modified is read in the site's current timezone (wp_timezone()) and converted to UTC instead. A local
+	 * date that is not a real date, such as 2026-02-30, gives null.
 	 *
 	 * @param \WP_Post $post The post.
 	 */
@@ -299,7 +301,13 @@ final class PostReader {
 			return null;
 		}
 
-		return self::iso_utc( get_gmt_from_date( $local ) );
+		$date   = \DateTimeImmutable::createFromFormat( '!Y-m-d H:i:s', $local, wp_timezone() );
+		$errors = \DateTimeImmutable::getLastErrors();
+		if ( false === $date || ( is_array( $errors ) && ( $errors['warning_count'] > 0 || $errors['error_count'] > 0 ) ) ) {
+			return null;
+		}
+
+		return $date->setTimezone( new \DateTimeZone( 'UTC' ) )->format( 'Y-m-d\TH:i:s\Z' );
 	}
 
 	/**
