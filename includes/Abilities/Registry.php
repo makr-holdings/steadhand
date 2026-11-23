@@ -66,6 +66,7 @@ final class Registry {
 			new CreatePost(),
 			new UpdatePost(),
 			new EditBlocks(),
+			new SetPostTerms(),
 		);
 	}
 

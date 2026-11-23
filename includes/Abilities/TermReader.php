@@ -69,6 +69,46 @@ final class TermReader {
 	}
 
 	/**
+	 * How many terms of one taxonomy a post has, counted in the database. wp_get_object_terms() cannot return a count
+	 * (fields => count fails in core), and the terms themselves are not loaded for it.
+	 *
+	 * @param int    $post_id  Post ID.
+	 * @param string $taxonomy Taxonomy name, already checked against the allowlist.
+	 */
+	public static function assigned_count( int $post_id, string $taxonomy ): int {
+		global $wpdb;
+
+		// Not cached on purpose: a count must reflect the term assignments made just before this call.
+		return (int) $wpdb->get_var( // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching -- See the comment above.
+			$wpdb->prepare(
+				"SELECT COUNT(*) FROM {$wpdb->term_relationships} AS tr INNER JOIN {$wpdb->term_taxonomy} AS tt ON tt.term_taxonomy_id = tr.term_taxonomy_id WHERE tr.object_id = %d AND tt.taxonomy = %s",
+				$post_id,
+				$taxonomy
+			)
+		);
+	}
+
+	/**
+	 * The term IDs a post has in one taxonomy, ascending, with no repeats. Read from the database, not from a
+	 * cache that a write could leave behind. Callers must bound the count first (see assigned_count()).
+	 *
+	 * @param int    $post_id  Post ID.
+	 * @param string $taxonomy Taxonomy name, already checked against the allowlist.
+	 * @return int[]|\WP_Error
+	 */
+	public static function assigned_ids( int $post_id, string $taxonomy ): array|\WP_Error {
+		$ids = wp_get_object_terms( $post_id, $taxonomy, array( 'fields' => 'ids' ) );
+		if ( is_wp_error( $ids ) ) {
+			return $ids;
+		}
+
+		$ids = array_values( array_unique( array_map( 'intval', $ids ) ) );
+		sort( $ids, SORT_NUMERIC );
+
+		return $ids;
+	}
+
+	/**
 	 * Plain-text description of a term, cut on a UTF-8 boundary.
 	 *
 	 * @param string $raw Description as stored.

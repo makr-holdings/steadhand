@@ -1,6 +1,6 @@
 <?php
 /**
- * Registration of the thirteen read tools: the MCP tool list, annotations, strict schemas and exposure.
+ * Registration of the thirteen read tools and the three write tools: the MCP tool list, annotations, strict schemas and exposure.
  *
  * @package Steadhand
  */
@@ -58,12 +58,14 @@ final class ReadToolsRegistrationTest extends TestCase {
 		'steadhand/create-post',
 		'steadhand/update-post',
 		'steadhand/edit-blocks',
+		'steadhand/set-post-terms',
 	);
 
 	private const WRITE_TOOLS = array(
 		'steadhand-create-post',
 		'steadhand-update-post',
 		'steadhand-edit-blocks',
+		'steadhand-set-post-terms',
 	);
 
 	/**
@@ -86,6 +88,7 @@ final class ReadToolsRegistrationTest extends TestCase {
 		'steadhand/create-post',
 		'steadhand/update-post',
 		'steadhand/edit-blocks',
+		'steadhand/set-post-terms',
 	);
 
 	public function test_server_lists_exactly_the_read_and_write_tools(): void {
@@ -115,6 +118,8 @@ final class ReadToolsRegistrationTest extends TestCase {
 		$this->assertTrue( wp_get_ability( 'steadhand/update-post' )->get_meta()['annotations']['destructive'] );
 		$this->assertTrue( wp_get_ability( 'steadhand/edit-blocks' )->get_meta()['annotations']['destructive'] );
 		$this->assertFalse( wp_get_ability( 'steadhand/edit-blocks' )->get_meta()['annotations']['idempotent'] );
+		$this->assertTrue( wp_get_ability( 'steadhand/set-post-terms' )->get_meta()['annotations']['destructive'] );
+		$this->assertTrue( wp_get_ability( 'steadhand/set-post-terms' )->get_meta()['annotations']['idempotent'] );
 		$this->assertFalse( wp_get_ability( 'steadhand/create-post' )->get_meta()['annotations']['destructive'] );
 	}
 
@@ -194,8 +199,12 @@ final class ReadToolsRegistrationTest extends TestCase {
 			}
 			if ( 'array' === $type ) {
 				$this->assertArrayHasKey( 'maxItems', $child, "$name.$property" );
+				// Items are bounded by an enum, a length, an object schema, or, for integer IDs, a minimum and a maximum.
 				$items = $child['items'] ?? array();
-				$this->assertTrue( isset( $items['enum'] ) || isset( $items['maxLength'] ) || 'object' === ( $items['type'] ?? null ), "$name.$property items" );
+				$this->assertTrue(
+					isset( $items['enum'] ) || isset( $items['maxLength'] ) || 'object' === ( $items['type'] ?? null ) || ( isset( $items['minimum'], $items['maximum'] ) && 'integer' === ( $items['type'] ?? null ) ),
+					"$name.$property items"
+				);
 
 				// An array of objects is bounded when each of its properties is.
 				if ( 'object' === ( $items['type'] ?? null ) ) {
