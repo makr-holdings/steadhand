@@ -314,13 +314,13 @@ final class EditBlocksTest extends PostWriteTestCase {
 		$this->assertSame( $before, $this->row( $post ) );
 	}
 
-	public function test_an_insert_that_leaves_a_block_open_is_blocked_by_the_block_markup_rule(): void {
+	public function test_an_insert_that_leaves_a_block_open_is_refused_as_invalid_input_with_nothing_written(): void {
 		$post = $this->fixture();
 		$this->act_as_agent();
 		$before = $this->row( $post );
 
 		$this->assertSame(
-			'steadhand_guardrail_blocked',
+			'steadhand_invalid_input',
 			$this->refusal_code(
 				$this->execute_ability(
 					self::ABILITY,
@@ -662,13 +662,13 @@ final class EditBlocksTest extends PostWriteTestCase {
 		$this->assertStringContainsString( self::paragraph( 'Two' ), $stored, 'The following block keeps its bytes.' );
 	}
 
-	public function test_a_piece_with_an_unbalanced_block_delimiter_is_blocked_by_block_markup(): void {
+	public function test_a_piece_that_is_not_complete_blocks_is_refused_as_invalid_input_with_nothing_written(): void {
 		$post = $this->fixture();
 		$this->act_as_agent();
 		$before = $this->row( $post );
 
 		$this->assertSame(
-			'steadhand_guardrail_blocked',
+			'steadhand_invalid_input',
 			$this->refusal_code(
 				$this->execute_ability(
 					self::ABILITY,

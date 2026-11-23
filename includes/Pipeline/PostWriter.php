@@ -9,6 +9,7 @@ declare( strict_types=1 );
 
 namespace Steadhand\Pipeline;
 
+use Steadhand\Abilities\BlockEditor;
 use Steadhand\PostTypes;
 
 defined( 'ABSPATH' ) || exit;
@@ -72,7 +73,7 @@ final class PostWriter {
 		$data['post_author'] = get_current_user_id();
 
 		return self::with_filters_added(
-			array_values( self::KSES_FILTERS ),
+			self::bracket_filters(),
 			static fn(): int|\WP_Error => wp_insert_post( wp_slash( $data ), true )
 		);
 	}
@@ -134,11 +135,12 @@ final class PostWriter {
 	 * @param int                                                                       $post_id     Post ID.
 	 * @param string                                                                    $stored_sha256 SHA-256 of the stored content the segments were computed from.
 	 * @param array<int, array{type: string, start?: int, length?: int, text?: string}> $segments  Segments, as BlockEditor::segments() gives them.
-	 * @return int|\WP_Error The post ID, or the refusal: steadhand_forbidden, steadhand_refused_content_changed, or the error WordPress reported.
+	 * @param string                                                                    $preview_sha256 SHA-256 of the content the guardrails checked.
+	 * @return int|\WP_Error The post ID, or the refusal: steadhand_forbidden, steadhand_refused_content_changed, steadhand_refused_unsupported_markup, steadhand_update_failed, or the error WordPress reported.
 	 * @throws \LogicException            When called outside a write.
 	 * @throws \InvalidArgumentException  When a segment is not well formed.
 	 */
-	public static function splice( int $post_id, string $stored_sha256, array $segments ): int|\WP_Error {
+	public static function splice( int $post_id, string $stored_sha256, array $segments, string $preview_sha256 ): int|\WP_Error {
 		self::assert_writing();
 
 		$post = self::fresh_post( $post_id );
@@ -151,6 +153,19 @@ final class PostWriter {
 		}
 
 		$content = self::assemble( $post_id, (string) $post->post_content, $segments );
+		if ( is_wp_error( $content ) ) {
+			return $content;
+		}
+
+		// The guardrails checked the content this hash was taken from. A different content now means a filter gave a different
+		// result for the same markup, so nothing is written.
+		if ( ! hash_equals( $preview_sha256, hash( 'sha256', $content ) ) ) {
+			return new \WP_Error(
+				'steadhand_update_failed',
+				__( 'The content WordPress produced for this save was not the same as the content that was checked, so nothing was changed. Try again.', 'steadhand' ),
+				array( 'status' => 500 )
+			);
+		}
 
 		return self::save(
 			$post,
@@ -162,6 +177,100 @@ final class PostWriter {
 				'post_content'          => $content,
 			)
 		);
+	}
+
+	/**
+	 * The save filters a write puts in place for its whole save, as triples of hook, function and priority: the four KSES
+	 * filters, and the custom CSS strip for blocks, which core adds for users without edit_css. The custom CSS pair is
+	 * used only when core has the function. Priority 8 is core's, so the strip runs before the global styles filter (9) and KSES (10).
+	 *
+	 * @return array<int, array{0: string, 1: string, 2: int}>
+	 */
+	private static function bracket_filters(): array {
+		$filters = array();
+		foreach ( self::KSES_FILTERS as $pair ) {
+			$filters[] = array( $pair[0], $pair[1], 10 );
+		}
+
+		if ( function_exists( 'wp_strip_custom_css_from_blocks' ) ) {
+			$filters[] = array( 'content_save_pre', 'wp_strip_custom_css_from_blocks', 8 );
+			$filters[] = array( 'content_filtered_save_pre', 'wp_strip_custom_css_from_blocks', 8 );
+		}
+
+		return $filters;
+	}
+
+	/**
+	 * Runs a step with every bracket filter that is missing added, and removes only the ones this call added. Used for every save
+	 * and every filtered preview, so one list decides the filters.
+	 *
+	 * @param array<int, array{0: string, 1: string, 2: int}> $pairs Filters to have in place.
+	 * @param callable                                        $step  The step.
+	 * @return mixed What the step returned.
+	 */
+	private static function with_filters_added( array $pairs, callable $step ): mixed {
+		$added = array();
+		foreach ( $pairs as $pair ) {
+			if ( false === has_filter( $pair[0], $pair[1] ) ) {
+				add_filter( $pair[0], $pair[1], $pair[2] );
+				$added[] = $pair;
+			}
+		}
+
+		try {
+			return $step();
+		} finally {
+			foreach ( array_reverse( $added ) as $pair ) {
+				remove_filter( $pair[0], $pair[1], $pair[2] );
+			}
+		}
+	}
+
+	/**
+	 * Runs a step while a revision of the post is saved, and makes every revision of that post, and not an autosave, mirror
+	 * the post's row as it is stored at that moment: its title, content and excerpt, read again uncached. A revision is
+	 * made from the row, never from anything in the call, so a revision matches the row even when the save filters would
+	 * change the stored markup (the agent's KSES filters would otherwise strip what an administrator stored).
+	 *
+	 * Used by save() and by Snapshots::post_revision(). The filter applies to inserts of a revision whose parent is $post_id
+	 * only. It is removed in finally.
+	 *
+	 * @param int      $post_id Post whose revisions mirror its row.
+	 * @param callable $step    The step that saves the revision.
+	 * @return mixed What the step returned.
+	 */
+	public static function with_revision_mirror( int $post_id, callable $step ): mixed {
+		$mirror = static function ( array $data, array $postarr, array $unsanitized_postarr, bool $update ) use ( $post_id ): array {
+			unset( $postarr, $unsanitized_postarr );
+
+			if ( $update || 'revision' !== ( $data['post_type'] ?? null ) || (int) ( $data['post_parent'] ?? 0 ) !== $post_id ) {
+				return $data;
+			}
+
+			if ( str_ends_with( (string) ( $data['post_name'] ?? '' ), '-autosave-v1' ) ) {
+				return $data;
+			}
+
+			clean_post_cache( $post_id );
+			$parent = get_post( $post_id );
+			if ( ! $parent instanceof \WP_Post ) {
+				return $data;
+			}
+
+			foreach ( array( 'post_title', 'post_excerpt', 'post_content' ) as $field ) {
+				// $data is slashed here, as core passes it. Core unslashes it after this filter, so the stored bytes come back.
+				$data[ $field ] = wp_slash( (string) $parent->$field );
+			}
+
+			return $data;
+		};
+
+		add_filter( 'wp_insert_post_data', $mirror, PHP_INT_MAX, 4 );
+		try {
+			return $step();
+		} finally {
+			remove_filter( 'wp_insert_post_data', $mirror, PHP_INT_MAX );
+		}
 	}
 
 	/**
@@ -242,8 +351,11 @@ final class PostWriter {
 		add_filter( 'wp_insert_post_data', $restore, PHP_INT_MAX, 4 );
 		try {
 			return self::with_filters_added(
-				array_values( self::KSES_FILTERS ),
-				static fn(): int|\WP_Error => wp_update_post( wp_slash( $data ), true )
+				self::bracket_filters(),
+				static fn(): int|\WP_Error => self::with_revision_mirror(
+					(int) $post->ID,
+					static fn(): int|\WP_Error => wp_update_post( wp_slash( $data ), true )
+				)
 			);
 		} finally {
 			remove_filter( 'wp_insert_post_data', $restore, PHP_INT_MAX );
@@ -271,7 +383,7 @@ final class PostWriter {
 		self::assert_write_call();
 
 		return (string) self::with_filters_added(
-			array_values( self::KSES_FILTERS ),
+			self::bracket_filters(),
 			static function () use ( $post_id, $content ): string {
 				global $wpdb;
 
@@ -298,20 +410,24 @@ final class PostWriter {
 	 * @throws \LogicException           When called outside a write call.
 	 * @throws \InvalidArgumentException When a segment is not well formed, or does not fit the stored content.
 	 */
-	public static function assemble( int $post_id, string $stored, array $segments ): string {
-		return self::assemble_report( $post_id, $stored, $segments )['content'];
+	public static function assemble( int $post_id, string $stored, array $segments ): string|\WP_Error {
+		$report = self::assemble_report( $post_id, $stored, $segments );
+
+		return is_wp_error( $report ) ? $report : $report['content'];
 	}
 
 	/**
 	 * Builds the content the segments describe, and whether the save filters changed any sent run.
 	 *
 	 * A kept segment is the bytes of $stored in its range, verbatim: it is never filtered. Adjacent sent segments are one run,
-	 * and each run is filtered once as a whole (filtered_content()). So no sent piece is filtered apart from the piece next to it,
-	 * and no caller can make this emit bytes that are neither kept from $stored nor sent. Nothing is written.
+	 * and each run is filtered once as a whole (filtered_content()). The segments are checked strictly first (see runs()), and
+	 * anything that cannot be written safely is refused, with nothing written:
 	 *
-	 * The segments are checked strictly first: each is a kept segment (type, start, length, all integers, start and length not
-	 * negative, inside $stored, ascending and not overlapping) or a sent segment (type and text, text a string). Any other shape
-	 * throws, before anything is filtered.
+	 * 1. Stored HTML left open before a sent run (an unterminated script, comment, attribute or tag, as WP_HTML_Tag_Processor reads
+	 *    it) refuses the call, because the sent markup would be read inside it.
+	 * 2. A sent run that is not complete blocks after the filter refuses the call (steadhand_refused_unsupported_markup).
+	 * 3. The structure of the content is checked against the stored content: every stored block that the segments keep is still
+	 *    there, with its name at its new offset (see BlockEditor::preserved()).
 	 *
 	 * Callers are write calls, and it is called while the guardrails preview a write as well as while it is written, so it is
 	 * guarded by Pipeline::is_write_call(), not is_writing().
@@ -319,17 +435,28 @@ final class PostWriter {
 	 * @param int                                                                       $post_id  Post ID. Passed to the filters.
 	 * @param string                                                                    $stored   The stored content the segments refer to.
 	 * @param array<int, array{type: string, start?: int, length?: int, text?: string}> $segments Segments, in document order.
-	 * @return array{content: string, altered: bool} The content, and whether a filter changed any sent run.
+	 * @return array{content: string, altered: bool}|\WP_Error The content, and whether a filter changed any sent run; or a refusal.
 	 * @throws \LogicException           When called outside a write call.
 	 * @throws \InvalidArgumentException When a segment is not well formed, or does not fit the stored content.
 	 */
-	public static function assemble_report( int $post_id, string $stored, array $segments ): array {
+	public static function assemble_report( int $post_id, string $stored, array $segments ): array|\WP_Error {
 		self::assert_write_call();
+
+		$runs = self::runs( $stored, $segments );
+		if ( null === BlockEditor::spans( $stored ) ) {
+			return self::unsupported( __( 'Steadhand cannot read the block structure of this post the way WordPress does, so it cannot edit single blocks in it. Nothing was changed. Use steadhand/update-post with the complete new content instead.', 'steadhand' ) );
+		}
 
 		$content = '';
 		$altered = false;
-		foreach ( self::runs( $stored, $segments ) as $run ) {
+		$kept    = array();
+		foreach ( $runs as $run ) {
 			if ( 'kept' === $run['type'] ) {
+				$kept[]   = array(
+					'start'       => $run['start'],
+					'end'         => $run['start'] + $run['length'],
+					'final_start' => strlen( $content ),
+				);
 				$content .= substr( $stored, $run['start'], $run['length'] );
 				continue;
 			}
@@ -338,17 +465,61 @@ final class PostWriter {
 				continue;
 			}
 
+			if ( self::leaves_html_open( $content ) ) {
+				return self::unsupported( __( 'The stored content leaves HTML open before the place where the markup you sent would go, for example a script, a comment or an attribute that is not closed. Steadhand cannot tell where the sent markup would land. Nothing was changed. A person must fix the post in the block editor.', 'steadhand' ) );
+			}
+
 			$filtered = self::filtered_content( $post_id, $run['text'] );
 			if ( $filtered !== $run['text'] ) {
 				$altered = true;
 			}
+
+			if ( null === BlockEditor::spans( $filtered ) ) {
+				return self::unsupported( __( 'The markup you sent does not stay complete blocks once WordPress has filtered it, so nothing was changed. Send each block with its closing comment, and do not close a block you did not open.', 'steadhand' ) );
+			}
+
 			$content .= $filtered;
+		}
+
+		if ( ! BlockEditor::preserved( $stored, $kept, $content ) ) {
+			return self::unsupported( __( 'The edit would change blocks it does not name, so nothing was changed. Use steadhand/update-post with the complete new content instead.', 'steadhand' ) );
 		}
 
 		return array(
 			'content' => $content,
 			'altered' => $altered,
 		);
+	}
+
+	/**
+	 * Whether the HTML before a point is left open, as WP_HTML_Tag_Processor reads it: an unterminated script, style, textarea,
+	 * title, xmp or iframe, an unterminated comment, or an unterminated tag or attribute value. Fails closed when the processor
+	 * or its paused_at_incomplete_token() method is missing (it is in WordPress 6.5 and later, so in every supported version).
+	 *
+	 * @param string $html HTML before the point.
+	 */
+	private static function leaves_html_open( string $html ): bool {
+		if ( ! class_exists( 'WP_HTML_Tag_Processor' ) || ! method_exists( 'WP_HTML_Tag_Processor', 'paused_at_incomplete_token' ) ) {
+			return true;
+		}
+
+		$processor = new \WP_HTML_Tag_Processor( $html );
+		$tokens    = 0;
+		while ( $processor->next_token() ) {
+			++$tokens; // Read every token: the state after the last one is what matters.
+		}
+
+		return $processor->paused_at_incomplete_token();
+	}
+
+	/**
+	 * A refusal for markup that cannot be written as it was sent.
+	 *
+	 * @param string $message Message for the caller.
+	 * @return \WP_Error
+	 */
+	private static function unsupported( string $message ): \WP_Error {
+		return new \WP_Error( 'steadhand_refused_unsupported_markup', $message, array( 'status' => 409 ) );
 	}
 
 	/**
@@ -477,32 +648,6 @@ final class PostWriter {
 		}
 
 		return $fields;
-	}
-
-	/**
-	 * Runs one step with the given filters added where they are missing, and afterwards removes only the ones this call
-	 * added, so a filter another component added stays as it was. Each pair is hook and function, at priority 10.
-	 *
-	 * @param array<int, array{0: string, 1: string}> $pairs Filters to have in place.
-	 * @param callable                                $step  The step, a write.
-	 * @return mixed What the step returned.
-	 */
-	private static function with_filters_added( array $pairs, callable $step ): mixed {
-		$added = array();
-		foreach ( $pairs as $pair ) {
-			if ( false === has_filter( $pair[0], $pair[1] ) ) {
-				add_filter( $pair[0], $pair[1] );
-				$added[] = $pair;
-			}
-		}
-
-		try {
-			return $step();
-		} finally {
-			foreach ( array_reverse( $added ) as $pair ) {
-				remove_filter( $pair[0], $pair[1] );
-			}
-		}
 	}
 
 	/**

@@ -244,6 +244,13 @@ final class BlockEditor {
 					sprintf( __( 'The markup of operation %d must be valid UTF-8 text.', 'steadhand' ), $where )
 				);
 			}
+
+			if ( null === self::spans( $markup ) ) {
+				return self::invalid(
+					/* translators: %d: the number of the operation, counting from 1. */
+					sprintf( __( 'The markup of operation %d must be complete blocks: every block it opens must be closed in the same markup, and it must not close a block it did not open.', 'steadhand' ), $where )
+				);
+			}
 		}
 
 		foreach ( $paths as $i => $path ) {
@@ -373,6 +380,83 @@ final class BlockEditor {
 		}
 
 		return self::join( $pieces );
+	}
+
+	/**
+	 * Whether the content the segments produce keeps every stored block the segments keep: the same name, at the offset the kept
+	 * bytes moved to. A block whose whole span is kept must also keep its length. A block that is replaced or removed, or that
+	 * lies inside one, is not checked. A block that only has bytes added inside it (an ancestor of an insert) is checked for its
+	 * name and its start only.
+	 *
+	 * The final content must itself be complete blocks that agree with core (spans() is not null).
+	 *
+	 * @param string                                                    $stored         Stored content.
+	 * @param array<int, array{start: int, end: int, final_start: int}> $kept           Kept ranges, in stored offsets, with the
+	 *                                                                                  offset each starts at in the result.
+	 * @param string                                                    $result_content The content the segments produce.
+	 *
+	 * @return bool
+	 */
+	public static function preserved( string $stored, array $kept, string $result_content ): bool {
+		$stored_tree = self::spans( $stored );
+		$final_tree  = self::spans( $result_content );
+		if ( null === $stored_tree || null === $final_tree ) {
+			return false;
+		}
+
+		$by_start = array();
+		foreach ( self::flatten( $final_tree ) as $candidate ) {
+			$by_start[ $candidate['start'] ][] = $candidate;
+		}
+
+		foreach ( self::flatten( $stored_tree ) as $node ) {
+			$run = null;
+			foreach ( $kept as $range ) {
+				if ( $range['start'] <= $node['start'] && $node['start'] < $range['end'] ) {
+					$run = $range;
+					break;
+				}
+			}
+			if ( null === $run ) {
+				continue;
+			}
+
+			$at     = $run['final_start'] + $node['start'] - $run['start'];
+			$whole  = $node['end'] <= $run['end'];
+			$length = $node['end'] - $node['start'];
+
+			$found = false;
+			foreach ( $by_start[ $at ] ?? array() as $candidate ) {
+				if ( $candidate['name'] === $node['name'] && ( ! $whole || $candidate['end'] - $candidate['start'] === $length ) ) {
+					$found = true;
+					break;
+				}
+			}
+
+			if ( ! $found ) {
+				return false;
+			}
+		}
+
+		return true;
+	}
+
+	/**
+	 * Every node of a span tree, parents before children, in document order.
+	 *
+	 * @param array<int, array<string, mixed>> $tree Spans.
+	 * @return array<int, array<string, mixed>>
+	 */
+	private static function flatten( array $tree ): array {
+		$out = array();
+		foreach ( $tree as $node ) {
+			$out[] = $node;
+			foreach ( self::flatten( $node['children'] ) as $child ) {
+				$out[] = $child;
+			}
+		}
+
+		return $out;
 	}
 
 	/**

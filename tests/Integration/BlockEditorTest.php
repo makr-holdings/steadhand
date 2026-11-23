@@ -364,7 +364,8 @@ final class BlockEditorTest extends TestCase {
 		);
 
 		$this->assertNull( BlockEditor::spans( $content ), 'The scan must not be trusted when core reads the blocks differently.' );
-		$this->refusal( BlockEditor::apply( $content, array( $this->op( 'replace', '1', 'core/paragraph', '<!-- wp:x /-->' ) ) ), 'steadhand_refused_unsupported_markup' );
+		// A remove sends no markup, so the markup check (which reads core too) does not reach first.
+		$this->refusal( BlockEditor::apply( $content, array( $this->op( 'remove', '1', 'core/paragraph' ) ) ), 'steadhand_refused_unsupported_markup' );
 	}
 
 	public function test_a_missing_path_or_a_name_that_differs_is_a_block_mismatch(): void {

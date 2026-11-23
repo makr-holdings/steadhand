@@ -272,7 +272,7 @@ final class PostWriterSpliceTest extends PostWriteTestCase {
 		$before = $this->row( $post );
 
 		try {
-			PostWriter::splice( $post, hash( 'sha256', (string) $before['post_content'] ), array() );
+			PostWriter::splice( $post, hash( 'sha256', (string) $before['post_content'] ), array(), hash( 'sha256', '' ) );
 			$this->fail( 'splice must refuse to run outside a write.' );
 		} catch ( \LogicException $error ) {
 			unset( $error );
@@ -295,7 +295,7 @@ final class PostWriterSpliceTest extends PostWriteTestCase {
 		);
 
 		$result = $this->in_write(
-			static fn() => PostWriter::splice( $post, hash( 'sha256', 'something else' ), $segments )
+			static fn() => PostWriter::splice( $post, hash( 'sha256', 'something else' ), $segments, hash( 'sha256', '' ) )
 		);
 
 		$this->assertSame( 'steadhand_refused_content_changed', $this->refusal_code( $result ) );
@@ -312,7 +312,7 @@ final class PostWriterSpliceTest extends PostWriteTestCase {
 			array(
 				'type'   => 'kept',
 				'start'  => 0,
-				'length' => 64,
+				'length' => strpos( $stored, "\n\n" ),
 			),
 			array(
 				'type' => 'sent',
@@ -321,7 +321,7 @@ final class PostWriterSpliceTest extends PostWriteTestCase {
 		);
 
 		$result = $this->in_write(
-			static fn() => PostWriter::splice( $post, hash( 'sha256', $stored ), $segments )
+			static fn() => PostWriter::splice( $post, hash( 'sha256', $stored ), $segments, hash( 'sha256', (string) PostWriter::assemble( $post, $stored, $segments ) ) )
 		);
 
 		$this->assertSame( $post, $result );
@@ -330,7 +330,7 @@ final class PostWriterSpliceTest extends PostWriteTestCase {
 			$this->assertSame( $before[ $field ], $after[ $field ], "$field must be byte-identical after a splice." );
 		}
 		$this->assertSame( $filtered_before, (string) get_post( $post )->post_content_filtered );
-		$this->assertSame( substr( $stored, 0, 64 ) . "\n\n<!-- wp:paragraph -->\n<p>Changed</p>\n<!-- /wp:paragraph -->", $after['post_content'] );
+		$this->assertSame( substr( $stored, 0, strpos( $stored, "\n\n" ) ) . "\n\n<!-- wp:paragraph -->\n<p>Changed</p>\n<!-- /wp:paragraph -->", $after['post_content'] );
 	}
 
 	public function test_a_splice_filters_the_save_of_another_post_made_from_a_save_listener(): void {
@@ -370,7 +370,7 @@ final class PostWriterSpliceTest extends PostWriteTestCase {
 		}
 		add_action( 'save_post', $listener );
 		try {
-			$this->in_write( static fn() => PostWriter::splice( $post, hash( 'sha256', $stored ), $segments ) );
+			$this->in_write( static fn() => PostWriter::splice( $post, hash( 'sha256', $stored ), $segments, hash( 'sha256', (string) PostWriter::assemble( $post, $stored, $segments ) ) ) );
 		} finally {
 			remove_action( 'save_post', $listener );
 			foreach ( self::KSES_PAIRS as $pair ) {
@@ -404,7 +404,7 @@ final class PostWriterSpliceTest extends PostWriteTestCase {
 		add_action( 'save_post', $listener );
 
 		try {
-			$this->in_write( static fn() => PostWriter::splice( $post, hash( 'sha256', $stored ), $segments ) );
+			$this->in_write( static fn() => PostWriter::splice( $post, hash( 'sha256', $stored ), $segments, hash( 'sha256', (string) PostWriter::assemble( $post, $stored, $segments ) ) ) );
 		} finally {
 			remove_action( 'save_post', $listener );
 		}
