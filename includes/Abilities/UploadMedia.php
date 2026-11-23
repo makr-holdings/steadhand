@@ -16,8 +16,9 @@ use Steadhand\Pipeline\MediaWriter;
 defined( 'ABSPATH' ) || exit;
 
 /**
- * Stores one JPEG or PNG image as a new attachment (SPEC §5, §14.1). The bytes come from a base64 payload only;
- * fetching a URL is a separate change. The file's own bytes decide its type, and the file name's extension must match them.
+ * Stores one JPEG or PNG image as a new attachment (SPEC §5, §14.1). The bytes come from a base64 payload only; this
+ * ability never fetches a URL (SPEC D22). The file's own bytes decide its type, and the file name's extension must match
+ * them.
  *
  * Every refusal in validate_input() happens before anything is written. The payload is never kept in the change log: log_input()
  * stores its digest (SPEC §7).
