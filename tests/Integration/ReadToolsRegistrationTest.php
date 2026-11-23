@@ -1,6 +1,6 @@
 <?php
 /**
- * Registration of the thirteen read tools and the three write tools: the MCP tool list, annotations, strict schemas and exposure.
+ * Registration of the thirteen read tools and the four write tools: the MCP tool list, annotations, strict schemas and exposure.
  *
  * @package Steadhand
  */
@@ -52,7 +52,7 @@ final class ReadToolsRegistrationTest extends TestCase {
 	);
 
 	/**
-	 * The three write tools, which come after the read tools in the registry.
+	 * The four write tools, which come after the read tools in the registry.
 	 */
 	private const WRITE_ABILITIES = array(
 		'steadhand/create-post',

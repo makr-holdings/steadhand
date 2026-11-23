@@ -247,10 +247,10 @@ An interface with two methods.
 The call as the rules see it. Every property is public and read-only.
 
 - `ability` (`string`): the ability name, `steadhand/create-post`, `steadhand/update-post`, `steadhand/edit-blocks` or `steadhand/set-post-terms`.
-- `capability` (`string`): the Steadhand capability the ability names. All three write tools name `steadhand_write_drafts`. A call that edits a live post or sets a live status also needs `steadhand_publish`. The object check decides that, not this property.
+- `capability` (`string`): the Steadhand capability the ability names. All four write tools name `steadhand_write_drafts`. A call that edits a live post or sets a live status also needs `steadhand_publish`. The object check decides that, not this property.
 - `user_id` (`int`): the agent user making the call.
 - `input` (`array<string, mixed>`): the validated and sanitized input, as the rules before this one left it. Defaults are filled in, so `create-post` always has `status` and `post_type`. After a fix, it is the rewritten input, already checked again.
-- `object_type` (`string`): `post` for all three write tools.
+- `object_type` (`string`): `post` for all four write tools.
 - `object_id` (`int`): the ID of the post the call changes. It is 0 for `create-post`, which has no ID until it runs.
 - `content` (`array<string, string>`): the input fields that will be stored as post content, keyed by field name, each holding block markup. For `create-post` and `update-post` it has `content` when the caller sent it, and is empty otherwise. For `edit-blocks` it has `content`, the whole resulting content, when the operations can be applied. When they cannot, it has `operations.<n>.markup` for each operation that sends markup instead. Those keys are not stored, and nothing is written. `set-post-terms` has no content, so its `content` is always empty. Title and excerpt are not included.
 
