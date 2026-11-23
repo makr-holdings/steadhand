@@ -6,6 +6,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). The
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-11-23
+
 ### Security
 - An exception thrown during Steadhand's permission check could reach the agent. The check calls the ability's input and object rules, and `current_user_can()`, which runs other plugins' `map_meta_cap` and `user_has_cap` filters. Steadhand did not catch a throw from those calls, so the exception's message reached the agent as the tool's error text, and that message can contain a file path or internal detail. The text came through WordPress core's ability callback wrapper or the MCP Adapter's guard. Affects 0.1.0 and 0.2.0, which both run the same unguarded `authorize()` call in `check()` and `run()`.
 - Fixed: a throw during the permission check now fails closed. The call is refused with `steadhand_error` (500) and the fixed message "The permission check could not be completed, so the call was refused. Another plugin or the site raised an error during the check. Ask the site administrator.", and it is logged once as `blocked` with that message. A refused call is not counted toward the rate limits (30 writes a minute, 100 uploads a day), so a call that never ran uses none of the budget. Nothing runs after the throw. A throw that escapes the pipeline entirely is turned into an error by the ability callbacks and is not logged: the generic `steadhand_error` text for reads and for permission checks, and the "may have been partly applied" text for the execute callback of a write. The exception message is never returned or logged.
