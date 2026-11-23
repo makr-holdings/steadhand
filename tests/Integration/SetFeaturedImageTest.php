@@ -413,6 +413,42 @@ final class SetFeaturedImageTest extends PostWriteTestCase {
 	}
 
 	/**
+	 * A post trashed after the permission check, while the guardrails run, is refused by the ability's own re-check with the
+	 * not-found refusal, and nothing is written.
+	 */
+	public function test_a_post_trashed_after_the_check_is_refused_as_not_found(): void {
+		$this->act_as_agent( array( 'steadhand_media' => true ) );
+		$post  = $this->draft();
+		$image = $this->image();
+		$done  = false;
+
+		add_filter(
+			'steadhand_rate_limit_per_minute',
+			static function ( $limit ) use ( $post, &$done ) {
+				if ( ! $done ) {
+					$done = true;
+					wp_trash_post( $post );
+				}
+
+				return $limit;
+			}
+		);
+
+		$result = $this->set(
+			array(
+				'id'       => $post,
+				'media_id' => $image,
+			)
+		);
+
+		$this->refused_leaving( $result, 'steadhand_not_found', $post, 0 );
+		$this->assertSame( self::NOT_FOUND, $result->get_error_message() );
+		$this->assertSame( 404, $result->get_error_data()['status'] );
+		$this->assertTrue( $done, 'The post must be trashed during the guardrails.' );
+		$this->assertSame( 'trash', get_post_status( $post ) );
+	}
+
+	/**
 	 * A post type that is registered without meta mapping is refused, even when the filter adds it to the allowed list.
 	 */
 	public function test_a_post_type_with_map_meta_cap_off_is_refused_even_when_the_filter_allows_it(): void {
