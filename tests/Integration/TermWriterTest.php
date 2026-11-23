@@ -96,7 +96,9 @@ final class TermWriterTest extends PostWriteTestCase {
 	 * @return mixed
 	 */
 	private function set_in_write( int $post_id, string $taxonomy, array $term_ids ): mixed {
-		return $this->in_write( static fn(): mixed => TermWriter::set( $post_id, $taxonomy, $term_ids ) );
+		$expected = $this->term_ids_of( $post_id, $taxonomy );
+
+		return $this->in_write( static fn(): mixed => TermWriter::set( $post_id, $taxonomy, $term_ids, $expected, static fn(): bool => true ) );
 	}
 
 	/**
@@ -107,7 +109,7 @@ final class TermWriterTest extends PostWriteTestCase {
 		$post = $this->admin_post();
 		$tag  = (int) self::factory()->term->create( array( 'taxonomy' => 'post_tag' ) );
 
-		$this->assertThrowsClass( \LogicException::class, static fn() => TermWriter::set( $post, 'post_tag', array( $tag ) ) );
+		$this->assertThrowsClass( \LogicException::class, static fn() => TermWriter::set( $post, 'post_tag', array( $tag ), array(), static fn(): bool => true ) );
 		$this->assertSame( array(), $this->term_ids_of( $post, 'post_tag' ) );
 	}
 
@@ -138,7 +140,7 @@ final class TermWriterTest extends PostWriteTestCase {
 			function () use ( $post, $bad, &$refused ): void {
 				foreach ( $bad as $term_ids ) {
 					try {
-						TermWriter::set( $post, 'post_tag', $term_ids );
+						TermWriter::set( $post, 'post_tag', $term_ids, array(), static fn(): bool => true );
 					} catch ( \InvalidArgumentException ) {
 						++$refused;
 					}
@@ -285,5 +287,56 @@ final class TermWriterTest extends PostWriteTestCase {
 		$stored = $this->set_in_write( $post, self::NAVIGATION, array( $term ) );
 
 		$this->assertSame( array( $term ), $stored );
+	}
+
+	/**
+	 * The permission check is run again on the fresh post right before the write. When it refuses, nothing is written.
+	 */
+	public function test_a_permission_check_that_refuses_at_the_write_leaves_the_terms_unchanged(): void {
+		$this->act_as_agent();
+		$post = $this->admin_post( array( 'post_status' => 'draft' ) );
+		$tag  = (int) self::factory()->term->create( array( 'taxonomy' => 'post_tag' ) );
+		$seen = null;
+
+		$result = $this->in_write(
+			static function () use ( $post, $tag, &$seen ): mixed {
+				return TermWriter::set(
+					$post,
+					'post_tag',
+					array( $tag ),
+					array(),
+					static function ( \WP_Post $fresh ) use ( &$seen ): bool {
+						$seen = $fresh->ID;
+						return false;
+					}
+				);
+			}
+		);
+
+		$this->assertSame( $post, $seen, 'The check must receive the post that is being written.' );
+		$this->assertSame( 'steadhand_forbidden', $this->refusal_code( $result ) );
+		$this->assertSame( array(), $this->term_ids_of( $post, 'post_tag' ) );
+	}
+
+	/**
+	 * When the terms differ from the set the caller computed from, the write is refused with a 409, and nothing is written.
+	 */
+	public function test_terms_that_changed_since_the_caller_read_them_are_refused_and_nothing_is_written(): void {
+		$this->act_as_agent();
+		$post  = $this->admin_post( array( 'post_status' => 'draft' ) );
+		$first = (int) self::factory()->term->create( array( 'taxonomy' => 'post_tag' ) );
+		$other = (int) self::factory()->term->create( array( 'taxonomy' => 'post_tag' ) );
+		$mine  = (int) self::factory()->term->create( array( 'taxonomy' => 'post_tag' ) );
+		wp_set_object_terms( $post, array( $first ), 'post_tag', false );
+		$before = $this->term_ids_of( $post, 'post_tag' );
+		wp_set_object_terms( $post, array( $other ), 'post_tag', true );
+
+		$result = $this->in_write(
+			static fn(): mixed => TermWriter::set( $post, 'post_tag', array( $mine ), $before, static fn(): bool => true )
+		);
+
+		$this->assertSame( 'steadhand_refused_content_changed', $this->refusal_code( $result ) );
+		$this->assertSame( 409, $result->get_error_data()['status'] );
+		$this->assertSame( array( min( $first, $other ), max( $first, $other ) ), $this->term_ids_of( $post, 'post_tag' ) );
 	}
 }

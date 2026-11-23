@@ -29,22 +29,68 @@ final class SetPostTermsTest extends PostWriteTestCase {
 	private const PRIVATE    = 'steadhand_private_test';
 	private const CUSTOM_CAP = 'steadhand_shelve';
 	private const REFUSAL    = 'Not found, or this agent may not access it.';
+	private const PAGE_TAX   = 'steadhand_page_test';
+	private const PAGE_EDIT  = 'steadhand_page_edit_test';
+	private const ONLY_POST  = 'steadhand_post_only_test';
+	private const PLAIN      = 'steadhand_plain_test';
+	private const LOCKED     = 'steadhand_locked';
+	private const LOCKED_TAX = 'steadhand_locked_tax_test';
+	private const META_CAP   = 'steadhand_meta_cap_test';
 
 	/**
 	 * Removes the taxonomies, post types, filters and actions this file adds.
 	 */
 	protected function tearDown(): void {
 		remove_all_filters( 'steadhand_rate_limit_per_minute' );
+		remove_all_filters( 'wp_get_object_terms' );
+		remove_all_filters( 'wp_check_post_lock_window' );
 		remove_all_actions( 'set_object_terms' );
-		foreach ( array( self::SHELF, self::CUSTOM, self::NAVIGATION, self::PRIVATE ) as $taxonomy ) {
+		delete_option( 'wp_page_for_privacy_policy' );
+		$this->use_permalinks( '' );
+		foreach ( array( self::SHELF, self::CUSTOM, self::NAVIGATION, self::PRIVATE, self::PAGE_TAX, self::PAGE_EDIT, self::ONLY_POST, self::LOCKED_TAX, self::META_CAP ) as $taxonomy ) {
 			if ( taxonomy_exists( $taxonomy ) ) {
 				unregister_taxonomy( $taxonomy );
 			}
 		}
-		if ( post_type_exists( self::BOOK_TYPE ) ) {
-			unregister_post_type( self::BOOK_TYPE );
+		foreach ( array( self::BOOK_TYPE, self::PLAIN, self::LOCKED ) as $type ) {
+			if ( post_type_exists( $type ) ) {
+				unregister_post_type( $type );
+			}
 		}
 		parent::tearDown();
+	}
+
+	/**
+	 * Sets the permalink structure in the option and in the rewrite object, and flushes the rules, so get_permalink() follows it.
+	 *
+	 * @param string $structure Permalink structure, or '' for the default.
+	 */
+	private function use_permalinks( string $structure ): void {
+		global $wp_rewrite;
+		update_option( 'permalink_structure', $structure );
+		$wp_rewrite->init();
+		$wp_rewrite->set_permalink_structure( $structure );
+		$wp_rewrite->flush_rules();
+	}
+
+	/**
+	 * Runs a change once, the first time WordPress reads a post's terms after this is called. The ability's first read of
+	 * the terms comes after its check and before its write, so the change lands between them.
+	 *
+	 * @param callable $change What to do.
+	 */
+	private function once_after_the_first_read( callable $change ): void {
+		$fired = false;
+		add_filter(
+			'wp_get_object_terms',
+			static function ( $terms ) use ( &$fired, $change ) {
+				if ( ! $fired ) {
+					$fired = true;
+					$change();
+				}
+				return $terms;
+			}
+		);
 	}
 
 	/**
@@ -973,6 +1019,7 @@ final class SetPostTermsTest extends PostWriteTestCase {
 		$this->assertSame( 'steadhand_refused_too_many_terms', $this->refusal_code( $result ) );
 		$this->assertSame( 409, $result->get_error_data()['status'] );
 		$this->assertCount( 501, $this->stored_ids( $post, 'post_tag' ) );
+		$this->assertSame( 'error', $this->latest_row( get_current_user_id() )['result'], 'A refusal made at execute time is logged as an error.' );
 	}
 
 	public function test_the_registration_has_strict_schemas_bounds_and_defaults(): void {
@@ -1113,5 +1160,480 @@ final class SetPostTermsTest extends PostWriteTestCase {
 			),
 			'Remove may leave two formats; the result is checked at execute time.'
 		);
+	}
+
+	/**
+	 * Lets the post's current edit lock look stale to the edit-lock rule, so the write proceeds, and runs $change once, while
+	 * the guardrails run, after the permission check and before the ability's own execute step.
+	 *
+	 * @param int      $post_id Post ID.
+	 * @param callable $change  What to do.
+	 */
+	private function change_during_the_guardrails( int $post_id, callable $change ): void {
+		update_post_meta( $post_id, '_edit_lock', ( time() - 1000 ) . ':' . $this->admin_id() );
+		$fired = false;
+		add_filter(
+			'wp_check_post_lock_window',
+			static function ( $window ) use ( &$fired, $change ) {
+				if ( ! $fired ) {
+					$fired = true;
+					$change();
+				}
+				return $window;
+			}
+		);
+	}
+
+	/**
+	 * A publish between the permission check and the write: the check runs again on the post as it now is, and refuses.
+	 */
+	public function test_a_publish_between_the_check_and_the_write_is_refused_and_nothing_changes(): void {
+		$this->act_as_agent();
+		$post = $this->draft();
+		$tag  = $this->term( 'post_tag', 'Late' );
+		$this->once_after_the_first_read(
+			static function () use ( $post ): void {
+				wp_update_post(
+					array(
+						'ID'          => $post,
+						'post_status' => 'publish',
+					)
+				);
+			}
+		);
+
+		$result = $this->execute_ability(
+			self::ABILITY,
+			array(
+				'id'       => $post,
+				'taxonomy' => 'post_tag',
+				'terms'    => array( $tag ),
+			)
+		);
+
+		$this->assertSame( 'steadhand_forbidden', $this->refusal_code( $result ) );
+		$this->assert_unchanged( $post, 'post_tag', array() );
+	}
+
+	/**
+	 * A term added between the ability's read and its write is not lost to a full replace: the call is refused, for each mode.
+	 */
+	public function test_a_term_added_between_the_read_and_the_write_is_refused_and_not_lost(): void {
+		$cases = array(
+			'replace' => array( 'mine', 'replace' ),
+			'add'     => array( 'mine', 'add' ),
+			'remove'  => array( 'first', 'remove' ),
+		);
+
+		foreach ( $cases as $mode => list( $sent, $mode_name ) ) {
+			remove_all_filters( 'wp_get_object_terms' );
+			$this->act_as_agent();
+			$post  = $this->draft();
+			$first = $this->term( 'post_tag', "First $mode" );
+			$extra = $this->term( 'post_tag', "Extra $mode" );
+			$mine  = $this->term( 'post_tag', "Mine $mode" );
+			wp_set_object_terms( $post, array( $first ), 'post_tag', false );
+			$this->once_after_the_first_read(
+				static fn() => wp_set_object_terms( $post, array( $extra ), 'post_tag', true )
+			);
+
+			$result = $this->execute_ability(
+				self::ABILITY,
+				array(
+					'id'       => $post,
+					'taxonomy' => 'post_tag',
+					'terms'    => array( 'first' === $sent ? $first : $mine ),
+					'mode'     => $mode_name,
+				)
+			);
+
+			$this->assertSame( 'steadhand_refused_content_changed', $this->refusal_code( $result ), $mode );
+			$this->assertSame( 409, $result->get_error_data()['status'] );
+			$this->assertSame( array( min( $first, $extra ), max( $first, $extra ) ), $this->stored_ids( $post, 'post_tag' ), "$mode must keep the other term." );
+		}
+	}
+
+	/**
+	 * A post trashed after the check is refused by the execute step's own check, with the not-found refusal, and nothing changes.
+	 */
+	public function test_a_post_trashed_after_the_check_is_refused_by_the_execute_check(): void {
+		$this->act_as_agent();
+		$post = $this->draft();
+		$tag  = $this->term( 'post_tag', 'Gone' );
+		$this->change_during_the_guardrails(
+			$post,
+			static function () use ( $post ): void {
+				wp_update_post(
+					array(
+						'ID'          => $post,
+						'post_status' => 'trash',
+					)
+				);
+			}
+		);
+
+		$result = $this->execute_ability(
+			self::ABILITY,
+			array(
+				'id'       => $post,
+				'taxonomy' => 'post_tag',
+				'terms'    => array( $tag ),
+			)
+		);
+
+		$this->assertSame( 'steadhand_not_found', $this->refusal_code( $result ) );
+		$this->assertSame( array(), $this->stored_ids( $post, 'post_tag' ) );
+	}
+
+	/**
+	 * A term deleted after the check is refused by the execute step's own validation, with that step's wording.
+	 */
+	public function test_a_term_deleted_after_the_check_is_refused_by_the_execute_validation(): void {
+		$this->act_as_agent();
+		$post = $this->draft();
+		$tag  = $this->term( 'post_tag', 'Vanishing' );
+		$this->change_during_the_guardrails(
+			$post,
+			static function () use ( $tag ): void {
+				wp_delete_term( $tag, 'post_tag' );
+			}
+		);
+
+		$result = $this->execute_ability(
+			self::ABILITY,
+			array(
+				'id'       => $post,
+				'taxonomy' => 'post_tag',
+				'terms'    => array( $tag ),
+			)
+		);
+
+		$this->assertSame( 'steadhand_invalid_input', $this->refusal_code( $result ) );
+		$this->assertStringContainsString( 'of the taxonomy post_tag', $result->get_error_message() );
+		$this->assert_unchanged( $post, 'post_tag', array() );
+	}
+
+	/**
+	 * A published post whose category changes moves to a new address. The output says so, and a draft does not warn.
+	 */
+	public function test_moving_a_published_post_to_another_category_reports_its_new_address_and_a_draft_does_not_warn(): void {
+		$this->use_permalinks( '/%category%/%postname%/' );
+		$alpha = $this->term( 'category', 'Alpha' );
+		$bravo = $this->term( 'category', 'Bravo' );
+		$live  = $this->admin_post(
+			array(
+				'post_title' => 'Hello',
+				'post_name'  => 'hello',
+			)
+		);
+		wp_set_post_categories( $live, array( $alpha ) );
+		$draft = $this->draft(
+			array(
+				'post_title' => 'Hello draft',
+				'post_name'  => 'hello-draft',
+			)
+		);
+		wp_set_post_categories( $draft, array( $alpha ) );
+		$this->act_as_agent( array( Capabilities::PUBLISH => true ) );
+
+		$output = $this->output_of(
+			self::TOOL_NAME,
+			array(
+				'id'       => $live,
+				'taxonomy' => 'category',
+				'terms'    => array( $bravo ),
+			)
+		);
+
+		$this->assertStringContainsString( '/bravo/hello/', $output['link'] );
+		$this->assertContains( 'This change moved the post to a new address. WordPress does not redirect the old one.', $output['warnings'] );
+
+		$draft_output = $this->output_of(
+			self::TOOL_NAME,
+			array(
+				'id'       => $draft,
+				'taxonomy' => 'category',
+				'terms'    => array( $bravo ),
+			)
+		);
+
+		$this->assertNotContains( 'This change moved the post to a new address. WordPress does not redirect the old one.', $draft_output['warnings'] );
+	}
+
+	/**
+	 * A remove may leave more than 100 terms; an add that takes the post past 100 is refused.
+	 */
+	public function test_a_remove_can_leave_more_than_a_hundred_terms_and_an_add_that_grows_past_a_hundred_is_refused(): void {
+		$this->act_as_agent();
+		$post = $this->draft();
+		$ids  = array_map( 'intval', self::factory()->term->create_many( 150, array( 'taxonomy' => 'post_tag' ) ) );
+		wp_set_object_terms( $post, $ids, 'post_tag', false );
+		$more = $this->term( 'post_tag', 'One more' );
+
+		$removed = $this->output_of(
+			self::TOOL_NAME,
+			array(
+				'id'       => $post,
+				'taxonomy' => 'post_tag',
+				'terms'    => array( $ids[0] ),
+				'mode'     => 'remove',
+			)
+		);
+
+		$this->assertTrue( $removed['changed'] );
+		$this->assertCount( 149, $removed['term_ids'] );
+		$this->assertCount( 149, $this->stored_ids( $post, 'post_tag' ) );
+
+		$added = $this->execute_ability(
+			self::ABILITY,
+			array(
+				'id'       => $post,
+				'taxonomy' => 'post_tag',
+				'terms'    => array( $more ),
+				'mode'     => 'add',
+			)
+		);
+
+		$this->assertSame( 'steadhand_invalid_input', $this->refusal_code( $added ) );
+		$this->assertStringContainsString( 'adds terms', $added->get_error_message() );
+		$this->assertCount( 149, $this->stored_ids( $post, 'post_tag' ) );
+	}
+
+	/**
+	 * The privacy policy page refuses a taxonomy the way update-post refuses that page. Another page with the same
+	 * taxonomy is allowed, so the refusal is the page's own rule, not the taxonomy's.
+	 */
+	public function test_the_privacy_policy_page_refuses_a_taxonomy_as_update_post_does_and_another_page_is_allowed(): void {
+		register_taxonomy(
+			self::PAGE_EDIT,
+			'page',
+			array(
+				'public'       => true,
+				'capabilities' => array( 'assign_terms' => 'edit_pages' ),
+			)
+		);
+		$privacy = $this->draft( array( 'post_type' => 'page' ) );
+		update_option( 'wp_page_for_privacy_policy', $privacy );
+		$other = $this->draft( array( 'post_type' => 'page' ) );
+		$term  = (int) self::factory()->term->create( array( 'taxonomy' => self::PAGE_EDIT ) );
+		$this->act_as_agent();
+
+		$this->assertSame(
+			self::REFUSAL,
+			$this->refusal_text(
+				$this->tool_result(
+					self::TOOL_NAME,
+					array(
+						'id'       => $privacy,
+						'taxonomy' => self::PAGE_EDIT,
+						'terms'    => array( $term ),
+					)
+				)
+			)
+		);
+		$this->assert_unchanged( $privacy, self::PAGE_EDIT, array() );
+
+		$output = $this->output_of(
+			self::TOOL_NAME,
+			array(
+				'id'       => $other,
+				'taxonomy' => self::PAGE_EDIT,
+				'terms'    => array( $term ),
+			)
+		);
+		$this->assertSame( array( $term ), $output['term_ids'] );
+	}
+
+	/**
+	 * A taxonomy with its default capabilities is refused on a page, on a custom-capability type and on a type without meta
+	 * mapping, because the post type's edit capability is not the one the taxonomy assigns.
+	 */
+	public function test_a_default_capability_taxonomy_is_refused_on_a_page_a_custom_capability_type_and_an_unmapped_type(): void {
+		add_filter(
+			'steadhand_allowed_post_types',
+			static fn( array $types ): array => array_merge( $types, array( self::BOOK_TYPE, self::PLAIN ) )
+		);
+		register_post_type(
+			self::BOOK_TYPE,
+			array(
+				'public'          => true,
+				'capability_type' => 'steadhand_book',
+			)
+		);
+		register_post_type(
+			self::PLAIN,
+			array(
+				'public'       => true,
+				'map_meta_cap' => false,
+			)
+		);
+		register_taxonomy( self::PAGE_TAX, array( 'page', self::BOOK_TYPE, self::PLAIN ), array( 'public' => true ) );
+		$term = (int) self::factory()->term->create( array( 'taxonomy' => self::PAGE_TAX ) );
+		$this->act_as_agent();
+
+		foreach ( array( 'page', self::BOOK_TYPE, self::PLAIN ) as $type ) {
+			$post   = $this->draft( array( 'post_type' => $type ) );
+			$result = $this->tool_result(
+				self::TOOL_NAME,
+				array(
+					'id'       => $post,
+					'taxonomy' => self::PAGE_TAX,
+					'terms'    => array( $term ),
+				)
+			);
+			$this->assertTrue( $result['isError'], "$type must be refused." );
+			$this->assertSame( self::REFUSAL, $result['content'][0]['text'], $type );
+			$this->assert_unchanged( $post, self::PAGE_TAX, array() );
+		}
+	}
+
+	/**
+	 * A meta capability as a taxonomy's assign capability is refused for an agent that does not hold it.
+	 */
+	public function test_a_meta_capability_as_the_assign_capability_is_refused_for_an_agent_without_it(): void {
+		// WordPress reports a meta capability checked without a term. The check still runs, and the call is refused.
+		$this->setExpectedIncorrectUsage( 'map_meta_cap' );
+		register_taxonomy(
+			self::META_CAP,
+			'post',
+			array(
+				'public'       => true,
+				'capabilities' => array( 'assign_terms' => 'assign_term' ),
+			)
+		);
+		$term = (int) self::factory()->term->create( array( 'taxonomy' => self::META_CAP ) );
+		$this->act_as_agent();
+		$post = $this->draft();
+
+		$this->assertSame(
+			self::REFUSAL,
+			$this->refusal_text(
+				$this->tool_result(
+					self::TOOL_NAME,
+					array(
+						'id'       => $post,
+						'taxonomy' => self::META_CAP,
+						'terms'    => array( $term ),
+					)
+				)
+			)
+		);
+		$this->assert_unchanged( $post, self::META_CAP, array() );
+	}
+
+	/**
+	 * Both assign and edit capabilities resolve to do_not_allow: that is a refusal, not a match.
+	 */
+	public function test_a_do_not_allow_match_is_refused_and_is_not_permission(): void {
+		$this->register_locked_type();
+		$this->act_as_agent();
+		$post = $this->draft( array( 'post_type' => self::LOCKED ) );
+		$term = (int) self::factory()->term->create( array( 'taxonomy' => self::LOCKED_TAX ) );
+
+		$this->assertSame(
+			self::REFUSAL,
+			$this->refusal_text(
+				$this->tool_result(
+					self::TOOL_NAME,
+					array(
+						'id'       => $post,
+						'taxonomy' => self::LOCKED_TAX,
+						'terms'    => array( $term ),
+					)
+				)
+			)
+		);
+		$this->assert_unchanged( $post, self::LOCKED_TAX, array() );
+
+		$method = new \ReflectionMethod( SetPostTerms::class, 'may_assign' );
+		$method->setAccessible( true );
+		$this->assertFalse( $method->invoke( new SetPostTerms(), get_post( $post ), self::LOCKED_TAX ), 'may_assign must refuse a do_not_allow match.' );
+	}
+
+	/**
+	 * Registers a post type whose edit capability is do_not_allow, and a taxonomy whose assign capability is do_not_allow.
+	 */
+	private function register_locked_type(): void {
+		add_filter(
+			'steadhand_allowed_post_types',
+			static fn( array $types ): array => array_merge( $types, array( self::LOCKED ) )
+		);
+		register_post_type(
+			self::LOCKED,
+			array(
+				'public'       => true,
+				'capabilities' => array( 'edit_posts' => 'do_not_allow' ),
+			)
+		);
+		register_taxonomy(
+			self::LOCKED_TAX,
+			self::LOCKED,
+			array(
+				'public'       => true,
+				'capabilities' => array( 'assign_terms' => 'do_not_allow' ),
+			)
+		);
+	}
+
+	/**
+	 * The attached-to-type check is run by authorize_object() itself: a taxonomy the type does not use is refused even when its
+	 * assign capability would match. The first taxonomy, attached to pages with the same assign capability, is allowed.
+	 */
+	public function test_authorize_object_refuses_a_taxonomy_the_type_does_not_use_even_when_its_assign_capability_matches(): void {
+		register_taxonomy(
+			self::PAGE_EDIT,
+			'page',
+			array(
+				'public'       => true,
+				'capabilities' => array( 'assign_terms' => 'edit_pages' ),
+			)
+		);
+		register_taxonomy(
+			self::ONLY_POST,
+			'post',
+			array(
+				'public'       => true,
+				'capabilities' => array( 'assign_terms' => 'edit_pages' ),
+			)
+		);
+		$this->act_as_agent( array( Capabilities::PUBLISH => true ) );
+		$page    = $this->admin_post( array( 'post_type' => 'page' ) );
+		$ability = new SetPostTerms();
+
+		$results = $this->in_write(
+			static fn(): array => array(
+				$ability->authorize_object(
+					array(
+						'id'       => $page,
+						'taxonomy' => self::PAGE_EDIT,
+						'terms'    => array(),
+					)
+				),
+				$ability->authorize_object(
+					array(
+						'id'       => $page,
+						'taxonomy' => self::ONLY_POST,
+						'terms'    => array(),
+					)
+				),
+			)
+		);
+
+		$this->assertSame( array( true, false ), $results );
+	}
+
+	/**
+	 * The write-error decision: a refusal passes through as it was; WordPress's own failure is update_failed when the stored set is
+	 * unchanged and partial when it changed or cannot be read.
+	 */
+	public function test_the_write_error_decision_passes_refusals_through_and_chooses_update_failed_or_partial(): void {
+		$refusal = new \WP_Error( 'steadhand_refused_content_changed', 'changed' );
+		$core    = new \WP_Error( 'steadhand_update_failed', 'failed' );
+
+		$this->assertSame( $refusal, SetPostTerms::decide_write_error( array( 1 ), array( 1 ), $refusal ) );
+		$this->assertSame( $refusal, SetPostTerms::decide_write_error( array( 1 ), array( 1, 2 ), $refusal ), 'A refusal is never partial.' );
+		$this->assertSame( 'steadhand_update_failed', SetPostTerms::decide_write_error( array( 1 ), array( 1 ), $core )->get_error_code() );
+		$this->assertSame( 'steadhand_update_partial', SetPostTerms::decide_write_error( array( 1 ), array( 1, 2 ), $core )->get_error_code() );
+		$this->assertSame( 'steadhand_update_partial', SetPostTerms::decide_write_error( array( 1 ), null, $core )->get_error_code() );
 	}
 }

@@ -27,19 +27,28 @@ final class TermWriter {
 
 	/**
 	 * Sets the terms of one taxonomy on one post, replacing the ones it has. The ability works out the final set (replace,
-	 * add or remove) and passes it in full.
+	 * add or remove) and passes it in full, with the set it computed from.
 	 *
-	 * @param int    $post_id   Post ID.
-	 * @param string $taxonomy  Taxonomy name.
-	 * @param int[]  $term_ids  Term IDs, each a positive integer, with no repeats. May be empty, which removes every term.
-	 * @return int[]|\WP_Error The term IDs the post has in the taxonomy after the write, read back from the database, or the
-	 *                         error WordPress or this class reported. The post may then have been partly changed.
+	 * Right before the write, the post is read again and checked: the caller's own permission check runs again on that post
+	 * ($still_allowed), and the assigned IDs must still be $expected_current. A change made since the caller read the terms
+	 * would otherwise be lost, because the write is a full replace.
+	 *
+	 * @param int      $post_id          Post ID.
+	 * @param string   $taxonomy         Taxonomy name.
+	 * @param int[]    $term_ids         Term IDs to set, each a positive integer, with no repeats. May be empty.
+	 * @param int[]    $expected_current The term IDs the caller computed the new set from, each a positive integer, with no repeats.
+	 * @param callable $still_allowed    Receives the freshly read post, returns true when the caller may still make this change.
+	 * @return int[]|\WP_Error The term IDs the post has in the taxonomy after the write, read back from the database. Or an error:
+	 *                         steadhand_forbidden or steadhand_invalid_input before any write, steadhand_refused_content_changed
+	 *                         when the terms changed since the caller read them, and steadhand_update_failed when WordPress
+	 *                         reported an error from the write itself. Only the last one may have changed the post.
 	 * @throws \LogicException           When called outside a write.
 	 * @throws \InvalidArgumentException When an ID is not a positive integer, or is given twice.
 	 */
-	public static function set( int $post_id, string $taxonomy, array $term_ids ): array|\WP_Error {
+	public static function set( int $post_id, string $taxonomy, array $term_ids, array $expected_current, callable $still_allowed ): array|\WP_Error {
 		self::assert_writing();
 		self::assert_ids( $term_ids );
+		self::assert_ids( $expected_current );
 
 		// Read again, uncached: the post may have been trashed or changed since the caller looked at it.
 		clean_post_cache( $post_id );
@@ -63,13 +72,29 @@ final class TermWriter {
 			}
 		}
 
+		// The permission check, run again on the post as it is now, immediately before the write.
+		if ( ! $still_allowed( $post ) ) {
+			return new \WP_Error( 'steadhand_forbidden', __( 'Not found, or this agent may not access it.', 'steadhand' ), array( 'status' => 403 ) );
+		}
+
+		$current = TermReader::assigned_ids( $post_id, $taxonomy );
+		if ( is_wp_error( $current ) ) {
+			return $current;
+		}
+
+		sort( $expected_current, SORT_NUMERIC );
+		if ( $current !== $expected_current ) {
+			return new \WP_Error(
+				'steadhand_refused_content_changed',
+				__( "The post's terms changed while this call was running, so nothing was changed. Call steadhand/get-post-terms again, then send the change again.", 'steadhand' ),
+				array( 'status' => 409 )
+			);
+		}
+
 		// Integers only: WordPress skips an integer that matches no term, and creates a term for a string that matches none.
 		$result = wp_set_object_terms( $post_id, $term_ids, $taxonomy, false );
 		if ( is_wp_error( $result ) ) {
-			return $result;
-		}
-
-		if ( false === $result ) {
+			// Core's own error is replaced by Steadhand's, so the message is ours and the caller sees one code for it.
 			return new \WP_Error(
 				'steadhand_update_failed',
 				__( 'WordPress could not set the terms, so nothing was changed. Try again.', 'steadhand' ),

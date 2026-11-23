@@ -12,7 +12,7 @@ namespace Steadhand\Abilities;
 defined( 'ABSPATH' ) || exit;
 
 /**
- * Helpers shared by list-terms and get-post-terms. Holds no state.
+ * Helpers shared by the term tools: list-terms, get-post-terms and set-post-terms. Holds no state.
  *
  * Output rules that the term tools follow, the same as the post tools:
  * - Names and labels are plain text (entities decoded), through PostReader::plain_text().
@@ -89,14 +89,17 @@ final class TermReader {
 	}
 
 	/**
-	 * The term IDs a post has in one taxonomy, ascending, with no repeats. Read from the database, not from a
-	 * cache that a write could leave behind. Callers must bound the count first (see assigned_count()).
+	 * The term IDs a post has in one taxonomy, ascending, with no repeats. The object-term cache for the post is cleared
+	 * first, so the IDs reflect the assignments made just before this call. Callers must bound the count first (see
+	 * assigned_count()).
 	 *
 	 * @param int    $post_id  Post ID.
 	 * @param string $taxonomy Taxonomy name, already checked against the allowlist.
 	 * @return int[]|\WP_Error
 	 */
 	public static function assigned_ids( int $post_id, string $taxonomy ): array|\WP_Error {
+		clean_object_term_cache( array( $post_id ), (string) get_post_type( $post_id ) );
+
 		$ids = wp_get_object_terms( $post_id, $taxonomy, array( 'fields' => 'ids' ) );
 		if ( is_wp_error( $ids ) ) {
 			return $ids;
