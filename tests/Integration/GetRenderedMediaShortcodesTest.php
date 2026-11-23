@@ -164,6 +164,10 @@ final class GetRenderedMediaShortcodesTest extends MediaToolTestCase {
 		$this->assertStringNotContainsString( 'READABLE-CAPTION-MIXED', $html, 'The readable caption must not render when the list is refused.' );
 	}
 
+	/**
+	 * Core or MetaCaps already refuses this case in this WordPress version: the test passes without the shortcode guard,
+	 * so it is kept as a regression test.
+	 */
 	public function test_an_unparsable_gallery_include_renders_nothing(): void {
 		$this->act_as_agent();
 		$readable = $this->captioned_image( 'READABLE-CAPTION-JUNK' );
@@ -185,6 +189,10 @@ final class GetRenderedMediaShortcodesTest extends MediaToolTestCase {
 		$this->assertStringNotContainsString( 'SECRET-CAPTION-DRAFT-PARENT', $html, 'The child caption must not render.' );
 	}
 
+	/**
+	 * Core or MetaCaps already refuses this case in this WordPress version: the test passes without the shortcode guard,
+	 * so it is kept as a regression test.
+	 */
 	public function test_gallery_id_of_a_trashed_post_renders_none_of_its_children(): void {
 		$this->act_as_agent();
 		$parent = $this->admin_post( array( 'post_status' => 'trash' ) );
@@ -238,6 +246,10 @@ final class GetRenderedMediaShortcodesTest extends MediaToolTestCase {
 		$this->assertStringNotContainsString( 'SECRET-TITLE-PLAYLIST-DRAFT', $html, 'The child title must not render.' );
 	}
 
+	/**
+	 * Core or MetaCaps already refuses this case in this WordPress version: the test passes without the shortcode guard,
+	 * so it is kept as a regression test.
+	 */
 	public function test_playlist_id_of_a_trashed_post_renders_none_of_its_children(): void {
 		$this->act_as_agent();
 		$parent = $this->admin_post( array( 'post_status' => 'trash' ) );
@@ -317,5 +329,95 @@ final class GetRenderedMediaShortcodesTest extends MediaToolTestCase {
 
 		// Outside get-rendered the guard is not attached, so core's own output is unchanged.
 		$this->assertStringContainsString( 'SECRET-CAPTION-OUTSIDE', do_shortcode( '[gallery ids="' . $secret . '"]' ) );
+	}
+
+	/**
+	 * An empty id is read as no parent, so core lists only the unattached attachments, which get-media reads. Without the
+	 * guard this test passes (no attachment with a parent is listed), so it is kept as a regression test for the guard's
+	 * refusal of the form.
+	 */
+	public function test_gallery_with_an_empty_id_lists_no_secret_attachment(): void {
+		$this->act_as_agent();
+		$image = $this->captioned_image( 'SECRET-CAPTION-EMPTY-ID', $this->secret_post( 'private' ) );
+
+		$html = $this->rendered( '[gallery id=""]' );
+
+		$this->assert_image_hidden( $image, $html, 'gallery empty id' );
+		$this->assertStringNotContainsString( 'SECRET-CAPTION-EMPTY-ID', $html, 'gallery empty id: the caption must not render.' );
+		$this->assert_get_media_refuses( $image );
+	}
+
+	/**
+	 * An id of 0 with exclude lists only the unattached attachments, which get-media reads. Without the guard this test
+	 * passes, so it is kept as a regression test for the guard's refusal of the form.
+	 */
+	public function test_gallery_exclude_with_id_zero_lists_no_secret_attachment(): void {
+		$this->act_as_agent();
+		$image = $this->captioned_image( 'SECRET-CAPTION-EXCLUDE-ZERO', $this->secret_post( 'private' ) );
+
+		$html = $this->rendered( '[gallery exclude="1" id="0"]' );
+
+		$this->assert_image_hidden( $image, $html, 'gallery exclude with id 0' );
+		$this->assertStringNotContainsString( 'SECRET-CAPTION-EXCLUDE-ZERO', $html, 'gallery exclude with id 0: the caption must not render.' );
+		$this->assert_get_media_refuses( $image );
+	}
+
+	/**
+	 * A negative ID in ids is read as its absolute value, so core fetches the attachment it names.
+	 */
+	public function test_gallery_ids_with_a_negative_id_renders_nothing_of_it(): void {
+		$this->act_as_agent();
+		$image = $this->captioned_image( 'SECRET-CAPTION-NEGATIVE-IDS', $this->secret_post( 'private' ) );
+
+		$html = $this->rendered( '[gallery ids="-' . $image . '"]' );
+
+		$this->assert_image_hidden( $image, $html, 'gallery ids with a negative id' );
+		$this->assertStringNotContainsString( 'SECRET-CAPTION-NEGATIVE-IDS', $html, 'gallery ids with a negative id: the caption must not render.' );
+		$this->assert_get_media_refuses( $image );
+	}
+
+	/**
+	 * WordPress lowercases shortcode attribute names, so IDS is ids.
+	 */
+	public function test_gallery_with_an_upper_case_IDS_attribute_renders_nothing_of_it(): void {
+		$this->act_as_agent();
+		$image = $this->captioned_image( 'SECRET-CAPTION-UPPER-IDS', $this->secret_post( 'private' ) );
+
+		$html = $this->rendered( '[gallery IDS="' . $image . '"]' );
+
+		$this->assert_image_hidden( $image, $html, 'gallery IDS' );
+		$this->assertStringNotContainsString( 'SECRET-CAPTION-UPPER-IDS', $html, 'gallery IDS: the caption must not render.' );
+		$this->assert_get_media_refuses( $image );
+	}
+
+	/**
+	 * An ids value of 0 counts as empty, so core uses the include list that follows it.
+	 */
+	public function test_gallery_with_ids_zero_and_an_include_renders_nothing_of_the_include(): void {
+		$this->act_as_agent();
+		$image = $this->captioned_image( 'SECRET-CAPTION-IDS-ZERO-INCLUDE', $this->secret_post( 'private' ) );
+
+		$html = $this->rendered( '[gallery ids="0" include="' . $image . '"]' );
+
+		$this->assert_image_hidden( $image, $html, 'gallery ids 0 with include' );
+		$this->assertStringNotContainsString( 'SECRET-CAPTION-IDS-ZERO-INCLUDE', $html, 'gallery ids 0 with include: the caption must not render.' );
+		$this->assert_get_media_refuses( $image );
+	}
+
+	/**
+	 * The same gallery inside a shortcode block, which runs through do_shortcode() and so through the same guard.
+	 */
+	public function test_a_shortcode_block_with_gallery_ids_renders_nothing_of_it(): void {
+		$this->act_as_agent();
+		$image = $this->captioned_image( 'SECRET-CAPTION-SHORTCODE-BLOCK', $this->secret_post( 'private' ) );
+
+		$html = $this->rendered(
+			"<!-- wp:paragraph -->\n<p>CONTROL-SHORTCODE-BLOCK</p>\n<!-- /wp:paragraph -->\n\n<!-- wp:shortcode -->[gallery ids=\"$image\"]<!-- /wp:shortcode -->"
+		);
+
+		$this->assert_image_hidden( $image, $html, 'shortcode block gallery ids' );
+		$this->assertStringNotContainsString( 'SECRET-CAPTION-SHORTCODE-BLOCK', $html, 'shortcode block: the caption must not render.' );
+		$this->assertStringContainsString( 'CONTROL-SHORTCODE-BLOCK', $html );
+		$this->assert_get_media_refuses( $image );
 	}
 }
