@@ -231,6 +231,10 @@ final class GetRendered extends Ability {
 	 * - post_password_required: the target alone reads as unlocked (see the password rules in SPEC section 14.1).
 	 * - pre_render_block: blocks whose output is site data the agent could not read directly are omitted (see
 	 *   omit_block()).
+	 * - pre_do_shortcode_tag: core's [gallery] and [playlist] render as nothing when they would fetch media the agent may
+	 *   not read. Core fetches by `ids`/`include` with no parent check (gallery_shortcode() and wp_playlist_shortcode(),
+	 *   wp-includes/media.php), and lists the children of `id` (or of the current post) under core's own rule, not
+	 *   Steadhand's. See media_shortcode_refused().
 	 * - pre_get_avatar: get_avatar() returns an empty string, so no avatar markup is built. A non-null value here
 	 *   short-circuits get_avatar() (pluggable.php, get_avatar()).
 	 * - get_avatar: the result of get_avatar() is empty. The early pre_get_avatar return still passes through this
@@ -277,11 +281,73 @@ final class GetRendered extends Ability {
 				10,
 				3,
 			),
+			array(
+				'pre_do_shortcode_tag',
+				static fn( mixed $output, mixed $tag, mixed $attr ): mixed => self::media_shortcode_refused( $tag, $attr ) ? '' : $output,
+				PHP_INT_MAX,
+				4,
+			),
 			array( 'pre_get_avatar', static fn(): string => '', PHP_INT_MAX, 3 ),
 			array( 'get_avatar', static fn(): string => '', PHP_INT_MAX, 6 ),
 			array( 'pre_get_avatar_data', static fn( mixed $args ): mixed => self::without_avatar_url( $args ), PHP_INT_MAX, 2 ),
 			array( 'get_avatar_data', static fn( mixed $args ): mixed => self::without_avatar_url( $args ), PHP_INT_MAX, 2 ),
 		);
+	}
+
+	/**
+	 * Whether core's [gallery] or [playlist] shortcode must render as nothing, because it would list media the agent may
+	 * not read through steadhand/get-media, or the children of a post the agent may not read through steadhand/get-post.
+	 *
+	 * The attributes are read the way core reads them. A non-empty `ids` replaces `include`, and `!empty()` decides
+	 * both (so "0" counts as empty). When there is an include list, core fetches exactly those attachments and never
+	 * looks at `id`, so each ID must pass MediaReader::readable_attachment(). Otherwise core lists the children of `id`,
+	 * or of the current post when there is no `id` attribute. Core's shortcode_atts() takes `id` whenever the key is
+	 * present. The current post is the one render() set as the global $post: the post being rendered, which the
+	 * agent can already read. Anything that does not parse to a positive ID is refused, and so is a value that is not
+	 * a string or integer, because core would then read something this check did not.
+	 *
+	 * @param mixed $tag  Shortcode name.
+	 * @param mixed $attr Shortcode attributes; a non-array (no attributes) counts as none.
+	 */
+	private static function media_shortcode_refused( mixed $tag, mixed $attr ): bool {
+		if ( ! in_array( $tag, array( 'gallery', 'playlist' ), true ) ) {
+			return false;
+		}
+
+		$attr    = is_array( $attr ) ? $attr : array();
+		$include = ! empty( $attr['ids'] ) ? $attr['ids'] : ( $attr['include'] ?? '' );
+
+		if ( ! empty( $include ) ) {
+			if ( ! is_string( $include ) && ! is_int( $include ) ) {
+				return true;
+			}
+
+			$ids = wp_parse_id_list( (string) $include );
+			if ( array() === $ids ) {
+				return true;
+			}
+
+			foreach ( $ids as $id ) {
+				if ( $id < 1 || null === MediaReader::readable_attachment( $id ) ) {
+					return true;
+				}
+			}
+
+			return false;
+		}
+
+		if ( array_key_exists( 'id', $attr ) ) {
+			if ( ! is_string( $attr['id'] ) && ! is_int( $attr['id'] ) ) {
+				return true;
+			}
+			$post_id = (int) $attr['id'];
+		} else {
+			$current = get_post();
+			$post_id = $current instanceof \WP_Post ? (int) $current->ID : 0;
+		}
+
+		// get_post( 0 ) returns the global post, so a zero ID is refused before the lookup.
+		return $post_id < 1 || null === PostReader::readable_post( $post_id );
 	}
 
 	/**

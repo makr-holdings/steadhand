@@ -48,6 +48,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). The
 - Known limits of `update-post`: `wp_update_post()` re-normalises some values an administrator stored in an unusual way by a direct database write. An empty `comment_status` on an update becomes `closed`, a non-canonical slug is sanitised, a post with no category gains the default category, and `to_ping` is sanitised. Steadhand does not restore them.
 - The block markup check's loose delimiter test is case-sensitive and needs whitespace after `<!--`, as WordPress's parser does. So `<!-- WP:Engine cache note -->` and `<!--wp:x-->` are no longer refused. Known false positive: text that looks like a malformed delimiter inside a `core/html` block, or inside an ordinary HTML comment that starts with `<!-- wp:`, is still refused.
 
+### Fixed
+- `get-rendered` could show, through core's `[gallery]` and `[playlist]` shortcodes, a media file that `get-media` refuses, and the children of a post that `get-post` refuses. Core fetched the attachments named by `ids` or `include` with no parent check, and listed the children of `id` under core's own rule. Affected 0.1.0. Now such a shortcode renders as nothing, and the rest of the post still renders.
+
 ### Security
 - Refusal throttle. For each agent user, at most 60 refused calls are stored in any rolling minute. Then one marker row records that further refusals are not being logged, and nothing more is stored until the minute has passed. The refusals themselves are still returned to the caller. Errors are never throttled or dropped. The count and the insert are not locked together, so concurrent calls can store slightly more than 60.
 - Successful calls are logged unless they go to a read-only ability that needs `steadhand_read`. An ability that is marked read-only but needs a write capability is logged on success too.

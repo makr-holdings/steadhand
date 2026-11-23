@@ -339,6 +339,7 @@ Steadhand attaches to these hooks, or calls them where the row says so. Other pl
 | `add_post_metadata`, `update_post_metadata` | filter | same | Return `false` for meta keys that start with `_oembed_`, so no oEmbed cache is written |
 | `wp_insert_post_empty_content` | filter | same | Returns `true` for `oembed_cache` posts, so none is inserted or updated |
 | `post_password_required` | filter | same | Unlocks only the post being rendered, for the password check |
+| `pre_do_shortcode_tag` | filter | same | Returns `''` for a `gallery` or `playlist` shortcode that would list an attachment the agent may not read through `get-media`, or the children of a post the agent may not read through `get-post`. Any other shortcode is unchanged. Attached at `PHP_INT_MAX`. The check is `GetRendered::media_shortcode_refused()` |
 | `pre_render_block` | filter | same | Omits `core/loginout`, every `core/avatar` (with or without a `userId`, since its `isLink` wrapper would name the user's author archive), and `core/navigation` with a `ref` that is not a published `wp_navigation` post. Other blocks render normally |
 | `pre_get_avatar` | filter | same | Returns an empty string, so `get_avatar()` prints nothing, whatever another plugin returns from this filter, at `PHP_INT_MAX` |
 | `get_avatar` | filter | same | Returns an empty string, at `PHP_INT_MAX`. The early `pre_get_avatar` return still passes through this filter (`pluggable.php`), so another plugin's markup here would otherwise print |
