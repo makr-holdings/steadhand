@@ -77,9 +77,10 @@ final class TermWriter {
 			return new \WP_Error( 'steadhand_forbidden', __( 'Not found, or this agent may not access it.', 'steadhand' ), array( 'status' => 403 ) );
 		}
 
+		// A read that fails before the write is a Steadhand error: WordPress's own code and message are not passed on.
 		$current = TermReader::assigned_ids( $post_id, $taxonomy );
 		if ( is_wp_error( $current ) ) {
-			return $current;
+			return new \WP_Error( 'steadhand_error', __( 'The ability failed to complete. Try again, or check the site error log.', 'steadhand' ), array( 'status' => 500 ) );
 		}
 
 		sort( $expected_current, SORT_NUMERIC );
@@ -102,7 +103,17 @@ final class TermWriter {
 			);
 		}
 
-		return TermReader::assigned_ids( $post_id, $taxonomy );
+		// The write has happened. A read-back that fails now does not show what was stored, so the caller must check the post.
+		$after = TermReader::assigned_ids( $post_id, $taxonomy );
+		if ( is_wp_error( $after ) ) {
+			return new \WP_Error(
+				'steadhand_update_partial',
+				__( 'The terms were changed, but not as asked, so the change was at least partly applied. Call steadhand/get-post-terms to check the post before you continue.', 'steadhand' ),
+				array( 'status' => 500 )
+			);
+		}
+
+		return $after;
 	}
 
 	/**

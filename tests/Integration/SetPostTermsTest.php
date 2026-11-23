@@ -10,6 +10,7 @@ declare( strict_types=1 );
 namespace Steadhand\Tests\Integration;
 
 use Steadhand\Abilities\SetPostTerms;
+use Steadhand\Abilities\TermReader;
 use Steadhand\Capabilities;
 use Steadhand\Pipeline\Pipeline;
 use WP\MCP\Abilities\McpAbilityExposure;
@@ -43,6 +44,8 @@ final class SetPostTermsTest extends PostWriteTestCase {
 	protected function tearDown(): void {
 		remove_all_filters( 'steadhand_rate_limit_per_minute' );
 		remove_all_filters( 'wp_get_object_terms' );
+		remove_all_filters( 'map_meta_cap', 20 );
+		remove_all_filters( 'user_has_cap', 10 );
 		remove_all_filters( 'wp_check_post_lock_window' );
 		remove_all_actions( 'set_object_terms' );
 		delete_option( 'wp_page_for_privacy_policy' );
@@ -1635,5 +1638,176 @@ final class SetPostTermsTest extends PostWriteTestCase {
 		$this->assertSame( 'steadhand_update_failed', SetPostTerms::decide_write_error( array( 1 ), array( 1 ), $core )->get_error_code() );
 		$this->assertSame( 'steadhand_update_partial', SetPostTerms::decide_write_error( array( 1 ), array( 1, 2 ), $core )->get_error_code() );
 		$this->assertSame( 'steadhand_update_partial', SetPostTerms::decide_write_error( array( 1 ), null, $core )->get_error_code() );
+	}
+
+	/**
+	 * A failed read-back after the write is partial, and WordPress's own error is never passed on. The probe makes the read-back
+	 * fail only after the write, through the action that core fires during it.
+	 */
+	public function test_a_failed_read_back_after_the_write_is_partial_and_the_third_party_error_is_not_passed_on(): void {
+		$this->act_as_agent();
+		$post = $this->draft();
+		$tag  = $this->term( 'post_tag', 'Read back' );
+		add_action(
+			'set_object_terms',
+			static function (): void {
+				add_filter(
+					'wp_get_object_terms',
+					static fn() => new \WP_Error( 'probe_boom', 'probe_boom: internal detail' )
+				);
+			}
+		);
+
+		$result = $this->execute_ability(
+			self::ABILITY,
+			array(
+				'id'       => $post,
+				'taxonomy' => 'post_tag',
+				'terms'    => array( $tag ),
+			)
+		);
+
+		$this->assertSame( 'steadhand_update_partial', $this->refusal_code( $result ) );
+		$this->assertStringNotContainsString( 'probe_boom', $result->get_error_message() );
+		$this->assertStringNotContainsString( 'probe_boom', $result->get_error_code() );
+	}
+
+	/**
+	 * A capability that resolves to no capability at all is refused, never taken as a match. Both the assign and the edit
+	 * capability resolve to an empty list here.
+	 */
+	public function test_a_capability_that_resolves_to_nothing_is_refused_and_is_not_a_match(): void {
+		add_filter(
+			'map_meta_cap',
+			static fn( array $caps, string $cap ): array => in_array( $cap, array( 'steadhand_assign_empty', 'edit_posts' ), true ) ? array() : $caps,
+			20,
+			2
+		);
+		register_taxonomy(
+			'steadhand_assign_empty_tax',
+			'post',
+			array(
+				'public'       => true,
+				'capabilities' => array( 'assign_terms' => 'steadhand_assign_empty' ),
+			)
+		);
+		$term = (int) self::factory()->term->create( array( 'taxonomy' => 'steadhand_assign_empty_tax' ) );
+		$this->act_as_agent();
+		$post = $this->draft();
+
+		$this->assertSame(
+			self::REFUSAL,
+			$this->refusal_text(
+				$this->tool_result(
+					self::TOOL_NAME,
+					array(
+						'id'       => $post,
+						'taxonomy' => 'steadhand_assign_empty_tax',
+						'terms'    => array( $term ),
+					)
+				)
+			)
+		);
+		$this->assert_unchanged( $post, 'steadhand_assign_empty_tax', array() );
+
+		unregister_taxonomy( 'steadhand_assign_empty_tax' );
+	}
+
+	/**
+	 * The assign capability is checked again on the post right before the write. A capability withdrawn between the first read
+	 * and the write is refused, and nothing is written.
+	 */
+	public function test_an_assign_capability_withdrawn_between_the_read_and_the_write_is_refused(): void {
+		register_taxonomy(
+			self::SHELF,
+			'post',
+			array(
+				'public'       => true,
+				'capabilities' => array( 'assign_terms' => self::CUSTOM_CAP ),
+			)
+		);
+		$this->act_as_agent( array( self::CUSTOM_CAP => true ) );
+		$post      = $this->draft();
+		$shelf     = $this->term( self::SHELF, 'Withdrawn' );
+		$withdrawn = false;
+		add_filter(
+			'user_has_cap',
+			static function ( array $allcaps ) use ( &$withdrawn ): array {
+				if ( $withdrawn ) {
+					unset( $allcaps[ self::CUSTOM_CAP ] );
+				}
+				return $allcaps;
+			},
+			10,
+			1
+		);
+		$this->once_after_the_first_read(
+			static function () use ( &$withdrawn ): void {
+				$withdrawn = true;
+			}
+		);
+
+		$result = $this->execute_ability(
+			self::ABILITY,
+			array(
+				'id'       => $post,
+				'taxonomy' => self::SHELF,
+				'terms'    => array( $shelf ),
+			)
+		);
+
+		$this->assertSame( 'steadhand_forbidden', $this->refusal_code( $result ) );
+		$this->assert_unchanged( $post, self::SHELF, array() );
+	}
+
+	/**
+	 * The stored IDs are read from the database. A relationship written directly, after a read has warmed the cache, is seen.
+	 */
+	public function test_assigned_ids_reads_the_database_and_not_a_cache_warmed_before_a_direct_write(): void {
+		$post = $this->draft();
+		$a    = $this->term( 'post_tag', 'Cached A' );
+		$b    = $this->term( 'post_tag', 'Cached B' );
+		wp_set_object_terms( $post, array( $a ), 'post_tag', false );
+		$this->assertSame( array( $a ), TermReader::assigned_ids( $post, 'post_tag' ) );
+
+		global $wpdb;
+		$tt = (int) $wpdb->get_var( // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching -- Finds the taxonomy row for the test.
+			$wpdb->prepare( "SELECT term_taxonomy_id FROM {$wpdb->term_taxonomy} WHERE term_id = %d AND taxonomy = %s", $b, 'post_tag' ) // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- Core table name.
+		);
+		// A direct insert: no cache is cleared, so a stale cache would still show only $a.
+		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching -- The row a stale cache would miss.
+		$wpdb->insert(
+			$wpdb->term_relationships,
+			array(
+				'object_id'        => $post,
+				'term_taxonomy_id' => $tt,
+				'term_order'       => 0,
+			)
+		); // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching -- The row a stale cache would miss.
+
+		$this->assertSame( array( min( $a, $b ), max( $a, $b ) ), TermReader::assigned_ids( $post, 'post_tag' ) );
+	}
+
+	/**
+	 * Adding terms already on a post that holds more than 100 is no growth, so it is allowed and changes nothing.
+	 */
+	public function test_an_add_of_terms_already_on_a_post_with_more_than_a_hundred_is_allowed_and_changes_nothing(): void {
+		$this->act_as_agent();
+		$post = $this->draft();
+		$ids  = array_map( 'intval', self::factory()->term->create_many( 150, array( 'taxonomy' => 'post_tag' ) ) );
+		wp_set_object_terms( $post, $ids, 'post_tag', false );
+
+		$output = $this->output_of(
+			self::TOOL_NAME,
+			array(
+				'id'       => $post,
+				'taxonomy' => 'post_tag',
+				'terms'    => array( $ids[0], $ids[1] ),
+				'mode'     => 'add',
+			)
+		);
+
+		$this->assertFalse( $output['changed'] );
+		$this->assertCount( 150, $output['term_ids'] );
 	}
 }

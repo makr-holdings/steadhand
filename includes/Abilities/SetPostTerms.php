@@ -152,10 +152,8 @@ final class SetPostTerms extends Ability {
 				'items'    => $term_id,
 			),
 			'changed'           => array( 'type' => 'boolean' ),
-			'link'              => array(
-				'type'   => 'string',
-				'format' => 'uri',
-			),
+			// No format: a post whose link cannot be worked out has an empty link, which a uri format would refuse.
+			'link'              => array( 'type' => 'string' ),
 			'warnings'          => array(
 				'type'     => 'array',
 				'items'    => array( 'type' => 'string' ),
@@ -440,7 +438,8 @@ final class SetPostTerms extends Ability {
 
 		if ( $changed ) {
 			clean_post_cache( $post_id );
-			$link_before = (string) get_permalink( get_post( $post_id ) );
+			$before      = get_post( $post_id );
+			$link_before = $before instanceof \WP_Post ? self::link_of( $before ) : '';
 
 			$written = TermWriter::set(
 				$post_id,
@@ -479,7 +478,7 @@ final class SetPostTerms extends Ability {
 		if ( ! $post instanceof \WP_Post ) {
 			return $changed ? self::partial_error() : PostReader::not_found();
 		}
-		$link = (string) get_permalink( $post );
+		$link = self::link_of( $post );
 
 		$warnings = array();
 		if ( $changed ) {
@@ -487,7 +486,7 @@ final class SetPostTerms extends Ability {
 		}
 
 		// A published post's address follows its categories, and WordPress keeps no redirect from the old one.
-		if ( $changed && 'publish' === $post->post_status && $link !== $link_before ) {
+		if ( $changed && 'publish' === $post->post_status && '' !== $link && '' !== $link_before && $link !== $link_before ) {
 			$warnings[] = __( 'This change moved the post to a new address. WordPress does not redirect the old one.', 'steadhand' );
 		}
 
@@ -529,10 +528,11 @@ final class SetPostTerms extends Ability {
 	/**
 	 * Chooses the error for a write that did not complete. Pure, so the choice can be tested without a failing database.
 	 *
-	 * - The writer refused before any write (steadhand_forbidden, steadhand_invalid_input, steadhand_refused_content_changed):
-	 *   its refusal, as it was. Nothing this call wrote can have changed the post, whatever else changed it.
-	 * - WordPress reported its own failure (steadhand_update_failed) and the stored set is unchanged: steadhand_update_failed.
-	 * - WordPress reported its own failure and the stored set changed, or could not be read: steadhand_update_partial.
+	 * - The writer refused before it wrote (steadhand_forbidden, steadhand_invalid_input, steadhand_refused_content_changed):
+	 *   its refusal, as it was. This call wrote nothing, so the refusal is true; if the terms changed, that is because
+	 *   another party changed them, and the content-changed refusal says so.
+	 * - Any other error from the writer is decided from the stored set. Unchanged: steadhand_update_failed, with Steadhand's
+	 *   text. Changed, or not readable: steadhand_update_partial. The writer's own code and message are never returned.
 	 *
 	 * @param int[]      $previous The IDs before the call, ascending.
 	 * @param int[]|null $now      The IDs now, ascending, or null when they could not be read.
@@ -540,7 +540,7 @@ final class SetPostTerms extends Ability {
 	 * @return \WP_Error
 	 */
 	public static function decide_write_error( array $previous, ?array $now, \WP_Error $error ): \WP_Error {
-		if ( 'steadhand_update_failed' !== $error->get_error_code() ) {
+		if ( in_array( $error->get_error_code(), self::PRE_WRITE_REFUSALS, true ) ) {
 			return $error;
 		}
 
@@ -548,7 +548,28 @@ final class SetPostTerms extends Ability {
 			return self::partial_error();
 		}
 
-		return $error;
+		return new \WP_Error(
+			'steadhand_update_failed',
+			__( 'WordPress could not set the terms, so nothing was changed. Try again.', 'steadhand' ),
+			array( 'status' => 500 )
+		);
+	}
+
+	/**
+	 * The refusals TermWriter makes before it writes. Only these are passed on as they are.
+	 */
+	private const PRE_WRITE_REFUSALS = array( 'steadhand_forbidden', 'steadhand_invalid_input', 'steadhand_refused_content_changed' );
+
+	/**
+	 * The permalink of a post, or '' when WordPress cannot give one.
+	 *
+	 * @param \WP_Post $post The post.
+	 * @return string
+	 */
+	private static function link_of( \WP_Post $post ): string {
+		$link = get_permalink( $post );
+
+		return is_string( $link ) ? $link : '';
 	}
 
 	/**
