@@ -206,7 +206,6 @@ final class UploadMediaTest extends PostWriteTestCase {
 			array( 'png', 'shot.png', 'image/png' ),
 			array( 'jpeg', 'photo.jpg', 'image/jpeg' ),
 			array( 'jpeg', 'photo.jpeg', 'image/jpeg' ),
-			array( 'webp', 'card.webp', 'image/webp' ),
 		);
 
 		foreach ( $cases as list( $type, $name, $mime ) ) {
@@ -393,7 +392,7 @@ final class UploadMediaTest extends PostWriteTestCase {
 	}
 
 	/**
-	 * The pixel rules, checked on the header alone through validate_input(): each side 1 to 12000, and at most 40 million
+	 * The pixel rules, checked on the header alone through validate_input(): each side 1 to 8000, and at most 16 million
 	 * pixels. Exactly at a limit passes.
 	 */
 	public function test_the_pixel_limits_hold_at_the_edges(): void {
@@ -501,7 +500,8 @@ final class UploadMediaTest extends PostWriteTestCase {
 			'CON device'               => array( 'CON.jpg' ),
 			'lower-case nul device'    => array( 'nul.png' ),
 			'COM1 device'              => array( 'com1.jpg' ),
-			'LPT9 device'              => array( 'LPT9.webp' ),
+			'LPT9 device'              => array( 'LPT9.png' ),
+			'a webp name'              => array( 'photo.webp' ),
 			'81 character base'        => array( str_repeat( 'a', 81 ) . '.jpg' ),
 			'190 multibyte characters' => array( str_repeat( '漢', 190 ) . '.jpg' ),
 			'a space'                  => array( 'my photo.jpg' ),
@@ -554,30 +554,48 @@ final class UploadMediaTest extends PostWriteTestCase {
 	}
 
 	/**
-	 * An animated WebP is refused, flagged in its VP8X chunk or made of ANMF frames; an APNG, a PNG with an acTL chunk, is refused.
-	 * A still WebP and a still PNG are accepted.
+	 * An animated PNG (a PNG with an acTL chunk) is refused, and a still PNG is accepted.
 	 */
-	public function test_animated_webp_and_apng_are_refused_and_stills_are_accepted(): void {
+	public function test_an_animated_png_is_refused_and_a_still_png_is_accepted(): void {
+		$agent = $this->act_as_agent( array( 'steadhand_media' => true ) );
+		$png   = $this->encode_image( 'png' );
+		$apng  = $this->png_with_chunk( $png, 'acTL', pack( 'NN', 2, 0 ) );
+
+		$result = $this->refused( $this->args( $apng, 'animated.png' ), 'steadhand_invalid_input' );
+		$this->assertSame( 'Animated images are not accepted.', $result->get_error_message() );
+
+		$this->assertIsArray( $this->upload( $this->args( $png, 'still.png' ) ), 'A still PNG is accepted.' );
+		$this->assertSame( 'ok', $this->latest_row( $agent )['result'] );
+	}
+
+	/**
+	 * WebP is refused like any other type that is not JPEG or PNG: a still WebP, an animated one, one made of ANMF frames, and a
+	 * cut-off one, each under a name the file name rule accepts, so the type check is the one that refuses. Under its own
+	 * .webp name the name rule refuses it before the bytes are read. Each refusal is logged blocked, and stores nothing.
+	 */
+	public function test_webp_is_refused_in_every_form(): void {
 		$agent = $this->act_as_agent( array( 'steadhand_media' => true ) );
 		$still = $this->encode_image( 'webp' );
-		$png   = $this->encode_image( 'png' );
 
 		$flagged = $this->webp_file( $this->webp_vp8x( 0x02 ), $this->riff_chunk( 'VP8L', str_repeat( "\0", 8 ) ) );
 		$frames  = $this->webp_file( $this->webp_vp8x( 0x00 ), $this->riff_chunk( 'ANMF', str_repeat( "\0", 16 ) ) );
-		$apng    = $this->png_with_chunk( $png, 'acTL', pack( 'NN', 2, 0 ) );
 
-		foreach ( array(
-			'flagged.webp' => $flagged,
-			'frames.webp'  => $frames,
-			'animated.png' => $apng,
-		) as $name => $bytes ) {
+		$not_jpeg_or_png = 'The data is not a JPEG or PNG image. GIF, WebP, SVG and other files are refused.';
+		$cases           = array(
+			'a still WebP under a png name'     => array( $still, 'still.png' ),
+			'an animated WebP under a png name' => array( $flagged, 'flagged.png' ),
+			'an ANMF WebP under a jpg name'     => array( $frames, 'frames.jpg' ),
+			'a cut-off WebP under a png name'   => array( substr( $still, 0, -4 ), 'cut.png' ),
+		);
+
+		foreach ( $cases as $case => list( $bytes, $name ) ) {
 			$result = $this->refused( $this->args( $bytes, $name ), 'steadhand_invalid_input' );
-			$this->assertSame( 'Animated images are not accepted.', $result->get_error_message(), $name );
+			$this->assertSame( $not_jpeg_or_png, $result->get_error_message(), $case );
+			$this->assertSame( 'blocked', $this->latest_row( $agent )['result'], $case );
 		}
 
-		$this->assertIsArray( $this->upload( $this->args( $still, 'still.webp' ) ), 'A still WebP is accepted.' );
-		$this->assertIsArray( $this->upload( $this->args( $png, 'still.png' ) ), 'A still PNG is accepted.' );
-		$this->assertSame( 'ok', $this->latest_row( $agent )['result'] );
+		$result = $this->refused( $this->args( $still, 'still.webp' ), 'steadhand_invalid_input' );
+		$this->assertStringContainsString( 'filename must be', $result->get_error_message(), 'A .webp name is refused by the name rule.' );
 	}
 
 	/**
@@ -599,16 +617,16 @@ final class UploadMediaTest extends PostWriteTestCase {
 	}
 
 	/**
-	 * A WebP or PNG whose container cannot be walked to its end is refused, with nothing stored. Each case is cut off or has a
-	 * length that runs past the end.
+	 * A PNG whose container cannot be walked to its end is refused, with nothing stored: no IEND, and a chunk whose length
+	 * runs past the end of the file, including the 32-bit edge lengths.
 	 */
-	public function test_a_malformed_webp_or_png_container_is_refused(): void {
+	public function test_a_malformed_png_container_is_refused(): void {
 		$this->act_as_agent( array( 'steadhand_media' => true ) );
 		$png = $this->encode_image( 'png' );
 
-		// A PNG with no IEND, and a WebP whose RIFF size claims more bytes than the file has.
 		$this->refused( $this->args( substr( $png, 0, -12 ), 'cut.png' ), 'steadhand_invalid_input' );
-		$this->refused( $this->args( substr( $this->encode_image( 'webp' ), 0, -4 ), 'cut.webp' ), 'steadhand_invalid_input' );
+		$this->refused( $this->args( substr( $png, 0, 33 ) . pack( 'N', 0x80000000 ) . "IENDx\0\0\0\0", 'huge.png' ), 'steadhand_invalid_input' );
+		$this->refused( $this->args( substr( $png, 0, 33 ) . pack( 'N', 0xFFFFFFFF ) . "acTLx\0\0\0\0", 'huger.png' ), 'steadhand_invalid_input' );
 	}
 
 	/**
@@ -813,6 +831,44 @@ final class UploadMediaTest extends PostWriteTestCase {
 		$this->daily_rows( $agent, DailyUploadLimit::LIMIT, 90000 );
 
 		$this->assertIsArray( $this->upload( $this->args( $this->encode_image( 'png' ), 'fresh.png' ) ) );
+	}
+
+	/**
+	 * The daily cap is for uploads only: after 100 uploads in the day, a create-post by the same agent is not blocked by it.
+	 */
+	public function test_the_daily_cap_does_not_affect_other_write_abilities(): void {
+		$agent = $this->act_as_agent( array( 'steadhand_media' => true ) );
+		$this->daily_rows( $agent, DailyUploadLimit::LIMIT, 7200 );
+
+		$result = $this->execute_ability( 'steadhand/create-post', array( 'title' => 'Written after the upload cap' ) );
+
+		$this->assertIsArray( $result, 'A create-post is not refused by the upload cap.' );
+		$this->assertSame( 'ok', $this->latest_row( $agent )['result'] );
+		$this->assertSame( 'steadhand/create-post', $this->latest_row( $agent )['ability'] );
+	}
+
+	/**
+	 * An image that needs more memory than the site allows is refused before the log row is reserved: the row is blocked, not
+	 * error, so it does not count toward the day's 100. The test environment sets WP_MAX_MEMORY_LIMIT to -1, so core's limit is
+	 * unlimited unless a filter raises it above the PHP limit. The filter sets 280 MB, above the 256 MB PHP limit. A 4000 by
+	 * 4000 image needs about 122 MB of pixels, plus the 64 MB overhead and the memory in use, which the 80 MB ballast makes at
+	 * least 80 MB more: about 266 MB or more, which is more than 280 MB once the process's own memory is counted, so it is
+	 * refused. The ballast is released straight after the call.
+	 */
+	public function test_a_memory_refusal_is_blocked_and_does_not_use_up_the_daily_cap(): void {
+		$agent = $this->act_as_agent( array( 'steadhand_media' => true ) );
+		ini_set( 'memory_limit', '256M' ); // phpcs:ignore WordPress.PHP.IniSet.memory_limit_Disallowed -- The test sets the limit it checks against.
+		add_filter( 'image_memory_limit', static fn(): string => '280M' );
+		$this->daily_rows( $agent, DailyUploadLimit::LIMIT - 1, 7200 );
+
+		$ballast = str_repeat( "\0", 80 * 1024 * 1024 );
+		$result  = $this->refused( $this->args( $this->png_header( 4000, 4000 ), 'memory.png' ), 'steadhand_invalid_input' );
+		unset( $ballast );
+
+		$this->assertSame( 'The image needs more memory than this site allows, so nothing was stored.', $result->get_error_message() );
+		$this->assertSame( 'blocked', $this->latest_row( $agent )['result'], 'A memory refusal is blocked, not error.' );
+
+		$this->assertIsArray( $this->upload( $this->args( $this->encode_image( 'png' ), 'last.png' ) ), 'The 100th upload still passes.' );
 	}
 
 	/**

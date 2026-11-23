@@ -17,23 +17,23 @@ defined( 'ABSPATH' ) || exit;
  *
  * The type, size, pixel, container and name rules are the ability's (UploadMedia). This class checks what it needs to be
  * safe on its own: that it is called inside a write, the shape of its arguments, that the image fits the memory the site
- * allows, and that what core stored is still what was checked. Core then decodes the file once, when it makes the sizes.
+ * allows, and that what core stored is the checked bytes. Steadhand does not decode the image itself. Core decodes it when
+ * it makes the sizes, which can happen more than once for a large or rotated image.
  */
 final class MediaWriter {
 
 	/**
-	 * The extension-to-type map passed to core's sideload as its allowlist. The same three types UploadMedia accepts.
+	 * The extension-to-type map passed to core's sideload as its allowlist. The two types UploadMedia accepts.
 	 */
 	private const MIMES = array(
 		'jpg|jpeg' => 'image/jpeg',
 		'png'      => 'image/png',
-		'webp'     => 'image/webp',
 	);
 
 	/**
 	 * The extensions a stored file may have. Checked again after core has stored it.
 	 */
-	private const EXTENSIONS = array( 'jpg', 'jpeg', 'png', 'webp' );
+	private const EXTENSIONS = array( 'jpg', 'jpeg', 'png' );
 
 	/**
 	 * The fields create_image() takes. Anything else is refused.
@@ -51,14 +51,13 @@ final class MediaWriter {
 	private const BYTES_PER_PIXEL = 8;
 
 	/**
-	 * How many fresh names to try when the temporary file's name is taken.
-	 */
-	private const TEMP_ATTEMPTS = 5;
-
-	/**
 	 * What the crash cleanup removes, while a create_image() call is running. Null when none is.
 	 *
-	 * @var array{tmp: string, file: string, id: int, sizes: string[]}|null
+	 * The payload's SHA-256 is recorded when the write is armed. 'written' is the path core first gives the stored file, before
+	 * any filter changes it. 'file' is the path the write continues with. 'sizes' lists the generated sizes and the copy core
+	 * made in place of the original, when there is one.
+	 *
+	 * @var array{tmp: string, file: string, written: string, id: int, sizes: string[], sha256: string}|null
 	 */
 	private static ?array $pending = null;
 
@@ -72,13 +71,14 @@ final class MediaWriter {
 	/**
 	 * Stores image bytes as a new attachment in the media library, with its metadata and generated sizes.
 	 *
-	 * The header must be a JPEG, PNG or WebP, and the image must fit the memory limit, both checked before anything is
-	 * written. The bytes go to an exclusively created temporary file, which core's sideload moves into the uploads directory
-	 * under a name it makes unique. Core decodes the image once, when it makes the sizes; an image it cannot process is
-	 * refused with its file and row removed. After the sideload, the type, the extension, the content type and the location
-	 * are checked again. $still_allowed runs right before the row is inserted; when it returns false nothing is stored.
+	 * The header must be a JPEG or PNG, and the image must fit the memory limit, both checked before anything is written. The
+	 * bytes go to an exclusively created temporary file, which core's sideload moves into the uploads directory under a name it
+	 * makes unique. After the sideload, the type, the extension, the content type, the location and the SHA-256 of the stored
+	 * file are checked again. $still_allowed runs right before the row is inserted; when it returns false nothing is stored.
+	 * Core decodes the image when it makes the sizes; an image it cannot process is refused, with its file and row removed.
 	 *
-	 * Whatever happens, the temporary file is removed. A fatal error during the write is cleaned up at shutdown.
+	 * Whatever happens, the temporary file is removed. A fatal error during the write is cleaned up by the filter this arms
+	 * on core's fatal error handler, with a shutdown function as the fallback.
 	 *
 	 * @param string               $bytes         The image, already checked by the ability.
 	 * @param string               $filename      The file name, already checked; its extension must match the bytes.
@@ -87,7 +87,7 @@ final class MediaWriter {
 	 * @param callable             $still_allowed Returns true when the caller may still attach the image to this parent.
 	 * @return int|\WP_Error The new attachment's ID, or a WP_Error. steadhand_invalid_input when the image is refused
 	 *                       before anything is stored, or core cannot process it; steadhand_forbidden when $still_allowed
-	 *                       refuses; steadhand_error when a step core needs fails, or the stored file is not what was checked.
+	 *                       refuses; steadhand_error when a step core needs fails, or the stored file is not the checked bytes.
 	 * @throws \InvalidArgumentException When a field is not allowlisted or not a string, or an argument is out of range.
 	 */
 	public static function create_image( string $bytes, string $filename, array $fields, int $parent_id, callable $still_allowed ): int|\WP_Error {
@@ -125,12 +125,13 @@ final class MediaWriter {
 
 		self::load_admin_includes();
 
-		$tmp = self::write_temp_file( $bytes, $name );
+		$sha256 = hash( 'sha256', $bytes );
+		$tmp    = self::write_temp_file( $bytes, $name );
 		if ( '' === $tmp ) {
 			return self::storage_error();
 		}
 
-		self::arm( $tmp );
+		self::arm( $tmp, $sha256 );
 
 		$file  = '';
 		$id    = 0;
@@ -164,8 +165,9 @@ final class MediaWriter {
 			$file                  = (string) $stored['file'];
 			self::$pending['file'] = $file;
 
-			// Core may have changed what it stored, through filters on its own checks. Each thing it returned is checked again.
-			if ( ! self::stored_as_checked( $stored, $expected ) ) {
+			// Core may have changed what it stored, through filters on its own checks. Each thing it returned is checked again,
+			// and the bytes must be the ones that were checked.
+			if ( ! self::stored_as_checked( $stored, $expected ) || ! self::same_bytes( $file, $sha256 ) ) {
 				return new \WP_Error(
 					'steadhand_error',
 					__( 'WordPress stored this file as something other than the image that was checked, so nothing was stored.', 'steadhand' ),
@@ -205,7 +207,14 @@ final class MediaWriter {
 			if ( ! is_array( $meta ) || array() === $meta ) {
 				return self::storage_error();
 			}
-			$sizes                  = self::size_paths( $file, $meta );
+			$sizes = self::size_paths( $file, $meta );
+
+			// For a large or rotated image core replaces the attached file with a copy in the same directory. The row points at
+			// that copy now, so it is one of the files this write made.
+			$attached = (string) get_attached_file( $id );
+			if ( '' !== $attached && $attached !== $file ) {
+				$sizes[] = $attached;
+			}
 			self::$pending['sizes'] = $sizes;
 
 			if ( ! self::has_dimensions( $meta ) ) {
@@ -228,10 +237,11 @@ final class MediaWriter {
 			if ( $done ) {
 				wp_delete_file( $tmp );
 			} else {
-				self::remove_unfinished( $tmp, $file, $id, $sizes );
+				self::remove_unfinished( $tmp, $file, $id, $sizes, $sha256, (string) ( self::$pending['written'] ?? '' ) );
 			}
 
 			self::$pending = null;
+			self::disarm();
 		}
 	}
 
@@ -345,7 +355,8 @@ final class MediaWriter {
 
 	/**
 	 * Whether an image of these pixel dimensions fits the limit: its pixels at 8 bytes each, plus the memory the request already
-	 * uses, plus 64 MB, must not be more than the limit. A limit of -1 is unlimited.
+	 * uses, plus 64 MB, must not be more than the limit. A limit of -1 is unlimited. The check does not apply to Imagick, whose
+	 * memory is not counted against PHP's limit.
 	 *
 	 * @param int $width  Width in pixels, from the header.
 	 * @param int $height Height in pixels, from the header.
@@ -363,37 +374,75 @@ final class MediaWriter {
 	}
 
 	/**
-	 * Removes what a write left behind: the temporary file, the stored file, the sizes it made and the attachment row. Called
-	 * when a write fails, and at shutdown when one did not finish. Paths outside their directories are never removed.
+	 * Removes what a write left behind: the temporary file, the stored file and the copy core made in its place, the generated
+	 * sizes and the attachment row. Called when a write fails, from the fatal error handler, and from the shutdown fallback.
 	 *
-	 * @internal Public for the cleanup tests. Not an extension point.
-	 * @param string   $tmp   The temporary file, or ''.
-	 * @param string   $file  The stored file, or ''.
-	 * @param int      $id    The attachment row, or 0.
-	 * @param string[] $sizes Files of the generated sizes, in the same directory as $file.
+	 * An original file (the stored file, or the path core first gave it) is removed only when it is inside the uploads
+	 * directory and its SHA-256 is the payload's. A generated size is removed only when it is inside the uploads directory,
+	 * is in the same directory as the stored file, and was listed in the metadata. When a row is removed, WordPress's own
+	 * deletion may remove only the files chosen above: every other path it offers to wp_delete_file() is kept. Paths outside
+	 * their directories are never removed. Running it twice is harmless.
+	 *
+	 * @internal Public for the cleanup tests and the fatal error handler. Not an extension point.
+	 * @param string   $tmp     The temporary file, or ''.
+	 * @param string   $file    The stored file the write continued with, or ''.
+	 * @param int      $id      The attachment row, or 0.
+	 * @param string[] $sizes   Files of the generated sizes, and of the copy core made in place of the original.
+	 * @param string   $sha256  The SHA-256 of the payload the write checked.
+	 * @param string   $written The path core first gave the stored file, before any filter, or ''.
 	 */
-	public static function remove_unfinished( string $tmp, string $file, int $id, array $sizes ): void {
-		if ( '' !== $tmp && self::within( get_temp_dir(), $tmp ) ) {
+	public static function remove_unfinished( string $tmp, string $file, int $id, array $sizes, string $sha256, string $written ): void {
+		if ( '' !== $tmp && self::inside( get_temp_dir(), $tmp ) ) {
 			wp_delete_file( $tmp );
 		}
 
-		if ( $id > 0 ) {
-			wp_delete_attachment( $id, true );
+		$base  = (string) wp_upload_dir()['basedir'];
+		$owned = array();
+
+		foreach ( array_unique( array( $file, $written ) ) as $original ) {
+			if ( '' !== $original && self::inside( $base, $original ) && self::same_bytes( $original, $sha256 ) ) {
+				$owned[] = (string) realpath( $original );
+			}
 		}
 
-		$base = (string) wp_upload_dir()['basedir'];
-		foreach ( array_merge( array( $file ), $sizes ) as $path ) {
-			if ( '' !== $path && self::within( $base, $path ) ) {
-				wp_delete_file( $path );
+		$dir = '' === $file ? '' : self::real_dir( $file );
+		foreach ( $sizes as $size ) {
+			if ( '' !== $size && '' !== $dir && self::inside( $base, $size ) && self::real_dir( $size ) === $dir ) {
+				$owned[] = (string) realpath( $size );
 			}
+		}
+		$owned = array_values( array_unique( $owned ) );
+
+		if ( $id > 0 ) {
+			self::delete_row( $id, $owned );
+		}
+
+		foreach ( $owned as $path ) {
+			wp_delete_file( $path );
 		}
 	}
 
 	/**
-	 * The shutdown function. A PHP fatal error skips the finally block, so when a write did not finish, this removes what it
-	 * left. Does nothing when no write is running, or the write finished and cleared its state.
+	 * The fatal error handler's hook, and the shutdown fallback's work, as one callback. Core applies the wp_php_error_args
+	 * filter with the arguments it is about to pass to wp_die(), so the cleanup runs before the error page is written. It returns
+	 * the arguments unchanged.
 	 *
-	 * @internal Registered by create_image(). Not an extension point.
+	 * @internal Attached while a write is armed. Not an extension point.
+	 * @param array<string, mixed> $args The arguments core passes to wp_die().
+	 * @return array<string, mixed>
+	 */
+	public static function finish_during_php_error( array $args ): array {
+		self::finish_after_fatal();
+
+		return $args;
+	}
+
+	/**
+	 * The shutdown function, and the work of the fatal error filter. A PHP fatal error skips the finally block, so when a write
+	 * did not finish, this removes what it left. Does nothing when no write is running, or the write finished and cleared its
+	 * state. Running it again does nothing more.
+	 *
+	 * @internal Registered by arm(). Not an extension point.
 	 */
 	public static function finish_after_fatal(): void {
 		$pending       = self::$pending;
@@ -403,12 +452,51 @@ final class MediaWriter {
 			return;
 		}
 
-		self::remove_unfinished( $pending['tmp'], $pending['file'], $pending['id'], $pending['sizes'] );
+		self::remove_unfinished( $pending['tmp'], $pending['file'], $pending['id'], $pending['sizes'], $pending['sha256'], $pending['written'] );
+	}
+
+	/**
+	 * Records the path core gives the stored file, before any other filter can change it. Runs only while a write is armed.
+	 *
+	 * @internal Attached while a write is armed. Not an extension point.
+	 * @param array<string, mixed> $upload  What the sideload returns.
+	 * @param string               $context The sideload context.
+	 * @return array<string, mixed>
+	 */
+	public static function record_written_file( array $upload, string $context ): array {
+		if ( 'sideload' === $context && null !== self::$pending && is_string( $upload['file'] ?? null ) ) {
+			self::$pending['written'] = $upload['file'];
+		}
+
+		return $upload;
+	}
+
+	/**
+	 * Removes the attachment row, and only the files this class chose: every other path WordPress's own deletion offers to
+	 * wp_delete_file() is kept.
+	 *
+	 * @param int      $id    The attachment row.
+	 * @param string[] $owned Real paths that may be removed.
+	 */
+	private static function delete_row( int $id, array $owned ): void {
+		$only_owned = static function ( $path ) use ( $owned ): string {
+			$real = is_string( $path ) ? realpath( $path ) : false;
+
+			return false !== $real && in_array( $real, $owned, true ) ? $path : '';
+		};
+
+		add_filter( 'wp_delete_file', $only_owned );
+		try {
+			wp_delete_attachment( $id, true );
+		} finally {
+			remove_filter( 'wp_delete_file', $only_owned );
+		}
 	}
 
 	/**
 	 * Writes the bytes to a new temporary file. The file is created exclusively, so an existing path is never written to or
-	 * followed; a name that is taken is tried again with a new random part. The file is readable by its owner only.
+	 * followed; a name that is taken is tried again with a new random part. The file is readable by its owner only. The random
+	 * part comes from random_bytes(), not from wp_generate_password(), which a site's filters can change.
 	 *
 	 * @param string $bytes The image.
 	 * @param string $name  The file name, which keeps the extension the image editor chooses its handler by.
@@ -417,8 +505,8 @@ final class MediaWriter {
 	private static function write_temp_file( string $bytes, string $name ): string {
 		$dir = trailingslashit( get_temp_dir() );
 
-		for ( $attempt = 0; $attempt < self::TEMP_ATTEMPTS; ++$attempt ) {
-			$path = $dir . 'steadhand-' . wp_generate_password( 16, false ) . '-' . $name;
+		for ( $attempt = 0; $attempt < 5; ++$attempt ) {
+			$path = $dir . 'steadhand-' . bin2hex( random_bytes( 16 ) ) . '-' . $name;
 
 			// 'x' fails when the path exists, a link included, so an existing path is never written to.
 			$handle = @fopen( $path, 'xb' ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged, WordPress.WP.AlternativeFunctions.file_system_operations_fopen -- Exclusive create; a taken name is retried below.
@@ -442,7 +530,7 @@ final class MediaWriter {
 	}
 
 	/**
-	 * Whether core's result is the image that was checked: the type is one of the three, the extension is allowed, the
+	 * Whether core's result is the image that was checked: the type is one of the two, the extension is allowed, the
 	 * content is still the checked type, and the file is inside the uploads directory.
 	 *
 	 * @param array<string, mixed> $stored   What sideload returned.
@@ -460,6 +548,17 @@ final class MediaWriter {
 			&& false !== $real
 			&& false !== $base
 			&& str_starts_with( $real, rtrim( $base, DIRECTORY_SEPARATOR ) . DIRECTORY_SEPARATOR );
+	}
+
+	/**
+	 * Whether the file exists and its SHA-256 is the given one. An empty digest never matches.
+	 *
+	 * @param string $file   The file.
+	 * @param string $sha256 The digest.
+	 * @return bool
+	 */
+	private static function same_bytes( string $file, string $sha256 ): bool {
+		return '' !== $sha256 && is_file( $file ) && hash_file( 'sha256', $file ) === $sha256;
 	}
 
 	/**
@@ -493,36 +592,63 @@ final class MediaWriter {
 	}
 
 	/**
-	 * Whether $path lies inside $dir, after the directory and the file's own folder are resolved.
+	 * Whether $path, after its symbolic links are resolved, lies inside $dir.
 	 *
 	 * @param string $dir  Directory.
-	 * @param string $path Path to check.
+	 * @param string $path Path to check. Must exist.
 	 * @return bool
 	 */
-	private static function within( string $dir, string $path ): bool {
+	private static function inside( string $dir, string $path ): bool {
 		$base = realpath( $dir );
-		$real = realpath( dirname( $path ) );
+		$real = realpath( $path );
 
-		return false !== $base && false !== $real && str_starts_with( $real . DIRECTORY_SEPARATOR, rtrim( $base, DIRECTORY_SEPARATOR ) . DIRECTORY_SEPARATOR );
+		return false !== $base && false !== $real && str_starts_with( $real, rtrim( $base, DIRECTORY_SEPARATOR ) . DIRECTORY_SEPARATOR );
 	}
 
 	/**
-	 * Arms the crash cleanup for one write, and registers the shutdown function the first time.
+	 * The real path of the directory a file is in, or '' when it cannot be resolved.
 	 *
-	 * @param string $tmp The temporary file.
+	 * @param string $path A file path.
+	 * @return string
 	 */
-	private static function arm( string $tmp ): void {
+	private static function real_dir( string $path ): string {
+		$dir = realpath( dirname( $path ) );
+
+		return false === $dir ? '' : $dir;
+	}
+
+	/**
+	 * Arms the crash cleanup for one write: records the state, attaches the fatal error filter and the path capture, and
+	 * registers the shutdown fallback the first time.
+	 *
+	 * @param string $tmp    The temporary file.
+	 * @param string $sha256 The SHA-256 of the payload.
+	 */
+	private static function arm( string $tmp, string $sha256 ): void {
 		self::$pending = array(
-			'tmp'   => $tmp,
-			'file'  => '',
-			'id'    => 0,
-			'sizes' => array(),
+			'tmp'     => $tmp,
+			'file'    => '',
+			'written' => '',
+			'id'      => 0,
+			'sizes'   => array(),
+			'sha256'  => $sha256,
 		);
+
+		add_filter( 'wp_php_error_args', array( self::class, 'finish_during_php_error' ) ); // phpcs:ignore WordPress.NamingConventions.PrefixAllGlobals.NonPrefixedHooknameFound -- Core's fatal error handler filter. The callback runs the cleanup before core's error page.
+		add_filter( 'wp_handle_upload', array( self::class, 'record_written_file' ), 0, 2 );
 
 		if ( ! self::$shutdown_registered ) {
 			register_shutdown_function( array( self::class, 'finish_after_fatal' ) );
 			self::$shutdown_registered = true;
 		}
+	}
+
+	/**
+	 * Detaches what arm() attached, when a write finishes.
+	 */
+	private static function disarm(): void {
+		remove_filter( 'wp_php_error_args', array( self::class, 'finish_during_php_error' ) ); // phpcs:ignore WordPress.NamingConventions.PrefixAllGlobals.NonPrefixedHooknameFound -- Core's fatal error handler filter.
+		remove_filter( 'wp_handle_upload', array( self::class, 'record_written_file' ), 0 );
 	}
 
 	/**

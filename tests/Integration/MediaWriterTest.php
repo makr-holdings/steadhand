@@ -1,7 +1,7 @@
 <?php
 /**
  * Steadhand\Pipeline\MediaWriter, called directly inside a write: the write guard, the argument checks, the memory check, the
- * cleanup after a failed store, the re-checks, and the featured-image lost-update check.
+ * cleanup after a failed store or a fatal error, the checks on what core stored, and the featured-image lost-update check.
  *
  * @package Steadhand
  */
@@ -18,6 +18,13 @@ use Steadhand\Pipeline\MediaWriter;
 final class MediaWriterTest extends PostWriteTestCase {
 
 	use ImageBytes;
+
+	/**
+	 * The fatal error filter the writer attaches while a write is armed.
+	 *
+	 * @var array{0: string, 1: string}
+	 */
+	private const FATAL_CALLBACK = array( MediaWriter::class, 'finish_during_php_error' );
 
 	/**
 	 * Attachment IDs this test created, deleted with their files in tearDown().
@@ -52,6 +59,7 @@ final class MediaWriterTest extends PostWriteTestCase {
 		remove_all_filters( 'wp_check_filetype_and_ext' );
 		remove_all_filters( 'wp_unique_filename' );
 		remove_all_filters( 'wp_handle_upload' );
+		remove_all_filters( 'random_password' );
 		ini_set( 'memory_limit', self::$memory_limit_before ); // phpcs:ignore WordPress.PHP.IniSet.memory_limit_Disallowed -- Restores the limit the test changed.
 
 		foreach ( $this->created as $id ) {
@@ -113,6 +121,23 @@ final class MediaWriterTest extends PostWriteTestCase {
 				}
 			}
 		);
+	}
+
+	/**
+	 * The paths of the generated sizes an attachment's metadata lists, in the directory of its file.
+	 *
+	 * @param int $id Attachment ID.
+	 * @return string[]
+	 */
+	private function meta_size_paths( int $id ): array {
+		$meta  = wp_get_attachment_metadata( $id );
+		$paths = array();
+
+		foreach ( (array) ( is_array( $meta ) ? ( $meta['sizes'] ?? array() ) : array() ) as $size ) {
+			$paths[] = trailingslashit( dirname( get_attached_file( $id ) ) ) . $size['file'];
+		}
+
+		return $paths;
 	}
 
 	/**
@@ -216,6 +241,40 @@ final class MediaWriterTest extends PostWriteTestCase {
 		$this->assertSame( 'image/png', get_post_mime_type( $id ) );
 		$this->assertFileExists( get_attached_file( $id ) );
 		$this->assertIsArray( wp_get_attachment_metadata( $id ) );
+	}
+
+	/**
+	 * The temporary file is owner-only, and its name is random from random_bytes(): a site's random_password filter does not
+	 * change it. The mode check is skipped on Windows, where file modes are not POSIX modes.
+	 */
+	public function test_the_temporary_file_is_owner_only_and_its_name_ignores_the_random_password_filter(): void {
+		$this->act_as_agent( array( 'steadhand_media' => true ) );
+		add_filter( 'random_password', static fn(): string => 'FILTERED-PASSWORD' );
+
+		$seen = array(
+			'path' => '',
+			'mode' => -1,
+		);
+		add_filter(
+			'wp_handle_sideload_prefilter',
+			static function ( array $file ) use ( &$seen ): array {
+				$seen['path'] = (string) $file['tmp_name'];
+				$seen['mode'] = (int) ( fileperms( $file['tmp_name'] ) & 0777 );
+				return $file;
+			}
+		);
+
+		$id = $this->writer( fn() => MediaWriter::create_image( $this->encode_image( 'png' ), 'owner-only.png', array(), 0, static fn(): bool => true ) );
+		$this->assertIsInt( $id );
+		$this->created[] = $id;
+
+		$this->assertNotSame( '', $seen['path'], 'The sideload must have seen the temporary file.' );
+		$this->assertSame( 1, preg_match( '/\Asteadhand-[0-9a-f]{32}-owner-only\.png\z/', basename( $seen['path'] ) ), 'The name is random hex, not the password filter.' );
+		$this->assertStringNotContainsString( 'FILTERED-PASSWORD', basename( $seen['path'] ) );
+		if ( '\\' !== DIRECTORY_SEPARATOR ) {
+			$this->assertSame( 0600, $seen['mode'], 'The temporary file is created with mode 0600.' );
+		}
+		$this->assertFileDoesNotExist( $seen['path'], 'The temporary file is removed after the write.' );
 	}
 
 	/**
@@ -345,7 +404,266 @@ final class MediaWriterTest extends PostWriteTestCase {
 	}
 
 	/**
-	 * The permission check, run again on the post as it is now: when it refuses, nothing is written.
+	 * The fatal error filter is attached only while a write is armed: not before a write, not during a refused one, and not after
+	 * a completed one.
+	 */
+	public function test_the_fatal_error_filter_is_attached_only_while_a_write_is_armed(): void {
+		$this->act_as_agent( array( 'steadhand_media' => true ) );
+		$this->assertFalse( has_filter( 'wp_php_error_args', self::FATAL_CALLBACK ), 'Not attached before a write.' );
+
+		$id = $this->writer( fn() => MediaWriter::create_image( $this->encode_image( 'png' ), 'attached.png', array(), 0, static fn(): bool => true ) );
+		$this->assertIsInt( $id );
+		$this->created[] = $id;
+		$this->assertFalse( has_filter( 'wp_php_error_args', self::FATAL_CALLBACK ), 'Not attached after a completed write.' );
+
+		$refused = $this->writer( fn() => MediaWriter::create_image( $this->encode_image( 'png' ), 'refused.png', array(), 0, static fn(): bool => false ) );
+		$this->assertWPError( $refused );
+		$this->assertFalse( has_filter( 'wp_php_error_args', self::FATAL_CALLBACK ), 'Not attached after a refused write.' );
+	}
+
+	/**
+	 * A fatal error during the write, as core's fatal error handler reports it, removes the temporary file, the stored file and
+	 * the attachment row. The simulated fatal is raised in the metadata step, after the row exists: the filter is applied the way
+	 * core applies it, with a fake error, and the temporary file is put back on disk so that all three are there to remove.
+	 */
+	public function test_a_fatal_during_the_write_removes_the_temp_file_the_stored_file_and_the_row(): void {
+		$this->act_as_agent( array( 'steadhand_media' => true ) );
+		$temp     = '';
+		$attached = false;
+
+		add_filter(
+			'wp_handle_sideload_prefilter',
+			static function ( array $file ) use ( &$temp ): array {
+				$temp = (string) $file['tmp_name'];
+				return $file;
+			}
+		);
+		add_filter(
+			'wp_generate_attachment_metadata',
+			static function () use ( &$temp, &$attached ): array {
+				// The temporary file is still on disk at the crash, as if core had not removed it yet.
+				file_put_contents( $temp, 'left behind' ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents -- A probe file in the temporary directory.
+				$attached = false !== has_filter( 'wp_php_error_args', self::FATAL_CALLBACK );
+
+				// Core's fatal error handler applies this filter, with its arguments and the error, before it calls wp_die().
+				apply_filters(
+					'wp_php_error_args', // phpcs:ignore WordPress.NamingConventions.PrefixAllGlobals.NonPrefixedHooknameFound -- Core's hook, applied here the way core applies it.
+					array(),
+					array(
+						'type'    => E_ERROR,
+						'message' => 'Simulated fatal error.',
+						'file'    => __FILE__,
+						'line'    => __LINE__,
+					)
+				);
+
+				return array();
+			}
+		);
+		$files = $this->uploads_files();
+		$rows  = $this->attachment_count();
+
+		$result = $this->writer( fn() => MediaWriter::create_image( $this->encode_image( 'png', 6, 6 ), 'fatal.png', array(), 0, static fn(): bool => true ) );
+
+		$this->assertTrue( $attached, 'The filter is attached while the write is armed.' );
+		$this->assertWPError( $result );
+		$this->assertFileDoesNotExist( $temp, 'The temporary file must be removed.' );
+		$this->assertSame( $files, $this->uploads_files(), 'The stored file must be removed.' );
+		$this->assertSame( $rows, $this->attachment_count(), 'The row must be removed.' );
+		$this->assertFalse( has_filter( 'wp_php_error_args', self::FATAL_CALLBACK ), 'The filter is removed when the write finishes.' );
+	}
+
+	/**
+	 * The shutdown fallback, which is what runs when core's handler is disabled, cleans an armed write the same way, and running it
+	 * a second time does nothing more.
+	 */
+	public function test_the_shutdown_fallback_cleans_an_armed_write_and_is_idempotent(): void {
+		$this->act_as_agent( array( 'steadhand_media' => true ) );
+		$temp = '';
+
+		add_filter(
+			'wp_handle_sideload_prefilter',
+			static function ( array $file ) use ( &$temp ): array {
+				$temp = (string) $file['tmp_name'];
+				return $file;
+			}
+		);
+		add_filter(
+			'wp_generate_attachment_metadata',
+			static function () use ( &$temp ): array {
+				file_put_contents( $temp, 'left behind' ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents -- A probe file in the temporary directory.
+
+				// What the shutdown function does when the process ends while the write is armed.
+				MediaWriter::finish_after_fatal();
+				MediaWriter::finish_after_fatal();
+
+				return array();
+			}
+		);
+		$files = $this->uploads_files();
+		$rows  = $this->attachment_count();
+
+		$result = $this->writer( fn() => MediaWriter::create_image( $this->encode_image( 'png', 6, 6 ), 'shutdown.png', array(), 0, static fn(): bool => true ) );
+
+		$this->assertWPError( $result );
+		$this->assertFileDoesNotExist( $temp );
+		$this->assertSame( $files, $this->uploads_files() );
+		$this->assertSame( $rows, $this->attachment_count() );
+	}
+
+	/**
+	 * A stored file whose bytes are not the checked bytes is refused, and no row is made. The type and the extension are right, so
+	 * only the SHA-256 check refuses it. The write does not delete the swapped file, because its bytes are not the checked ones:
+	 * the test removes it itself.
+	 */
+	public function test_a_stored_file_whose_bytes_are_not_the_checked_bytes_is_refused_and_no_row_is_made(): void {
+		$this->act_as_agent( array( 'steadhand_media' => true ) );
+		$png     = $this->encode_image( 'png', 4, 4 );
+		$other   = $this->encode_image( 'png', 5, 5 );
+		$swapped = '';
+
+		add_filter(
+			'wp_handle_upload',
+			static function ( array $upload, string $context ) use ( &$swapped, $other ): array {
+				if ( 'sideload' === $context ) {
+					file_put_contents( $upload['file'], $other ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents -- Swaps the stored file's content, for the test.
+					$swapped = (string) $upload['file'];
+				}
+
+				return $upload;
+			},
+			10,
+			2
+		);
+		$files = $this->uploads_files();
+		$rows  = $this->attachment_count();
+
+		$result = $this->writer( static fn() => MediaWriter::create_image( $png, 'swapped.png', array(), 0, static fn(): bool => true ) );
+		if ( is_int( $result ) ) {
+			$this->created[] = $result; // Only if the refusal fails: removed in tearDown().
+		}
+
+		// The write leaves the swapped file, because its bytes are not the checked ones. The test removes it, even on a failure.
+		$kept = is_file( $swapped );
+		wp_delete_file( $swapped );
+
+		$this->assertWPError( $result );
+		$this->assertSame( 'steadhand_error', $result->get_error_code() );
+		$this->assertStringContainsString( 'something other than the image that was checked', $result->get_error_message() );
+		$this->assertSame( $rows, $this->attachment_count() );
+		$this->assertTrue( $kept, 'The write leaves a file whose bytes are not the checked bytes.' );
+		$this->assertSame( $files, $this->uploads_files() );
+	}
+
+	/**
+	 * A stored path that a filter redirects to an existing attachment's file is refused, and that file survives. The file core
+	 * wrote is removed by the write, because its bytes are the checked ones.
+	 */
+	public function test_a_stored_path_redirected_to_an_existing_file_is_refused_and_that_file_survives(): void {
+		$this->act_as_agent( array( 'steadhand_media' => true ) );
+		$existing      = $this->set_thumbnail_target();
+		$existing_file = (string) get_attached_file( $existing );
+		$before        = hash_file( 'sha256', $existing_file );
+
+		add_filter(
+			'wp_handle_upload',
+			static function ( array $upload, string $context ) use ( $existing_file ): array {
+				if ( 'sideload' === $context ) {
+					$upload['file'] = $existing_file;
+				}
+
+				return $upload;
+			},
+			10,
+			2
+		);
+		$files = $this->uploads_files();
+		$rows  = $this->attachment_count();
+
+		$result = $this->writer( fn() => MediaWriter::create_image( $this->encode_image( 'png' ), 'redirect.png', array(), 0, static fn(): bool => true ) );
+
+		$this->assertWPError( $result );
+		$this->assertSame( 'steadhand_error', $result->get_error_code() );
+		$this->assertFileExists( $existing_file, 'The existing attachment\'s file is still there.' );
+		$this->assertSame( $before, hash_file( 'sha256', $existing_file ), 'The existing file is not changed.' );
+		$this->assertSame( $rows, $this->attachment_count() );
+		$this->assertSame( $files, $this->uploads_files(), 'The file core wrote is removed by the write.' );
+	}
+
+	/**
+	 * A row whose file is not the checked bytes loses its row but keeps its file: WordPress's own deletion may remove only the files
+	 * the cleanup chose. The test removes the file it kept, and the sizes it passed, itself.
+	 */
+	public function test_a_row_whose_file_is_not_the_checked_bytes_keeps_its_file(): void {
+		$id   = $this->set_thumbnail_target();
+		$file = (string) get_attached_file( $id );
+		$keep = array( $file );
+
+		MediaWriter::remove_unfinished( '', $file, $id, $this->meta_size_paths( $id ), str_repeat( '0', 64 ), '' );
+
+		$this->assertNull( get_post( $id ), 'The row is removed.' );
+		$this->assertFileExists( $file, 'The file is kept: its bytes are not the checked bytes.' );
+
+		foreach ( $keep as $path ) {
+			wp_delete_file( $path );
+		}
+	}
+
+	/**
+	 * The cleanup removes the temporary file, the stored file, the generated sizes and the row it is given, when the stored file
+	 * holds the checked bytes.
+	 */
+	public function test_the_cleanup_removes_every_file_and_the_row_it_is_given(): void {
+		$id   = $this->set_thumbnail_target();
+		$file = (string) get_attached_file( $id );
+		$hash = hash_file( 'sha256', $file );
+		$size = trailingslashit( dirname( $file ) ) . 'steadhand-cleanup-probe-1x1.jpg';
+		$tmp  = trailingslashit( get_temp_dir() ) . 'steadhand-cleanup-probe-' . bin2hex( random_bytes( 8 ) ) . '.png';
+
+		copy( $file, $size );
+		file_put_contents( $tmp, 'temporary' ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents -- A probe file in the temporary directory.
+
+		MediaWriter::remove_unfinished( $tmp, $file, $id, array_merge( array( $size ), $this->meta_size_paths( $id ) ), $hash, '' );
+
+		$this->assertFileDoesNotExist( $tmp, 'The temporary file must be removed.' );
+		$this->assertFileDoesNotExist( $file, 'The stored file must be removed.' );
+		$this->assertFileDoesNotExist( $size, 'A generated size must be removed.' );
+		$this->assertNull( get_post( $id ), 'The attachment row must be removed.' );
+		$this->created = array();
+	}
+
+	/**
+	 * A path outside the uploads directory is never removed: it is passed both as the stored file and inside the sizes, with the
+	 * matching SHA-256, and it survives. Only the location rule protects it.
+	 */
+	public function test_a_path_outside_uploads_is_never_removed(): void {
+		$outside = trailingslashit( get_temp_dir() ) . 'steadhand-outside-' . bin2hex( random_bytes( 8 ) ) . '.jpg';
+		file_put_contents( $outside, 'outside the uploads directory' ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents -- A probe file outside the uploads directory.
+		$hash = hash_file( 'sha256', $outside );
+
+		MediaWriter::remove_unfinished( '', $outside, 0, array( $outside ), $hash, '' );
+
+		$this->assertFileExists( $outside, 'A path outside its directory is never removed, even as the stored file with the right hash.' );
+
+		wp_delete_file( $outside );
+	}
+
+	/**
+	 * The shutdown function does nothing when no write is running, so a finished write is not cleaned up twice.
+	 */
+	public function test_the_shutdown_cleanup_does_nothing_when_no_write_is_running(): void {
+		$this->act_as_agent( array( 'steadhand_media' => true ) );
+		$id   = $this->set_thumbnail_target();
+		$file = get_attached_file( $id );
+
+		MediaWriter::finish_after_fatal();
+
+		$this->assertFileExists( $file );
+		$this->assertNotNull( get_post( $id ) );
+	}
+
+	/**
+	 * A thumbnail changed since the caller read it is not overwritten: the write is refused and the other value stays.
 	 */
 	public function test_a_closure_that_refuses_writes_nothing(): void {
 		$this->act_as_agent( array( 'steadhand_media' => true ) );
@@ -444,47 +762,6 @@ final class MediaWriterTest extends PostWriteTestCase {
 		}
 
 		$this->assertFalse( $called );
-	}
-
-	/**
-	 * The crash cleanup routine removes the temporary file, the stored file, a generated size and the attachment row. A path
-	 * outside its directory is not removed.
-	 */
-	public function test_the_cleanup_removes_every_file_and_the_row_it_is_given(): void {
-		$id    = $this->set_thumbnail_target();
-		$file  = get_attached_file( $id );
-		$size  = trailingslashit( dirname( $file ) ) . 'steadhand-cleanup-probe-1x1.jpg';
-		$tmp   = trailingslashit( get_temp_dir() ) . 'steadhand-cleanup-probe-' . wp_generate_password( 8, false ) . '.png';
-		$other = trailingslashit( get_temp_dir() ) . 'steadhand-cleanup-outside-' . wp_generate_password( 8, false ) . '.jpg';
-
-		copy( $file, $size );
-		file_put_contents( $tmp, 'temporary' ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents -- A probe file in the temporary directory.
-		file_put_contents( $other, 'outside' ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents -- A probe file outside the uploads directory.
-
-		MediaWriter::remove_unfinished( $tmp, $file, $id, array( $size ) );
-
-		$this->assertFileDoesNotExist( $tmp, 'The temporary file must be removed.' );
-		$this->assertFileDoesNotExist( $file, 'The stored file must be removed.' );
-		$this->assertFileDoesNotExist( $size, 'A generated size must be removed.' );
-		$this->assertNull( get_post( $id ), 'The attachment row must be removed.' );
-		$this->assertFileExists( $other, 'A path outside its directory is never removed.' );
-
-		wp_delete_file( $other );
-		$this->created = array();
-	}
-
-	/**
-	 * The shutdown function does nothing when no write is running, so a finished write is not cleaned up twice.
-	 */
-	public function test_the_shutdown_cleanup_does_nothing_when_no_write_is_running(): void {
-		$this->act_as_agent( array( 'steadhand_media' => true ) );
-		$id   = $this->set_thumbnail_target();
-		$file = get_attached_file( $id );
-
-		MediaWriter::finish_after_fatal();
-
-		$this->assertFileExists( $file );
-		$this->assertNotNull( get_post( $id ) );
 	}
 
 	/**

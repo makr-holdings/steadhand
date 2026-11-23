@@ -294,6 +294,7 @@ These rules apply to every write. The order is fixed:
 3. The built-in rules that run last: `steadhand/content-limits`, then `steadhand/block-markup`.
 
 - Each rule sees the input as the rules before it left it.
+- The two rate rules count the change log before the write's row is reserved, so writes that arrive at the same moment can pass together: they are best effort under concurrent requests.
 - A block stops evaluation. The call is refused, and no later rule runs.
 - A warn adds its note, and evaluation continues.
 - A fix passes the new input through the same checks as the original call: the schema, the ability's own input rule, and the object check. If any of them fails, the call is blocked with "A guardrail changed this call into one that is not allowed, so it was refused." A fix that changes `object_type` or `object_id` is blocked with "A guardrail changed which object this call is about, so it was refused." Otherwise the call continues with the new input, and the rules after it see that input.

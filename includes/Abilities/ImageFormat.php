@@ -1,7 +1,7 @@
 <?php
 /**
- * Reads the parts of an uploaded image that its header and its decoder do not check: whether a WebP or PNG is animated,
- * whether its container is whole, and how many scans a JPEG has.
+ * Reads the parts of an uploaded image that its header and its decoder do not check: whether a PNG is animated, whether its
+ * container is whole, and how many scans a JPEG has.
  *
  * @package Steadhand
  */
@@ -22,7 +22,7 @@ final class ImageFormat {
 	/** The container is a still image. */
 	public const STILL = 'still';
 
-	/** The container is animated: a WebP with the animation flag or an ANIM/ANMF chunk, or a PNG with an acTL chunk. */
+	/** The container is animated: a PNG with an acTL chunk. */
 	public const ANIMATED = 'animated';
 
 	/** The container cannot be walked to its end. */
@@ -40,70 +40,11 @@ final class ImageFormat {
 	/** Bytes a PNG chunk takes apart from its data: the length, the type and the CRC. */
 	private const PNG_CHUNK_OVERHEAD = 12;
 
-	/** The animation flag in the first byte of a WebP VP8X chunk's flags (libwebp's ANIMATION_FLAG). */
-	private const WEBP_ANIMATION_BIT = 0x02;
-
 	/**
-	 * Reads a WebP container. The RIFF size must fit the string; the chunks, each padded to an even length, must end exactly
-	 * at the end of the RIFF payload. A VP8X chunk with the animation flag, or any ANIM or ANMF chunk, makes it animated.
-	 *
-	 * @param string $bytes The file.
-	 * @return string One of STILL, ANIMATED or MALFORMED.
-	 */
-	public static function webp_kind( string $bytes ): string {
-		$length = strlen( $bytes );
-		if ( $length < 12 || 'RIFF' !== substr( $bytes, 0, 4 ) || 'WEBP' !== substr( $bytes, 8, 4 ) ) {
-			return self::MALFORMED;
-		}
-
-		// The RIFF size counts the bytes after its own eight. A file shorter than that is cut off.
-		$riff_end = 8 + self::le32( $bytes, 4 );
-		if ( $riff_end < 12 || $riff_end > $length ) {
-			return self::MALFORMED;
-		}
-
-		$animated = false;
-		$offset   = 12;
-
-		for ( $count = 0; $offset < $riff_end; ++$count ) {
-			if ( $count >= self::MAX_CHUNKS || $offset + 8 > $riff_end ) {
-				return self::MALFORMED;
-			}
-
-			$type = substr( $bytes, $offset, 4 );
-			$size = self::le32( $bytes, $offset + 4 );
-			$data = $offset + 8;
-
-			// The chunk's data must lie inside the RIFF payload.
-			if ( $size > $riff_end - $data ) {
-				return self::MALFORMED;
-			}
-
-			if ( 'VP8X' === $type ) {
-				if ( $size < 10 ) {
-					return self::MALFORMED;
-				}
-				if ( 0 !== ( ord( $bytes[ $data ] ) & self::WEBP_ANIMATION_BIT ) ) {
-					$animated = true;
-				}
-			} elseif ( 'ANIM' === $type || 'ANMF' === $type ) {
-				$animated = true;
-			}
-
-			// Odd-sized data is followed by one pad byte, which the RIFF size includes.
-			$offset = $data + $size + ( $size % 2 );
-		}
-
-		if ( $offset !== $riff_end ) {
-			return self::MALFORMED;
-		}
-
-		return $animated ? self::ANIMATED : self::STILL;
-	}
-
-	/**
-	 * Reads a PNG container, chunk by chunk, up to IEND. A chunk's data must lie inside the file. An acTL chunk makes the
-	 * file animated. A file that ends before IEND is malformed.
+	 * Reads a PNG container, chunk by chunk, up to IEND. A chunk's length is read as unsigned. A length that is negative (on a
+	 * 32-bit build) or runs past the end of the file makes the container malformed, before the chunk's type is looked at, so
+	 * the walk can never move backwards or past the end. An acTL chunk makes the file animated. A file that ends before IEND is
+	 * malformed.
 	 *
 	 * @param string $bytes The file.
 	 * @return string One of STILL, ANIMATED or MALFORMED.
@@ -124,8 +65,8 @@ final class ImageFormat {
 			$size = self::be32( $bytes, $offset );
 			$type = substr( $bytes, $offset + 4, 4 );
 
-			// The data and the CRC after it must lie inside the file.
-			if ( $size > $length - $offset - self::PNG_CHUNK_OVERHEAD ) {
+			// The data and the CRC after it must lie inside the file. A negative length is refused here too.
+			if ( $size < 0 || $size > $length - $offset - self::PNG_CHUNK_OVERHEAD ) {
 				return self::MALFORMED;
 			}
 
@@ -155,20 +96,8 @@ final class ImageFormat {
 	}
 
 	/**
-	 * The unsigned little-endian 32-bit value at an offset. The caller has checked that four bytes are there.
-	 *
-	 * @param string $bytes  The file.
-	 * @param int    $offset Offset of the first byte.
-	 * @return int
-	 */
-	private static function le32( string $bytes, int $offset ): int {
-		$values = unpack( 'V', substr( $bytes, $offset, 4 ) );
-
-		return is_array( $values ) ? (int) $values[1] : 0;
-	}
-
-	/**
-	 * The unsigned big-endian 32-bit value at an offset. The caller has checked that four bytes are there.
+	 * The unsigned big-endian 32-bit value at an offset. The caller has checked that four bytes are there. On a 32-bit build a
+	 * value above 2^31 is negative, and the caller refuses it.
 	 *
 	 * @param string $bytes  The file.
 	 * @param int    $offset Offset of the first byte.
@@ -177,6 +106,6 @@ final class ImageFormat {
 	private static function be32( string $bytes, int $offset ): int {
 		$values = unpack( 'N', substr( $bytes, $offset, 4 ) );
 
-		return is_array( $values ) ? (int) $values[1] : 0;
+		return is_array( $values ) ? (int) $values[1] : -1;
 	}
 }
