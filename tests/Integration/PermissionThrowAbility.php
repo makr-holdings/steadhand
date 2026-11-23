@@ -46,6 +46,13 @@ final class PermissionThrowAbility extends Ability {
 	public bool $throw_in_schema = false;
 
 	/**
+	 * Whether validate_input() returns false, which is neither true nor a WP_Error.
+	 *
+	 * @var bool
+	 */
+	public bool $return_false_from_validate = false;
+
+	/**
 	 * Whether execute() ran.
 	 *
 	 * @var bool
@@ -103,6 +110,10 @@ final class PermissionThrowAbility extends Ability {
 		unset( $input );
 		if ( $this->throw_in_validate ) {
 			throw new \RuntimeException( 'SECRET /var/www/secret-path' );
+		}
+
+		if ( $this->return_false_from_validate ) {
+			return false;
 		}
 
 		return true;

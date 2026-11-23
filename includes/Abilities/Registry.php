@@ -157,21 +157,43 @@ final class Registry {
 	}
 
 	/**
-	 * Runs one pipeline call and turns any Throwable that escapes it into the generic error, so an exception message
-	 * never reaches the MCP Adapter. A throw from a permission check becomes a refusal, never true.
+	 * Runs one pipeline call and turns any Throwable that escapes it into an error, so an exception message never reaches
+	 * the MCP Adapter. A throw from a permission check becomes a refusal, never true.
+	 *
+	 * The error is the generic one, except for the execute callback of a write: a throw there can come after the write
+	 * ran, so it gets the text that says the change may have been partly applied and that the result must be checked
+	 * before the agent continues. A throw while deciding whether the ability is read-only counts as a write.
 	 *
 	 * This is the outer belt. The pipeline catches its own throws first (see Pipeline::check() and Pipeline::run()), so
 	 * this only runs if something outside those guards throws. The pipeline could not have logged such a call, so the
 	 * belt does not log it either.
 	 *
-	 * @param callable $call The pipeline call.
-	 * @return mixed The call's result, with the code added (see with_code()), or the generic error.
+	 * @param callable $call     The pipeline call.
+	 * @param Ability  $ability  The ability the call is for.
+	 * @param bool     $execute  True for the execute callback, false for the permission callback.
+	 * @return mixed The call's result, with the code added (see with_code()), or the error.
 	 */
-	private static function contain( callable $call ): mixed {
+	private static function contain( callable $call, Ability $ability, bool $execute ): mixed {
 		try {
 			return self::with_code( $call() );
 		} catch ( \Throwable ) {
-			return self::with_code( Pipeline::generic_error() );
+			$error = $execute && self::writes( $ability ) ? Pipeline::write_error() : Pipeline::generic_error();
+
+			return self::with_code( $error );
+		}
+	}
+
+	/**
+	 * Whether an ability may write. A throw while the answer is worked out counts as a write, so the stricter text is used.
+	 *
+	 * @param Ability $ability The ability.
+	 * @return bool
+	 */
+	private static function writes( Ability $ability ): bool {
+		try {
+			return ! Pipeline::is_read_only_ability( $ability );
+		} catch ( \Throwable ) {
+			return true;
 		}
 	}
 
@@ -192,8 +214,8 @@ final class Registry {
 			'category'            => self::CATEGORY,
 			'input_schema'        => $ability->input_schema(),
 			'output_schema'       => $ability->output_schema(),
-			'permission_callback' => fn( $input = null ) => self::contain( fn() => $this->pipeline->check( $ability, is_array( $input ) ? $input : array() ) ),
-			'execute_callback'    => fn( $input = null ) => self::contain( fn() => $this->pipeline->run( $ability, $input ) ),
+			'permission_callback' => fn( $input = null ) => self::contain( fn() => $this->pipeline->check( $ability, is_array( $input ) ? $input : array() ), $ability, false ),
+			'execute_callback'    => fn( $input = null ) => self::contain( fn() => $this->pipeline->run( $ability, $input ), $ability, true ),
 			'meta'                => array(
 				'annotations'  => $ability->annotations(),
 				'show_in_rest' => false,

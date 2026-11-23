@@ -221,9 +221,10 @@ final class Pipeline {
 	 * @return bool|\WP_Error
 	 */
 	private function check_object( Ability $ability, array $input ): bool|\WP_Error {
+		// Only true accepts the input. A WP_Error says what is wrong; any other value, false included, is refused.
 		$checked = $ability->validate_input( $input );
-		if ( is_wp_error( $checked ) ) {
-			return $checked;
+		if ( true !== $checked ) {
+			return is_wp_error( $checked ) ? $checked : $this->input_refused();
 		}
 
 		// One text for every object refusal (missing, trashed, disallowed type, no access), so a caller cannot use
@@ -313,15 +314,17 @@ final class Pipeline {
 	 *
 	 * @param Ability              $ability Ability being called.
 	 * @param array<string, mixed> $input   Validated input.
-	 * @return bool|\WP_Error True if allowed, otherwise the steadhand_forbidden WP_Error from authorize().
+	 * @return bool|\WP_Error True if allowed. Otherwise the WP_Error from authorize(), or steadhand_error from check_failed()
+	 *                        when the check threw or returned something other than true.
 	 */
 	public function check( Ability $ability, array $input ): bool|\WP_Error {
 		// A throw from prepare() or authorize() (a third-party capability filter, for one) fails closed: the call is
-		// refused with a fixed message, logged as an error, and never allowed.
+		// refused with a fixed message, logged as blocked, and never allowed. The call never ran, so the rate limits do
+		// not count it (a refused call is not counted).
 		try {
 			$prepared = $this->prepare( $ability, $input );
 		} catch ( \Throwable ) {
-			$this->write_entry( $ability, Entry::RESULT_ERROR, $this->check_failed()->get_error_message(), $this->loggable( $ability, $input ) );
+			$this->write_entry( $ability, Entry::RESULT_BLOCKED, $this->check_failed()->get_error_message(), $this->loggable( $ability, $input ) );
 			return $this->check_failed();
 		}
 
@@ -334,19 +337,21 @@ final class Pipeline {
 		try {
 			$authorized = $this->authorize( $ability, $prepared );
 		} catch ( \Throwable ) {
+			// Refused below, like any value other than true.
 			$authorized = null;
 		} finally {
 			self::leave();
 		}
 
-		if ( null === $authorized ) {
-			$this->write_entry( $ability, Entry::RESULT_ERROR, $this->check_failed()->get_error_message(), $this->loggable( $ability, $prepared ), $this->target_for( $ability, $prepared ) );
-			return $this->check_failed();
-		}
-
 		if ( is_wp_error( $authorized ) ) {
 			$this->write_entry( $ability, Entry::RESULT_BLOCKED, $authorized->get_error_message(), $this->loggable( $ability, $prepared ), $this->target_for( $ability, $prepared ) );
 			return $authorized;
+		}
+
+		// Only the exact true allows the call. A throw (null here) and any other value are refused.
+		if ( true !== $authorized ) {
+			$this->write_entry( $ability, Entry::RESULT_BLOCKED, $this->check_failed()->get_error_message(), $this->loggable( $ability, $prepared ), $this->target_for( $ability, $prepared ) );
+			return $this->check_failed();
 		}
 
 		return true;
@@ -370,11 +375,12 @@ final class Pipeline {
 			);
 		}
 
-		// A throw from prepare() or authorize() fails closed (see check()): nothing executes after it.
+		// A throw from prepare() or authorize() fails closed (see check()): nothing executes after it, and the refusal is
+		// logged as blocked, so it does not count toward the rate limits.
 		try {
 			$prepared = $this->prepare( $ability, $input );
 		} catch ( \Throwable ) {
-			return $this->finish( $ability, Entry::RESULT_ERROR, $this->check_failed(), $this->loggable( $ability, $input ) );
+			return $this->finish( $ability, Entry::RESULT_BLOCKED, $this->check_failed(), $this->loggable( $ability, $input ) );
 		}
 
 		if ( is_wp_error( $prepared ) ) {
@@ -391,11 +397,16 @@ final class Pipeline {
 			try {
 				$authorized = $this->authorize( $ability, $prepared );
 			} catch ( \Throwable ) {
-				return $this->finish( $ability, Entry::RESULT_ERROR, $this->check_failed(), $this->loggable( $ability, $prepared ), $target );
+				return $this->finish( $ability, Entry::RESULT_BLOCKED, $this->check_failed(), $this->loggable( $ability, $prepared ), $target );
 			}
 
 			if ( is_wp_error( $authorized ) ) {
 				return $this->finish( $ability, Entry::RESULT_BLOCKED, $authorized, $this->loggable( $ability, $prepared ), $target );
+			}
+
+			// Only the exact true allows the call (see check()).
+			if ( true !== $authorized ) {
+				return $this->finish( $ability, Entry::RESULT_BLOCKED, $this->check_failed(), $this->loggable( $ability, $prepared ), $target );
 			}
 
 			if ( ! self::is_read_only_ability( $ability ) ) {
@@ -484,7 +495,7 @@ final class Pipeline {
 
 		// (2) Reserve the log row. No row, no write.
 		$logged = $this->loggable( $ability, $final_input );
-		$id     = $this->reserve( $this->entry_for( $ability, Entry::RESULT_ERROR, '', $logged, $target, $this->join_notes( $notes ) ) );
+		$id     = $this->reserve( fn(): Entry => $this->entry_for( $ability, Entry::RESULT_ERROR, '', $logged, $target, $this->join_notes( $notes ) ) );
 		if ( 0 === $id ) {
 			return $this->log_failed();
 		}
@@ -508,7 +519,7 @@ final class Pipeline {
 				fn(): mixed => $ability->execute( $final_input )
 			);
 		} catch ( \Throwable ) {
-			$error = $this->write_error();
+			$error = self::write_error();
 			return $this->complete_write( $id, $ability, Entry::RESULT_ERROR, $error, $logged, $target, $notes, $snapshot['id'], false )
 				? $error
 				: $this->log_incomplete();
@@ -658,7 +669,7 @@ final class Pipeline {
 	 * @return \WP_Error
 	 */
 	private function refuse_write( Ability $ability, array $input, array $target, string $message, array $notes ): \WP_Error {
-		$entry = $this->entry_for( $ability, Entry::RESULT_BLOCKED, $message, $this->loggable( $ability, $input ), $target, $this->join_notes( $notes ) );
+		$entry = fn(): Entry => $this->entry_for( $ability, Entry::RESULT_BLOCKED, $message, $this->loggable( $ability, $input ), $target, $this->join_notes( $notes ) );
 		if ( ! $this->store( $entry ) ) {
 			return $this->log_failed();
 		}
@@ -667,14 +678,15 @@ final class Pipeline {
 	}
 
 	/**
-	 * Writes the reservation row for a write. Treats a throw as a failed write.
+	 * Writes the reservation row for a write. Treats a throw as a failed write, whether it comes from building the entry
+	 * or from the logger, so the write is then not performed.
 	 *
-	 * @param Entry $entry The call, with its outcome still to come.
+	 * @param callable(): Entry $entry Builds the call, with its outcome still to come. Called inside the try block.
 	 * @return int The row ID, or 0.
 	 */
-	private function reserve( Entry $entry ): int {
+	private function reserve( callable $entry ): int {
 		try {
-			return $this->logger->begin( $entry );
+			return $this->logger->begin( $entry() );
 		} catch ( \Throwable ) {
 			return 0;
 		}
@@ -695,10 +707,11 @@ final class Pipeline {
 	 * @return bool
 	 */
 	private function complete_write( int $id, Ability $ability, string $result, mixed $outcome, array $input, array $target, array $notes, int $snapshot_id, bool $undoable ): bool {
-		$message = is_wp_error( $outcome ) ? $outcome->get_error_message() : '';
-		$entry   = $this->entry_for( $ability, $result, $message, $input, $target, $this->join_notes( $notes ), $snapshot_id, $undoable );
-
+		// The entry is built inside the try block, so a throw while building it counts as a failed completion.
 		try {
+			$message = is_wp_error( $outcome ) ? $outcome->get_error_message() : '';
+			$entry   = $this->entry_for( $ability, $result, $message, $input, $target, $this->join_notes( $notes ), $snapshot_id, $undoable );
+
 			return true === $this->logger->complete( $id, $entry );
 		} catch ( \Throwable ) {
 			return false;
@@ -826,18 +839,19 @@ final class Pipeline {
 	 * @return bool True only if the logger reported success.
 	 */
 	private function write_entry( Ability $ability, string $result, string $message, array $input = array(), array $target = self::NO_TARGET ): bool {
-		return $this->store( $this->entry_for( $ability, $result, $message, $input, $target ) );
+		return $this->store( fn(): Entry => $this->entry_for( $ability, $result, $message, $input, $target ) );
 	}
 
 	/**
-	 * Stores one entry with log(). Treats a thrown exception as a failed write.
+	 * Builds one entry and stores it with log(). Treats a thrown exception as a failed write, whether it comes from
+	 * building the entry or from the logger.
 	 *
-	 * @param Entry $entry Entry to store.
+	 * @param callable(): Entry $entry Builds the entry. Called inside the try block.
 	 * @return bool
 	 */
-	private function store( Entry $entry ): bool {
+	private function store( callable $entry ): bool {
 		try {
-			return true === $this->logger->log( $entry );
+			return true === $this->logger->log( $entry() );
 		} catch ( \Throwable ) {
 			return false;
 		}
@@ -923,7 +937,7 @@ final class Pipeline {
 	 *
 	 * @return \WP_Error
 	 */
-	private function write_error(): \WP_Error {
+	public static function write_error(): \WP_Error {
 		return new \WP_Error(
 			'steadhand_error',
 			__( 'The change could not be completed and may have been partly applied. Check the result before you continue.', 'steadhand' ),
@@ -948,7 +962,16 @@ final class Pipeline {
 	 * @return \WP_Error
 	 */
 	private function check_failed(): \WP_Error {
-		return new \WP_Error( 'steadhand_error', __( 'The permission check could not be completed, so the call was refused. Try again, or check the site error log.', 'steadhand' ), array( 'status' => 500 ) );
+		return new \WP_Error( 'steadhand_error', __( 'The permission check could not be completed, so the call was refused. Another plugin or the site raised an error during the check. Ask the site administrator.', 'steadhand' ), array( 'status' => 500 ) );
+	}
+
+	/**
+	 * The refusal for an ability's input rule that returned something other than true or a WP_Error, such as false.
+	 *
+	 * @return \WP_Error
+	 */
+	private function input_refused(): \WP_Error {
+		return new \WP_Error( 'steadhand_invalid_input', __( 'The input was refused.', 'steadhand' ), array( 'status' => 400 ) );
 	}
 
 	/**
