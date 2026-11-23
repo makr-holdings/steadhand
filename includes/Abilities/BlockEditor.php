@@ -260,20 +260,45 @@ final class BlockEditor {
 	}
 
 	/**
-	 * Applies the operations to the stored content and returns the new content. Every path refers to the content as stored
-	 * before the call, so the order of the operations does not change the result.
-	 *
-	 * Each operation is resolved against the scanned tree and checked against its name. Everything outside the spans the
-	 * operations replace or remove stays byte for byte. Inserted markup, and appended markup, get one "\n\n" between them and
-	 * an adjacent piece of content only when neither side of that boundary is whitespace and at least one side is the
-	 * inserted markup. Two inserted pieces that meet get one "\n\n" too. Replacement markup never gets a separator.
+	 * Applies the operations to the stored content and returns the result as one string, with the sent bytes as they were
+	 * sent. Nothing that is stored is built this way: storage goes through PostWriter::assemble(), which filters the sent
+	 * bytes. Tests use this to compare spans and splices.
 	 *
 	 * @param string            $content    Stored post content.
 	 * @param array<int, mixed> $operations Operations, as checked by check_operations().
-	 * @return string|\WP_Error The new content, or a refusal: steadhand_refused_unsupported_markup,
-	 *                          steadhand_refused_block_mismatch, or steadhand_invalid_input.
+	 * @return string|\WP_Error The raw result, or a refusal (see segments()).
 	 */
 	public static function apply( string $content, array $operations ): string|\WP_Error {
+		$segments = self::segments( $content, $operations );
+		if ( is_wp_error( $segments ) ) {
+			return $segments;
+		}
+
+		$out = '';
+		foreach ( $segments as $segment ) {
+			$out .= 'kept' === $segment['type'] ? substr( $content, $segment['start'], $segment['length'] ) : $segment['text'];
+		}
+
+		return $out;
+	}
+
+	/**
+	 * Describes the new content as segments, in document order. Every path refers to the content as stored before the call,
+	 * so the order of the operations does not change the result.
+	 *
+	 * Each operation is resolved against the scanned tree and checked against its name. Everything outside the spans the
+	 * operations replace or remove is a kept segment: a byte range of the stored content. Markup the call sends, and the
+	 * "\n\n" separators between it and adjacent content, are sent segments. Inserted markup and appended markup get one "\n\n"
+	 * between them and an adjacent piece only when neither side of that boundary is whitespace and at least one side is the
+	 * inserted markup. Two inserted pieces that meet get one "\n\n" too. Replacement markup never gets a separator. Adjacent
+	 * sent segments are one run: PostWriter filters each run as a whole.
+	 *
+	 * @param string            $content    Stored post content.
+	 * @param array<int, mixed> $operations Operations, as checked by check_operations().
+	 * @return array<int, array{type: string, start?: int, length?: int, text?: string}>|\WP_Error Segments, or a refusal:
+	 *                          steadhand_refused_unsupported_markup, steadhand_refused_block_mismatch, or steadhand_invalid_input.
+	 */
+	public static function segments( string $content, array $operations ): array|\WP_Error {
 		$invalid = self::check_operations( $operations );
 		if ( null !== $invalid ) {
 			return $invalid;
@@ -332,13 +357,11 @@ final class BlockEditor {
 			}
 
 			if ( $edit['start'] > $cursor ) {
-				$pieces[] = array(
-					'text'     => substr( $content, $cursor, $edit['start'] - $cursor ),
-					'inserted' => false,
-				);
+				$pieces[] = self::kept_piece( $content, $cursor, $edit['start'] - $cursor );
 			}
 
 			$pieces[] = array(
+				'kind'     => 'sent',
 				'text'     => $edit['text'],
 				'inserted' => $edit['inserted'],
 			);
@@ -346,24 +369,41 @@ final class BlockEditor {
 		}
 
 		if ( $cursor < strlen( $content ) ) {
-			$pieces[] = array(
-				'text'     => substr( $content, $cursor ),
-				'inserted' => false,
-			);
+			$pieces[] = self::kept_piece( $content, $cursor, strlen( $content ) - $cursor );
 		}
 
 		return self::join( $pieces );
 	}
 
 	/**
-	 * Joins the pieces of the new content, adding the separator where an inserted piece meets content that is not whitespace.
+	 * A piece of stored content that is kept.
 	 *
-	 * @param array<int, array{text: string, inserted: bool}> $pieces Pieces in output order.
-	 * @return string
+	 * @param string $content Stored content.
+	 * @param int    $start   Start offset.
+	 * @param int    $length  Length in bytes.
+	 * @return array{kind: string, start: int, length: int, text: string, inserted: bool}
 	 */
-	private static function join( array $pieces ): string {
-		$out  = '';
-		$prev = null;
+	private static function kept_piece( string $content, int $start, int $length ): array {
+		return array(
+			'kind'     => 'kept',
+			'start'    => $start,
+			'length'   => $length,
+			'text'     => substr( $content, $start, $length ),
+			'inserted' => false,
+		);
+	}
+
+	/**
+	 * Joins the pieces into segments, adding the separator where an inserted piece meets content that is not whitespace. A
+	 * separator is a sent segment. Adjacent kept ranges that are contiguous are merged. Adjacent sent text is merged, so a
+	 * run of sent text is one segment.
+	 *
+	 * @param array<int, array{kind: string, text: string, inserted: bool, start?: int, length?: int}> $pieces Pieces in output order.
+	 * @return array<int, array{type: string, start?: int, length?: int, text?: string}>
+	 */
+	private static function join( array $pieces ): array {
+		$segments = array();
+		$prev     = null;
 
 		foreach ( $pieces as $piece ) {
 			if ( '' === $piece['text'] ) {
@@ -371,14 +411,48 @@ final class BlockEditor {
 			}
 
 			if ( null !== $prev && ( $prev['inserted'] || $piece['inserted'] ) && ! self::is_space( substr( $prev['text'], -1 ) ) && ! self::is_space( $piece['text'][0] ) ) {
-				$out .= self::SEPARATOR;
+				self::add_sent( $segments, self::SEPARATOR );
 			}
 
-			$out .= $piece['text'];
+			if ( 'kept' === $piece['kind'] ) {
+				$last = count( $segments ) > 0 ? $segments[ count( $segments ) - 1 ] : null;
+				if ( null !== $last && 'kept' === $last['type'] && $last['start'] + $last['length'] === $piece['start'] ) {
+					$segments[ count( $segments ) - 1 ]['length'] += $piece['length'];
+				} else {
+					$segments[] = array(
+						'type'   => 'kept',
+						'start'  => $piece['start'],
+						'length' => $piece['length'],
+					);
+				}
+			} else {
+				self::add_sent( $segments, $piece['text'] );
+			}
+
 			$prev = $piece;
 		}
 
-		return $out;
+		return $segments;
+	}
+
+	/**
+	 * Adds sent text to the segment list, extending the last segment when that is sent text too.
+	 *
+	 * @param array<int, array<string, mixed>> $segments Segments, by reference.
+	 * @param string                           $text     Sent text.
+	 */
+	private static function add_sent( array &$segments, string $text ): void {
+		$last = count( $segments ) > 0 ? $segments[ count( $segments ) - 1 ] : null;
+		if ( null !== $last && 'sent' === $last['type'] ) {
+			$segments[ count( $segments ) - 1 ]['text'] .= $text;
+
+			return;
+		}
+
+		$segments[] = array(
+			'type' => 'sent',
+			'text' => $text,
+		);
 	}
 
 	/**

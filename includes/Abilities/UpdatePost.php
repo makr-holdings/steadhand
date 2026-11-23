@@ -54,6 +54,23 @@ final class UpdatePost extends Ability {
 	private array $state = array();
 
 	/**
+	 * The write this ability performs in place of PostWriter::update(), or null for the ability's own behaviour. steadhand/edit-blocks
+	 * passes one that writes the segments of its own call (see PostWriter::splice()).
+	 *
+	 * @var \Closure|null
+	 */
+	private ?\Closure $writer;
+
+	/**
+	 * Constructor.
+	 *
+	 * @param \Closure|null $writer Optional write: fn( int $post_id, array $changes ): int|\WP_Error. Null keeps the ability's own write.
+	 */
+	public function __construct( ?\Closure $writer = null ) {
+		$this->writer = $writer;
+	}
+
+	/**
 	 * Returns the ability name.
 	 *
 	 * @return string
@@ -339,7 +356,7 @@ final class UpdatePost extends Ability {
 
 		if ( $changed ) {
 			try {
-				$updated = PostWriter::update( $post_id, $changes );
+				$updated = $this->write( $post_id, $changes );
 			} catch ( \Throwable ) {
 				$updated = new \WP_Error( 'steadhand_update_failed', '' );
 			}
@@ -394,6 +411,21 @@ final class UpdatePost extends Ability {
 		}
 
 		return PostFields::output( $post, $changed, $differs, $warnings );
+	}
+
+	/**
+	 * Performs the write: the writer passed to the constructor, or PostWriter::update() when there is none.
+	 *
+	 * @param int                   $post_id Post ID.
+	 * @param array<string, string> $changes Fields the write sends.
+	 * @return int|\WP_Error
+	 */
+	private function write( int $post_id, array $changes ): int|\WP_Error {
+		if ( null === $this->writer ) {
+			return PostWriter::update( $post_id, $changes );
+		}
+
+		return ( $this->writer )( $post_id, $changes );
 	}
 
 	/**

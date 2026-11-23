@@ -32,6 +32,11 @@ final class EditBlocksTest extends PostWriteTestCase {
 	/**
 	 * Two paragraphs, separated by a blank line. Paths 0 and 1.
 	 */
+	/**
+	 * The first paragraph of CONTENT, with the blank line that follows it.
+	 */
+	private const CONTENT_ONE = "<!-- wp:paragraph -->\n<p>One</p>\n<!-- /wp:paragraph -->";
+
 	private const CONTENT = "<!-- wp:paragraph -->\n<p>One</p>\n<!-- /wp:paragraph -->\n\n<!-- wp:paragraph -->\n<p>Two</p>\n<!-- /wp:paragraph -->";
 
 	/**
@@ -326,24 +331,12 @@ final class EditBlocksTest extends PostWriteTestCase {
 								'op'     => 'insert_after',
 								'path'   => '1',
 								'name'   => 'core/paragraph',
-								'markup' => '<!-- wp:group -->',
+								'markup' => '<!-- /wp:group -->',
 							),
 						),
 					)
 				)
 			)
-		);
-		$this->assertSame( $before, $this->row( $post ) );
-	}
-
-	public function test_a_script_in_the_markup_is_refused_and_the_post_is_byte_identical(): void {
-		$post = $this->fixture();
-		$this->act_as_agent();
-		$before = $this->row( $post );
-
-		$this->assertSame(
-			'steadhand_refused_markup_filtered',
-			$this->refusal_code( $this->execute_ability( self::ABILITY, $this->replace_two( $post, "<!-- wp:paragraph -->\n<p>Hi<script>alert(1)</script></p>\n<!-- /wp:paragraph -->" ) ) )
 		);
 		$this->assertSame( $before, $this->row( $post ) );
 	}
@@ -360,91 +353,323 @@ final class EditBlocksTest extends PostWriteTestCase {
 	}
 
 	/**
-	 * Asserts that a call is refused with the code and that the post row is unchanged.
+	 * Stores $admin as the first block of the post, and a paragraph the agent will edit after it. Checks that an edit to the
+	 * other block leaves every byte of $admin as it is, with no flag, and that the stored row is what was spliced.
 	 *
-	 * @param int                   $post   Post ID.
-	 * @param mixed                 $result Result of the call.
-	 * @param string                $code   Expected refusal code.
-	 * @param array<string, string> $before The row before the call.
+	 * @param string $admin  Bytes an administrator stored, not sent by the agent.
+	 * @param string $label  Label for failures.
+	 * @param bool   $tags   Whether tag balancing is on for the save.
 	 */
-	private function assert_refused_and_unchanged( int $post, mixed $result, string $code, array $before ): void {
-		$this->assertSame( $code, $this->refusal_code( $result ) );
-		$this->assertSame( $before, $this->row( $post ), 'The stored row must be byte-identical after a refusal.' );
-	}
+	private function assert_edit_of_another_block_keeps_the_bytes( string $admin, string $label, bool $tags = false ): void {
+		if ( $tags ) {
+			update_option( 'use_balanceTags', 1 );
+		}
 
-	public function test_an_untouched_block_with_custom_css_attributes_is_refused_and_the_row_is_unchanged(): void {
-		$post = $this->fixture();
-		$this->store_content_behind_steadhand( $post, '<!-- wp:paragraph {"style":{"css":"color:red"}} -->' . "\n<p>Kept</p>\n<!-- /wp:paragraph -->\n\n" . self::paragraph( 'Two' ) );
-		$this->act_as_agent();
-		$before = $this->row( $post );
-
-		$this->assert_refused_and_unchanged( $post, $this->execute_ability( self::ABILITY, $this->replace_two( $post ) ), 'steadhand_refused_filtered_content', $before );
-	}
-
-	public function test_an_untouched_invalid_entity_is_refused_and_the_row_is_unchanged(): void {
-		$post = $this->fixture();
-		$this->store_content_behind_steadhand( $post, "<!-- wp:paragraph -->\n<p>Euro &#128;</p>\n<!-- /wp:paragraph -->\n\n" . self::paragraph( 'Two' ) );
-		$this->act_as_agent();
-		$before = $this->row( $post );
-
-		$this->assert_refused_and_unchanged( $post, $this->execute_ability( self::ABILITY, $this->replace_two( $post ) ), 'steadhand_refused_filtered_content', $before );
-	}
-
-	public function test_unclosed_classic_html_at_the_root_is_refused_with_tag_balancing_on_and_the_row_is_unchanged(): void {
-		update_option( 'use_balanceTags', 1 );
 		try {
 			$post = $this->fixture();
-			$this->store_content_behind_steadhand( $post, "<div><p>Classic\n\n" . self::paragraph( 'Two' ) );
+			$this->store_content_behind_steadhand( $post, $admin . "\n\n" . self::paragraph( 'Two' ) );
 			$this->act_as_agent();
 			$before = $this->row( $post );
 
-			$this->assert_refused_and_unchanged( $post, $this->execute_ability( self::ABILITY, $this->replace_two( $post ) ), 'steadhand_refused_filtered_content', $before );
+			$out = $this->output_of( self::TOOL_NAME, $this->replace_two( $post ) );
+
+			$this->assertFalse( $out['content_modified_on_save'], $label );
+			$this->assertSame( $admin . "\n\n" . self::paragraph( 'Changed' ), get_post( $post )->post_content, "$label: the stored bytes of the untouched block must survive." );
+			$after = $this->row( $post );
+			foreach ( array( 'post_title', 'post_excerpt', 'post_status', 'post_author', 'post_name' ) as $field ) {
+				$this->assertSame( $before[ $field ], $after[ $field ], "$label: $field must not change." );
+			}
+		} finally {
+			if ( $tags ) {
+				delete_option( 'use_balanceTags' );
+			}
+		}
+	}
+
+	public function test_a_block_edit_keeps_an_image_block_byte_for_byte(): void {
+		$this->assert_edit_of_another_block_keeps_the_bytes(
+			'<!-- wp:image {"id":12,"sizeSlug":"large","linkDestination":"none"} -->' . "\n" . '<figure class="wp-block-image size-large"><img src="https://example.com/a.jpg" alt="Salt & pepper" class="wp-image-12"/></figure>' . "\n" . '<!-- /wp:image -->',
+			'image'
+		);
+	}
+
+	public function test_a_block_edit_keeps_a_gallery_byte_for_byte(): void {
+		$this->assert_edit_of_another_block_keeps_the_bytes(
+			'<!-- wp:gallery {"ids":[1,2],"linkTo":"none"} -->' . "\n" . '<figure class="wp-block-gallery has-nested-images columns-default is-cropped"><!-- wp:image {"id":1,"sizeSlug":"large"} -->' . "\n" . '<figure class="wp-block-image size-large"><img src="https://example.com/1.jpg" alt="" class="wp-image-1"/></figure>' . "\n" . '<!-- /wp:image --></figure>' . "\n" . '<!-- /wp:gallery -->',
+			'gallery'
+		);
+	}
+
+	public function test_a_block_edit_keeps_a_cover_byte_for_byte(): void {
+		$this->assert_edit_of_another_block_keeps_the_bytes(
+			'<!-- wp:cover {"url":"https://example.com/c.jpg","id":3,"dimRatio":50} -->' . "\n" . '<div class="wp-block-cover"><img class="wp-block-cover__image-background wp-image-3" alt="" src="https://example.com/c.jpg" data-object-fit="cover"/><div class="wp-block-cover__inner-container"><!-- wp:paragraph -->' . "\n" . '<p>Hi</p>' . "\n" . '<!-- /wp:paragraph --></div></div>' . "\n" . '<!-- /wp:cover -->',
+			'cover'
+		);
+	}
+
+	public function test_a_block_edit_keeps_a_separator_byte_for_byte(): void {
+		$this->assert_edit_of_another_block_keeps_the_bytes(
+			'<!-- wp:separator -->' . "\n" . '<hr class="wp-block-separator has-alpha-channel-opacity"/>' . "\n" . '<!-- /wp:separator -->',
+			'separator'
+		);
+	}
+
+	public function test_a_block_edit_keeps_an_embed_with_an_ampersand_in_its_url_byte_for_byte(): void {
+		$this->assert_edit_of_another_block_keeps_the_bytes(
+			'<!-- wp:embed {"url":"https://www.youtube.com/watch?v=abc&t=10","type":"video","providerNameSlug":"youtube"} -->' . "\n" . '<figure class="wp-block-embed is-type-video is-provider-youtube"><div class="wp-block-embed__wrapper">' . "\n" . 'https://www.youtube.com/watch?v=abc&t=10' . "\n" . '</div></figure>' . "\n" . '<!-- /wp:embed -->',
+			'embed'
+		);
+	}
+
+	public function test_a_block_edit_keeps_an_ampersand_in_block_metadata_byte_for_byte(): void {
+		$this->assert_edit_of_another_block_keeps_the_bytes(
+			'<!-- wp:group {"metadata":{"name":"Hero & intro"}} -->' . "\n" . '<div class="wp-block-group"><!-- wp:paragraph -->' . "\n" . '<p>Hi</p>' . "\n" . '<!-- /wp:paragraph --></div>' . "\n" . '<!-- /wp:group -->',
+			'metadata'
+		);
+	}
+
+	public function test_a_block_edit_keeps_a_mark_with_a_style_byte_for_byte(): void {
+		$this->assert_edit_of_another_block_keeps_the_bytes(
+			'<!-- wp:paragraph -->' . "\n" . '<p><mark style="background-color:rgba(0, 0, 0, 0)" class="has-inline-color">Marked</mark></p>' . "\n" . '<!-- /wp:paragraph -->',
+			'mark'
+		);
+	}
+
+	public function test_a_block_edit_keeps_an_image_with_srcset_and_sizes_byte_for_byte(): void {
+		$this->assert_edit_of_another_block_keeps_the_bytes(
+			'<!-- wp:image -->' . "\n" . '<figure class="wp-block-image"><img src="https://example.com/a.jpg" srcset="https://example.com/a-300.jpg 300w, https://example.com/a-600.jpg 600w" sizes="(max-width: 600px) 100vw, 600px" alt=""/></figure>' . "\n" . '<!-- /wp:image -->',
+			'srcset'
+		);
+	}
+
+	public function test_a_block_edit_keeps_an_administrator_script_in_a_custom_html_block_byte_for_byte(): void {
+		$this->assert_edit_of_another_block_keeps_the_bytes( '<!-- wp:html -->' . "\n" . '<script>var x = 1 < 2;</script>' . "\n" . '<!-- /wp:html -->', 'script' );
+	}
+
+	public function test_a_block_edit_keeps_an_administrator_iframe_in_a_custom_html_block_byte_for_byte(): void {
+		$this->assert_edit_of_another_block_keeps_the_bytes( '<!-- wp:html -->' . "\n" . '<iframe src="https://example.com/frame"></iframe>' . "\n" . '<!-- /wp:html -->', 'iframe' );
+	}
+
+	public function test_a_block_edit_keeps_custom_css_on_a_block_byte_for_byte(): void {
+		$this->assert_edit_of_another_block_keeps_the_bytes( '<!-- wp:paragraph {"style":{"css":"color:red"}} -->' . "\n<p>Kept</p>\n" . '<!-- /wp:paragraph -->', 'custom css' );
+	}
+
+	public function test_a_block_edit_keeps_an_invalid_entity_byte_for_byte(): void {
+		$this->assert_edit_of_another_block_keeps_the_bytes( '<!-- wp:paragraph -->' . "\n<p>Euro &#128;</p>\n" . '<!-- /wp:paragraph -->', 'entity' );
+	}
+
+	public function test_a_block_edit_keeps_a_bare_ampersand_in_text_byte_for_byte(): void {
+		$this->assert_edit_of_another_block_keeps_the_bytes( '<!-- wp:paragraph -->' . "\n<p>Tom & Jerry</p>\n" . '<!-- /wp:paragraph -->', 'bare ampersand' );
+	}
+
+	public function test_a_block_edit_keeps_unclosed_classic_html_at_the_root_byte_for_byte_with_tag_balancing_on(): void {
+		$this->assert_edit_of_another_block_keeps_the_bytes( '<div><p>Classic', 'unclosed root', true );
+	}
+
+	public function test_removing_the_block_that_holds_an_administrator_script_works_and_leaves_the_rest(): void {
+		$post = $this->fixture();
+		$this->store_content_behind_steadhand( $post, '<!-- wp:html -->' . "\n" . '<script>var x = 1;</script>' . "\n" . '<!-- /wp:html -->' . "\n\n" . self::paragraph( 'Two' ) );
+		$this->act_as_agent();
+
+		$this->output_of(
+			self::TOOL_NAME,
+			array(
+				'id'         => $post,
+				'operations' => array(
+					array(
+						'op'   => 'remove',
+						'path' => '0',
+						'name' => 'core/html',
+					),
+				),
+			)
+		);
+
+		$this->assertSame( "\n\n" . self::paragraph( 'Two' ), get_post( $post )->post_content );
+	}
+
+	public function test_replacing_the_block_that_holds_an_administrator_script_works(): void {
+		$post = $this->fixture();
+		$this->store_content_behind_steadhand( $post, '<!-- wp:html -->' . "\n" . '<script>var x = 1;</script>' . "\n" . '<!-- /wp:html -->' . "\n\n" . self::paragraph( 'Two' ) );
+		$this->act_as_agent();
+
+		$out = $this->output_of(
+			self::TOOL_NAME,
+			array(
+				'id'         => $post,
+				'operations' => array(
+					array(
+						'op'     => 'replace',
+						'path'   => '0',
+						'name'   => 'core/html',
+						'markup' => self::paragraph( 'Replaced' ),
+					),
+				),
+			)
+		);
+
+		$this->assertFalse( $out['content_modified_on_save'] );
+		$this->assertSame( self::paragraph( 'Replaced' ) . "\n\n" . self::paragraph( 'Two' ), get_post( $post )->post_content );
+	}
+
+	public function test_a_script_sent_is_removed_from_what_is_stored_the_rest_is_kept_and_the_call_is_flagged(): void {
+		$post = $this->fixture();
+		$this->act_as_agent();
+		$before = $this->row( $post );
+
+		$out = $this->output_of( self::TOOL_NAME, $this->replace_two( $post, "<!-- wp:paragraph -->\n<p>Hi<script>alert(1)</script></p>\n<!-- /wp:paragraph -->" ) );
+
+		$this->assertTrue( $out['content_modified_on_save'] );
+		$this->assertStringContainsString( 'WordPress changed part of the markup you sent', $out['warnings'][0] );
+		$this->assertSame( self::CONTENT_ONE . "\n\n<!-- wp:paragraph -->\n<p>Hialert(1)</p>\n<!-- /wp:paragraph -->", get_post( $post )->post_content );
+		$this->assertStringNotContainsString( '<script', get_post( $post )->post_content );
+		$this->assertSame( $before['post_title'], $this->row( $post )['post_title'] );
+	}
+
+	public function test_a_sent_image_is_stored_in_the_filtered_form_and_the_call_is_flagged(): void {
+		$post = $this->fixture();
+		$this->act_as_agent();
+		$image = '<!-- wp:image -->' . "\n" . '<figure class="wp-block-image"><img src="https://example.com/a.jpg" alt=""/></figure>' . "\n" . '<!-- /wp:image -->';
+
+		$out = $this->output_of( self::TOOL_NAME, $this->replace_two( $post, $image ) );
+
+		$this->assertTrue( $out['content_modified_on_save'] );
+		$this->assertSame( self::CONTENT_ONE . "\n\n" . str_replace( 'alt=""/>', 'alt="" />', $image ), get_post( $post )->post_content );
+	}
+
+	public function test_clean_sent_markup_is_not_flagged_and_is_stored_exactly_as_spliced(): void {
+		$post = $this->fixture();
+		$this->act_as_agent();
+		$markup = '<!-- wp:paragraph -->' . "\n" . '<p>Plain <strong>text</strong> &amp; more</p>' . "\n" . '<!-- /wp:paragraph -->';
+
+		$out = $this->output_of( self::TOOL_NAME, $this->replace_two( $post, $markup ) );
+
+		$this->assertFalse( $out['content_modified_on_save'] );
+		$this->assertSame( array(), $out['warnings'] );
+		$this->assertSame( self::CONTENT_ONE . "\n\n" . $markup, get_post( $post )->post_content );
+	}
+
+	public function test_an_unclosed_div_sent_with_tag_balancing_on_is_stored_balanced_and_flagged(): void {
+		update_option( 'use_balanceTags', 1 );
+		try {
+			$post = $this->fixture();
+			$this->act_as_agent();
+
+			$out = $this->output_of(
+				self::TOOL_NAME,
+				array(
+					'id'         => $post,
+					'operations' => array(
+						array(
+							'op'     => 'insert_after',
+							'path'   => '1',
+							'name'   => 'core/paragraph',
+							'markup' => "<div>\n<p>Open",
+						),
+					),
+				)
+			);
+
+			$this->assertTrue( $out['content_modified_on_save'] );
+			$this->assertStringContainsString( '</p></div>', get_post( $post )->post_content );
 		} finally {
 			delete_option( 'use_balanceTags' );
 		}
 	}
 
-	public function test_a_plugin_filter_on_the_save_that_alters_untouched_text_is_refused_and_the_row_is_unchanged(): void {
-		$post = $this->fixture();
-		$this->store_content_behind_steadhand( $post, "<!-- wp:paragraph -->\n<p>Keep me</p>\n<!-- /wp:paragraph -->\n\n" . self::paragraph( 'Two' ) );
+	public function test_two_sent_pieces_that_end_up_next_to_each_other_are_filtered_as_one_run(): void {
+		$one  = self::paragraph( 'One' );
+		$two  = self::paragraph( 'Two' );
+		$post = $this->fixture( 'draft', array( 'post_content' => $one . $two ) );
 		$this->act_as_agent();
-		$before = $this->row( $post );
-		$plugin = static fn( string $content ): string => str_replace( 'Keep me', 'Changed', $content );
-		add_filter( 'content_save_pre', $plugin, 20 );
 
-		try {
-			$this->assert_refused_and_unchanged( $post, $this->execute_ability( self::ABILITY, $this->replace_two( $post ) ), 'steadhand_refused_filtered_content', $before );
-		} finally {
-			remove_filter( 'content_save_pre', $plugin, 20 );
-		}
+		$out = $this->output_of(
+			self::TOOL_NAME,
+			array(
+				'id'         => $post,
+				'operations' => array(
+					array(
+						'op'     => 'insert_after',
+						'path'   => '0',
+						'name'   => 'core/paragraph',
+						'markup' => '<scr',
+					),
+					array(
+						'op'     => 'insert_before',
+						'path'   => '1',
+						'name'   => 'core/paragraph',
+						'markup' => 'ipt>alert(1)</script>',
+					),
+				),
+			)
+		);
+
+		$run = $this->in_write( static fn(): string => PostWriter::filtered_content( $post, "\n\n<scr\n\nipt>alert(1)</script>\n\n" ) );
+		$this->assertStringNotContainsString( '<script', get_post( $post )->post_content );
+		$this->assertSame( $one . $run . $two, get_post( $post )->post_content, 'The two pieces are one run, filtered together.' );
+		$this->assertTrue( $out['content_modified_on_save'] );
 	}
 
-	public function test_a_bare_ampersand_in_stored_text_is_refused_as_a_known_limit_and_the_row_is_unchanged(): void {
+	public function test_two_appends_are_filtered_as_one_run_and_no_script_is_stored(): void {
 		$post = $this->fixture();
-		$this->store_content_behind_steadhand( $post, "<!-- wp:paragraph -->\n<p>Tom & Jerry</p>\n<!-- /wp:paragraph -->\n\n" . self::paragraph( 'Two' ) );
+		$this->act_as_agent();
+
+		$this->output_of(
+			self::TOOL_NAME,
+			array(
+				'id'         => $post,
+				'operations' => array(
+					array(
+						'op'     => 'append',
+						'markup' => '<scr',
+					),
+					array(
+						'op'     => 'append',
+						'markup' => 'ipt>alert(1)</script>',
+					),
+				),
+			)
+		);
+
+		$stored = get_post( $post )->post_content;
+		$this->assertStringNotContainsString( '<script', $stored );
+		$run = $this->in_write( static fn(): string => PostWriter::filtered_content( $post, "\n\n<scr\n\nipt>alert(1)</script>" ) );
+		$this->assertSame( self::CONTENT . $run, $stored );
+	}
+
+	public function test_an_unterminated_comment_sent_before_a_block_cannot_swallow_that_block(): void {
+		$post = $this->fixture();
+		$this->act_as_agent();
+
+		$this->output_of(
+			self::TOOL_NAME,
+			array(
+				'id'         => $post,
+				'operations' => array(
+					array(
+						'op'     => 'insert_before',
+						'path'   => '1',
+						'name'   => 'core/paragraph',
+						'markup' => '<!--',
+					),
+				),
+			)
+		);
+
+		$stored = get_post( $post )->post_content;
+		$blocks = array_values( array_filter( parse_blocks( $stored ), static fn( array $block ): bool => null !== $block['blockName'] ) );
+		$this->assertSame( 'core/paragraph', $blocks[1]['blockName'] ?? null, 'The block after the piece must still be a block.' );
+		$this->assertStringContainsString( self::paragraph( 'Two' ), $stored, 'The following block keeps its bytes.' );
+	}
+
+	public function test_a_piece_with_an_unbalanced_block_delimiter_is_blocked_by_block_markup(): void {
+		$post = $this->fixture();
 		$this->act_as_agent();
 		$before = $this->row( $post );
 
-		$this->assert_refused_and_unchanged( $post, $this->execute_ability( self::ABILITY, $this->replace_two( $post ) ), 'steadhand_refused_filtered_content', $before );
-	}
-
-	public function test_a_bare_ampersand_in_the_sent_markup_is_refused_and_the_row_is_unchanged(): void {
-		$post = $this->fixture();
-		$this->act_as_agent();
-		$before = $this->row( $post );
-
-		$this->assert_refused_and_unchanged( $post, $this->execute_ability( self::ABILITY, $this->replace_two( $post, self::paragraph( 'Tom & Jerry' ) ) ), 'steadhand_refused_markup_filtered', $before );
-	}
-
-	public function test_an_unclosed_div_inserted_with_tag_balancing_on_is_refused_and_the_row_is_unchanged(): void {
-		update_option( 'use_balanceTags', 1 );
-		try {
-			$post = $this->fixture();
-			$this->act_as_agent();
-			$before = $this->row( $post );
-
-			$this->assert_refused_and_unchanged(
-				$post,
+		$this->assertSame(
+			'steadhand_guardrail_blocked',
+			$this->refusal_code(
 				$this->execute_ability(
 					self::ABILITY,
 					array(
@@ -454,17 +679,76 @@ final class EditBlocksTest extends PostWriteTestCase {
 								'op'     => 'insert_after',
 								'path'   => '1',
 								'name'   => 'core/paragraph',
-								'markup' => "<div>\n<p>Open",
+								'markup' => '<!-- /wp:group -->',
 							),
 						),
 					)
+				)
+			)
+		);
+		$this->assertSame( $before, $this->row( $post ) );
+	}
+
+	public function test_the_guardrails_see_exactly_the_bytes_that_are_stored(): void {
+		$admin = '<!-- wp:html -->' . "\n" . '<script>var x = 1;</script>' . "\n" . '<!-- /wp:html -->';
+		$post  = $this->fixture();
+		$this->store_content_behind_steadhand( $post, $admin . "\n\n" . self::paragraph( 'Two' ) );
+		$this->act_as_agent();
+		$seen = null;
+		$last = new FakeRule(
+			'steadhand/recorder',
+			static function ( Context $context ) use ( &$seen ): Result {
+				$seen = $context->content;
+
+				return Result::allow();
+			}
+		);
+
+		$result = $this->pipeline( array(), array( $last ) )->run(
+			new EditBlocks(),
+			array(
+				'id'         => $post,
+				'operations' => array(
+					array(
+						'op'     => 'insert_after',
+						'path'   => '1',
+						'name'   => 'core/paragraph',
+						'markup' => "<script>alert(1)</script>\n<!-- wp:paragraph -->\n<p>Added</p>\n<!-- /wp:paragraph -->",
+					),
 				),
-				'steadhand_refused_markup_filtered',
-				$before
-			);
+			)
+		);
+
+		$this->assertIsArray( $result );
+		$this->assertSame( array( 'content' => get_post( $post )->post_content ), $seen );
+		$this->assertStringStartsWith( $admin, get_post( $post )->post_content );
+	}
+
+	public function test_a_change_made_to_an_untouched_block_by_another_plugin_during_the_save_is_reported(): void {
+		$post = $this->fixture();
+		$this->store_content_behind_steadhand( $post, "<!-- wp:paragraph -->\n<p>Kept</p>\n<!-- /wp:paragraph -->\n\n" . self::paragraph( 'Two' ) );
+		$this->act_as_agent();
+		$done     = false;
+		$listener = static function ( int $saved ) use ( $post, &$done ): void {
+			if ( $saved !== $post || $done ) {
+				return;
+			}
+			$done = true;
+			global $wpdb;
+			$wpdb->update( $wpdb->posts, array( 'post_content' => str_replace( 'Kept', 'Late', (string) get_post( $post )->post_content ) ), array( 'ID' => $post ) ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching -- A late change made by another process during the save.
+			clean_post_cache( $post );
+		};
+		add_action( 'save_post', $listener );
+
+		try {
+			$out = $this->output_of( self::TOOL_NAME, $this->replace_two( $post ) );
 		} finally {
-			delete_option( 'use_balanceTags' );
+			remove_action( 'save_post', $listener );
 		}
+
+		$this->assertTrue( $done );
+		$this->assertTrue( $out['content_modified_on_save'] );
+		$this->assertStringContainsString( '<p>Late</p>', get_post( $post )->post_content );
 	}
 
 	public function test_the_helper_that_checks_the_save_refuses_to_run_outside_a_write(): void {
@@ -637,25 +921,6 @@ final class EditBlocksTest extends PostWriteTestCase {
 		$this->assertSame( 'steadhand_refused_content_changed', $this->refusal_code( $result ) );
 		$this->assertSame( $changed, get_post( $post )->post_content );
 		$this->assertSame( $revs, $this->revision_ids( $post ), 'A refused call takes no revision.' );
-	}
-
-	public function test_a_post_whose_stored_html_the_save_would_strip_is_refused_and_not_changed(): void {
-		// The administrator may store a script. The agent's saves would remove it, so the post is refused.
-		wp_set_current_user( $this->admin_id() );
-		$post = $this->fixture(
-			'draft',
-			array(
-				'post_content' => "<!-- wp:html -->\n<script>var x = 1;</script>\n<!-- /wp:html -->\n\n" . self::paragraph( 'Two' ),
-			)
-		);
-		$this->assertStringContainsString( '<script>', get_post( $post )->post_content, 'The fixture must store the script.' );
-
-		$agent  = $this->act_as_agent();
-		$before = $this->row( $post );
-
-		$this->assertSame( 'steadhand_refused_filtered_content', $this->refusal_code( $this->execute_ability( self::ABILITY, $this->replace_two( $post ) ) ) );
-		$this->assertSame( $before, $this->row( $post ), 'The stored content must be byte-identical afterwards.' );
-		$this->assertSame( 'error', $this->latest_row( $agent )['result'], 'A refusal at the write is logged as an error.' );
 	}
 
 	public function test_a_post_changed_after_the_guardrails_read_it_is_refused_and_nothing_is_written(): void {
@@ -1019,7 +1284,7 @@ final class EditBlocksTest extends PostWriteTestCase {
 			'steadhand/rewrite',
 			static function ( Context $context ): Result {
 				$input                            = $context->input;
-				$input['operations'][0]['markup'] = '<!-- wp:group -->';
+				$input['operations'][0]['markup'] = '<!-- /wp:group -->';
 
 				return Result::fix( $input, 'Rewrote the markup.' );
 			}

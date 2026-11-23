@@ -107,21 +107,9 @@ final class PostWriter {
 		self::assert_writing();
 		self::assert_fields( $fields, self::UPDATE_FIELDS );
 
-		// Read again, uncached: the post may have been trashed or changed since the caller looked at it, and the values read
-		// here are the ones put back below.
-		clean_post_cache( $post_id );
-		$post = get_post( $post_id );
-		if ( ! $post instanceof \WP_Post || 'trash' === $post->post_status || ! PostTypes::is_allowed( $post->post_type ) ) {
-			return new \WP_Error( 'steadhand_forbidden', __( 'Not found, or this agent may not access it.', 'steadhand' ), array( 'status' => 403 ) );
-		}
-
-		$data       = self::dated( $fields );
-		$data['ID'] = $post->ID;
-
-		// Core gives a draft that has no date the time it is published. edit_date makes core use the date it is given, so it
-		// is set only when the caller sends one. Otherwise a draft published later keeps no old date.
-		if ( array_key_exists( 'post_date_gmt', $fields ) ) {
-			$data['edit_date'] = true;
+		$post = self::fresh_post( $post_id );
+		if ( $post instanceof \WP_Error ) {
+			return $post;
 		}
 
 		// The stored value of each field the call does not send, as the raw row holds it.
@@ -130,6 +118,103 @@ final class PostWriter {
 			if ( ! array_key_exists( $field, $fields ) ) {
 				$keep[ $field ] = (string) $post->$field;
 			}
+		}
+
+		return self::save( $post, $fields, $keep );
+	}
+
+	/**
+	 * Writes the post content made of kept bytes of the stored content and sent markup, filtered run by run (see assemble()).
+	 *
+	 * The stored content must still be the content the segments were computed from, or nothing is written and the refusal is
+	 * steadhand_refused_content_changed. The title, excerpt and filtered content are put back as they are stored, and the
+	 * content is put back as assembled, after the save filters have run. So the save filters never reach the kept bytes, and
+	 * only the sent runs are filtered.
+	 *
+	 * @param int                                                                       $post_id     Post ID.
+	 * @param string                                                                    $stored_sha256 SHA-256 of the stored content the segments were computed from.
+	 * @param array<int, array{type: string, start?: int, length?: int, text?: string}> $segments  Segments, as BlockEditor::segments() gives them.
+	 * @return int|\WP_Error The post ID, or the refusal: steadhand_forbidden, steadhand_refused_content_changed, or the error WordPress reported.
+	 * @throws \LogicException            When called outside a write.
+	 * @throws \InvalidArgumentException  When a segment is not well formed.
+	 */
+	public static function splice( int $post_id, string $stored_sha256, array $segments ): int|\WP_Error {
+		self::assert_writing();
+
+		$post = self::fresh_post( $post_id );
+		if ( $post instanceof \WP_Error ) {
+			return $post;
+		}
+
+		if ( ! hash_equals( $stored_sha256, hash( 'sha256', (string) $post->post_content ) ) ) {
+			return self::content_changed();
+		}
+
+		$content = self::assemble( $post_id, (string) $post->post_content, $segments );
+
+		return self::save(
+			$post,
+			array( 'post_content' => $content ),
+			array(
+				'post_title'            => (string) $post->post_title,
+				'post_excerpt'          => (string) $post->post_excerpt,
+				'post_content_filtered' => (string) $post->post_content_filtered,
+				'post_content'          => $content,
+			)
+		);
+	}
+
+	/**
+	 * The refusal for a post whose content changed after it was read for a write. The one text for it.
+	 *
+	 * @return \WP_Error
+	 */
+	public static function content_changed(): \WP_Error {
+		return new \WP_Error(
+			'steadhand_refused_content_changed',
+			__( 'The post changed while this call was running, so nothing was changed. Call steadhand/get-blocks again, then send the operations again.', 'steadhand' ),
+			array( 'status' => 409 )
+		);
+	}
+
+	/**
+	 * Reads the post uncached, with the refusals every write makes: missing, trashed or of a type that is not allowed.
+	 *
+	 * @param int $post_id Post ID.
+	 * @return \WP_Post|\WP_Error
+	 */
+	private static function fresh_post( int $post_id ): \WP_Post|\WP_Error {
+		// Read again, uncached: the post may have been trashed or changed since the caller looked at it, and the values read
+		// here are the ones put back by save().
+		clean_post_cache( $post_id );
+		$post = get_post( $post_id );
+		if ( ! $post instanceof \WP_Post || 'trash' === $post->post_status || ! PostTypes::is_allowed( $post->post_type ) ) {
+			return new \WP_Error( 'steadhand_forbidden', __( 'Not found, or this agent may not access it.', 'steadhand' ), array( 'status' => 403 ) );
+		}
+
+		return $post;
+	}
+
+	/**
+	 * Saves the fields with the four KSES filters in place for the whole save, and puts back the values in $keep after the save
+	 * filters have run. Shared by update() and splice().
+	 *
+	 * A value in $keep is put back only in its field of the save's data, and only once: a nested update of this post, from a
+	 * save_post listener, is filtered as usual and does not get the values again. The filter is removed in finally.
+	 *
+	 * @param \WP_Post              $post   The post as read for this write.
+	 * @param array<string, string> $fields Fields to set.
+	 * @param array<string, string> $keep   Values to put back, by field.
+	 * @return int|\WP_Error
+	 */
+	private static function save( \WP_Post $post, array $fields, array $keep ): int|\WP_Error {
+		$data       = self::dated( $fields );
+		$data['ID'] = $post->ID;
+
+		// Core gives a draft that has no date the time it is published. edit_date makes core use the date it is given, so it
+		// is set only when the caller sends one. Otherwise a draft published later keeps no old date.
+		if ( array_key_exists( 'post_date_gmt', $fields ) ) {
+			$data['edit_date'] = true;
 		}
 
 		$target_id = (int) $post->ID;
@@ -175,7 +260,7 @@ final class PostWriter {
 	 * runs after sanitize_post() when the content column is utf8 or utf8mb3. The result is unslashed, as wp_insert_post() unslashes
 	 * before the row is written.
 	 *
-	 * Must be called inside a write, because the filters it runs are the ones a write runs.
+	 * Must be called during a write call (Pipeline::is_write_call()), because the filters it runs are the ones a write runs.
 	 *
 	 * @param int    $post_id Post ID. Passed to the filters, as the save passes it.
 	 * @param string $content Content, unslashed.
@@ -183,7 +268,7 @@ final class PostWriter {
 	 * @throws \LogicException When called outside a write.
 	 */
 	public static function filtered_content( int $post_id, string $content ): string {
-		self::assert_writing();
+		self::assert_write_call();
 
 		return (string) self::with_filters_added(
 			array_values( self::KSES_FILTERS ),
@@ -201,6 +286,158 @@ final class PostWriter {
 				return wp_unslash( $value );
 			}
 		);
+	}
+
+	/**
+	 * The post content the segments describe, with the sent runs filtered. See assemble_report().
+	 *
+	 * @param int                                                                       $post_id  Post ID.
+	 * @param string                                                                    $stored   The stored content the segments refer to.
+	 * @param array<int, array{type: string, start?: int, length?: int, text?: string}> $segments Segments, in document order.
+	 * @return string
+	 * @throws \LogicException           When called outside a write call.
+	 * @throws \InvalidArgumentException When a segment is not well formed, or does not fit the stored content.
+	 */
+	public static function assemble( int $post_id, string $stored, array $segments ): string {
+		return self::assemble_report( $post_id, $stored, $segments )['content'];
+	}
+
+	/**
+	 * Builds the content the segments describe, and whether the save filters changed any sent run.
+	 *
+	 * A kept segment is the bytes of $stored in its range, verbatim: it is never filtered. Adjacent sent segments are one run,
+	 * and each run is filtered once as a whole (filtered_content()). So no sent piece is filtered apart from the piece next to it,
+	 * and no caller can make this emit bytes that are neither kept from $stored nor sent. Nothing is written.
+	 *
+	 * The segments are checked strictly first: each is a kept segment (type, start, length, all integers, start and length not
+	 * negative, inside $stored, ascending and not overlapping) or a sent segment (type and text, text a string). Any other shape
+	 * throws, before anything is filtered.
+	 *
+	 * Callers are write calls, and it is called while the guardrails preview a write as well as while it is written, so it is
+	 * guarded by Pipeline::is_write_call(), not is_writing().
+	 *
+	 * @param int                                                                       $post_id  Post ID. Passed to the filters.
+	 * @param string                                                                    $stored   The stored content the segments refer to.
+	 * @param array<int, array{type: string, start?: int, length?: int, text?: string}> $segments Segments, in document order.
+	 * @return array{content: string, altered: bool} The content, and whether a filter changed any sent run.
+	 * @throws \LogicException           When called outside a write call.
+	 * @throws \InvalidArgumentException When a segment is not well formed, or does not fit the stored content.
+	 */
+	public static function assemble_report( int $post_id, string $stored, array $segments ): array {
+		self::assert_write_call();
+
+		$content = '';
+		$altered = false;
+		foreach ( self::runs( $stored, $segments ) as $run ) {
+			if ( 'kept' === $run['type'] ) {
+				$content .= substr( $stored, $run['start'], $run['length'] );
+				continue;
+			}
+
+			if ( '' === $run['text'] ) {
+				continue;
+			}
+
+			$filtered = self::filtered_content( $post_id, $run['text'] );
+			if ( $filtered !== $run['text'] ) {
+				$altered = true;
+			}
+			$content .= $filtered;
+		}
+
+		return array(
+			'content' => $content,
+			'altered' => $altered,
+		);
+	}
+
+	/**
+	 * Checks the segments and merges adjacent sent segments into runs.
+	 *
+	 * @param string                                                                    $stored   Stored content.
+	 * @param array<int, array{type: string, start?: int, length?: int, text?: string}> $segments Segments.
+	 * @return array<int, array{type: string, start?: int, length?: int, text?: string}>
+	 * @throws \InvalidArgumentException When a segment is not well formed, or does not fit the stored content.
+	 */
+	private static function runs( string $stored, array $segments ): array {
+		$runs   = array();
+		$cursor = 0;
+
+		foreach ( $segments as $segment ) {
+			if ( ! is_array( $segment ) ) {
+				throw new \InvalidArgumentException( 'Every segment must be an array.' );
+			}
+
+			if ( 'kept' === ( $segment['type'] ?? null ) ) {
+				self::assert_keys( $segment, array( 'type', 'start', 'length' ) );
+				$start  = $segment['start'];
+				$length = $segment['length'];
+				if ( ! is_int( $start ) || ! is_int( $length ) || $start < 0 || $length < 0 ) {
+					throw new \InvalidArgumentException( 'A kept segment needs a start and a length that are integers, not negative.' );
+				}
+				if ( $start < $cursor || $start + $length > strlen( $stored ) ) {
+					throw new \InvalidArgumentException( 'Kept segments must be ascending, must not overlap, and must lie inside the stored content.' );
+				}
+
+				$cursor = $start + $length;
+				$runs[] = array(
+					'type'   => 'kept',
+					'start'  => $start,
+					'length' => $length,
+				);
+				continue;
+			}
+
+			if ( 'sent' === ( $segment['type'] ?? null ) ) {
+				self::assert_keys( $segment, array( 'type', 'text' ) );
+				if ( ! is_string( $segment['text'] ) ) {
+					throw new \InvalidArgumentException( 'A sent segment needs text that is a string.' );
+				}
+
+				$last = count( $runs ) > 0 ? $runs[ count( $runs ) - 1 ] : null;
+				if ( null !== $last && 'sent' === $last['type'] ) {
+					$runs[ count( $runs ) - 1 ]['text'] .= $segment['text'];
+				} else {
+					$runs[] = array(
+						'type' => 'sent',
+						'text' => $segment['text'],
+					);
+				}
+				continue;
+			}
+
+			throw new \InvalidArgumentException( 'A segment must be of type kept or sent.' );
+		}
+
+		return $runs;
+	}
+
+	/**
+	 * Refuses a segment with a key it should not have, or without one it needs.
+	 *
+	 * @param array<string, mixed> $segment Segment.
+	 * @param string[]             $keys    The keys it must have, and no others.
+	 * @throws \InvalidArgumentException When the keys differ.
+	 */
+	private static function assert_keys( array $segment, array $keys ): void {
+		$have = array_keys( $segment );
+		sort( $have );
+		sort( $keys );
+		if ( $have !== $keys ) {
+			throw new \InvalidArgumentException( 'A segment has keys other than the ones its type takes.' );
+		}
+	}
+
+	/**
+	 * Refuses a call made outside a write call. Unlike assert_writing(), this is true while the guardrails run, which is when
+	 * the content is previewed.
+	 *
+	 * @throws \LogicException When Pipeline::is_write_call() is false.
+	 */
+	private static function assert_write_call(): void {
+		if ( ! Pipeline::is_write_call() ) {
+			throw new \LogicException( 'This helper may only be called during a write call.' );
+		}
 	}
 
 	/**
