@@ -258,7 +258,7 @@ final class BlockEditor {
 			if ( true !== self::has_comment_check( $markup ) ) {
 				return self::invalid(
 					/* translators: %d: the number of the operation, counting from 1. */
-					sprintf( __( 'The markup of operation %d contains an HTML comment that is not a block comment. Send complete blocks only.', 'steadhand' ), $where )
+					sprintf( __( 'The markup of operation %d contains an HTML comment that is not a block comment. Send complete blocks only; use the core/more or core/nextpage block for a break.', 'steadhand' ), $where )
 				);
 			}
 		}
@@ -429,28 +429,54 @@ final class BlockEditor {
 	}
 
 	/**
-	 * Whether a text holds an HTML comment that is not a block comment. Every "<!--" must start a block delimiter, or one of the
-	 * comments WordPress reads as a post break or page break ("<!--more-->", "<!--more text-->", "<!--nextpage-->", "<!--noteaser-->"),
-	 * and every "-->" must lie inside one of those. So neither half of a split delimiter can be sent. Null when PCRE fails.
+	 * Whether a text holds an HTML comment that is not a block comment, or a break comment outside its block. Every "<!--" must start
+	 * a block delimiter, or be a break comment inside its break block: "<!--more…-->" and "<!--noteaser-->" inside a core/more block,
+	 * "<!--nextpage-->" inside a core/nextpage block. Every "-->" must lie inside one of those. Core splits content at a break comment
+	 * when it displays it, and removes the comment, so a bare one would make bytes that were not adjacent become adjacent. Null when
+	 * PCRE fails or the text does not read as blocks, and the caller refuses.
 	 *
 	 * @param string $text Text.
 	 * @return bool|null
 	 */
 	public static function has_stray_comment( string $text ): ?bool {
-		$tokens  = self::tokens( $text );
-		$allowed = array();
-		$matches = null;
-		$found   = preg_match_all( self::ALLOWED_COMMENT, $text, $matches, PREG_OFFSET_CAPTURE );
-		if ( null === $tokens || false === $found || PREG_NO_ERROR !== preg_last_error() ) {
+		$tokens = self::tokens( $text );
+		$tree   = self::spans( $text );
+		if ( null === $tokens || null === $tree ) {
 			return null;
 		}
-		foreach ( $matches[0] as $match ) {
-			$allowed[] = array(
-				'start' => $match[1],
-				'end'   => $match[1] + strlen( $match[0] ),
+
+		$matches = null;
+		$found   = preg_match_all( self::ALLOWED_COMMENT, $text, $matches, PREG_OFFSET_CAPTURE );
+		if ( false === $found || PREG_NO_ERROR !== preg_last_error() ) {
+			return null;
+		}
+
+		$nodes  = self::flatten( $tree );
+		$marked = array();
+		foreach ( $tokens as $token ) {
+			$marked[] = array(
+				'start' => $token['start'],
+				'end'   => $token['end'],
 			);
 		}
-		$marked = array_merge( $tokens, $allowed );
+		foreach ( $matches[0] as $match ) {
+			$start = $match[1];
+			$end   = $start + strlen( $match[0] );
+			$owner = null;
+			foreach ( $nodes as $node ) {
+				if ( $node['start'] <= $start && $end <= $node['end'] ) {
+					$owner = $node;
+				}
+			}
+
+			$wanted = str_starts_with( $match[0], '<!--nextpage' ) ? 'core/nextpage' : 'core/more';
+			if ( null !== $owner && $wanted === $owner['name'] ) {
+				$marked[] = array(
+					'start' => $start,
+					'end'   => $end,
+				);
+			}
+		}
 
 		$opens = null;
 		if ( false === preg_match_all( '/<!--/', $text, $opens, PREG_OFFSET_CAPTURE ) || PREG_NO_ERROR !== preg_last_error() ) {
@@ -582,7 +608,8 @@ final class BlockEditor {
 			}
 		}
 
-		// Condition 3: each sent run holds the delimiters core finds in it alone.
+		// Condition 3: each sent run holds the delimiters core finds in it alone. It is kept, although conditions 1 and 2 seem to imply
+		// it: the delimiter grammar has a negative lookahead, which can read past the end of a run.
 		foreach ( $runs as $run ) {
 			$alone = self::tokens( $run['text'] );
 			if ( null === $alone ) {

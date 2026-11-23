@@ -447,24 +447,33 @@ final class PostWriter {
 			return self::unsupported( __( 'Steadhand cannot read the block structure of this post the way WordPress does, so it cannot edit single blocks in it. Nothing was changed. Use steadhand/update-post with the complete new content instead.', 'steadhand' ) );
 		}
 
-		$content = '';
-		$altered = false;
-		$kept    = array();
-		$sent    = array();
+		$content       = '';
+		$altered       = false;
+		$kept          = array();
+		$sent          = array();
+		$last_kept_end = null;
 		foreach ( $runs as $run ) {
 			if ( 'kept' === $run['type'] ) {
-				$kept[]   = array(
+				// Two kept ranges with a removed span between them are joined here. The bytes on either side were not adjacent in
+				// the stored content, so the join must not leave HTML open, as it would for a sent run.
+				if ( null !== $last_kept_end && $run['start'] !== $last_kept_end && self::leaves_html_open( $content ) ) {
+					return self::unsupported( __( 'The stored content leaves HTML open where the edit removes the content between two of its parts, for example a script, a comment or an attribute that is not closed. Steadhand cannot tell how the content after the removal would be read. Nothing was changed. A person must fix the post in the block editor.', 'steadhand' ) );
+				}
+
+				$kept[]        = array(
 					'start'       => $run['start'],
 					'end'         => $run['start'] + $run['length'],
 					'final_start' => strlen( $content ),
 				);
-				$content .= substr( $stored, $run['start'], $run['length'] );
+				$content      .= substr( $stored, $run['start'], $run['length'] );
+				$last_kept_end = $run['start'] + $run['length'];
 				continue;
 			}
 
 			if ( '' === $run['text'] ) {
 				continue;
 			}
+			$last_kept_end = null;
 
 			if ( self::leaves_html_open( $content ) ) {
 				return self::unsupported( __( 'The stored content leaves HTML open before the place where the markup you sent would go, for example a script, a comment or an attribute that is not closed. Steadhand cannot tell where the sent markup would land. Nothing was changed. A person must fix the post in the block editor.', 'steadhand' ) );
@@ -480,7 +489,7 @@ final class PostWriter {
 			}
 
 			if ( ! BlockEditor::has_comment_check( $filtered ) ) {
-				return self::unsupported( __( 'The markup you sent contains an HTML comment that is not a block comment, so nothing was changed. Send complete blocks only.', 'steadhand' ) );
+				return self::unsupported( __( 'The markup you sent contains an HTML comment that is not a block comment, so nothing was changed. Send complete blocks only; use the core/more or core/nextpage block for a break.', 'steadhand' ) );
 			}
 
 			$sent[]   = array(

@@ -486,15 +486,22 @@ final class SpliceBypassTest extends PostWriteTestCase {
 		$this->assertStringContainsString( '<textarea>abc</textarea>', (string) get_post( $post )->post_content );
 	}
 
-	public function test_post_break_and_page_break_comments_are_accepted_and_stored(): void {
-		foreach ( array( '<!--more-->', '<!--more Read on-->', '<!--nextpage-->', '<!--noteaser-->' ) as $comment ) {
+	public function test_break_comments_inside_their_core_blocks_are_accepted_and_stored(): void {
+		$forms = array(
+			'<!-- wp:more -->' . "\n" . '<!--more-->' . "\n" . '<!-- /wp:more -->' => '<!--more-->',
+			'<!-- wp:more {"customText":"Read on"} -->' . "\n" . '<!--more Read on-->' . "\n" . '<!-- /wp:more -->' => '<!--more Read on-->',
+			'<!-- wp:more {"noTeaser":true} -->' . "\n" . '<!--more-->' . "\n" . '<!--noteaser-->' . "\n" . '<!-- /wp:more -->' => '<!--noteaser-->',
+			'<!-- wp:nextpage -->' . "\n" . '<!--nextpage-->' . "\n" . '<!-- /wp:nextpage -->' => '<!--nextpage-->',
+		);
+
+		foreach ( $forms as $markup => $comment ) {
 			$post = $this->raw_post( self::paragraph( 'One' ) . "\n\n" . self::paragraph( 'Two' ) );
 
 			$out = $this->output_of(
 				'steadhand-edit-blocks',
 				array(
 					'id'         => $post,
-					'operations' => array( $this->replace( '1', self::paragraph( 'Two' ) . "\n" . $comment ) ),
+					'operations' => array( $this->replace( '1', self::paragraph( 'Two' ) . "\n" . $markup ) ),
 				)
 			);
 
