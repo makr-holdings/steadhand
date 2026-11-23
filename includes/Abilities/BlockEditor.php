@@ -44,6 +44,9 @@ final class BlockEditor {
 	 */
 	public const PATH_BODY = '(0|[1-9][0-9]*)(\.(0|[1-9][0-9]*)){0,19}';
 
+	/** The HTML comments WordPress reads as post breaks: "<!--more-->" (as core's own pattern), "<!--nextpage-->", "<!--noteaser-->". */
+	private const ALLOWED_COMMENT = '/<!--more(.*?)?-->|<!--nextpage-->|<!--noteaser-->/';
+
 	/** Bytes that count as whitespace when deciding whether a separator is needed. */
 	private const WHITESPACE = " \t\n\r\f\v";
 
@@ -251,6 +254,13 @@ final class BlockEditor {
 					sprintf( __( 'The markup of operation %d must be complete blocks: every block it opens must be closed in the same markup, and it must not close a block it did not open.', 'steadhand' ), $where )
 				);
 			}
+
+			if ( true !== self::has_comment_check( $markup ) ) {
+				return self::invalid(
+					/* translators: %d: the number of the operation, counting from 1. */
+					sprintf( __( 'The markup of operation %d contains an HTML comment that is not a block comment. Send complete blocks only.', 'steadhand' ), $where )
+				);
+			}
 		}
 
 		foreach ( $paths as $i => $path ) {
@@ -380,6 +390,220 @@ final class BlockEditor {
 		}
 
 		return self::join( $pieces );
+	}
+
+	/**
+	 * Whether a text has no stray HTML comment (see has_stray_comment()). Returns true when it has none, and false when it has
+	 * one or when PCRE fails, so a caller refuses in either case.
+	 *
+	 * @param string $text Text.
+	 * @return bool
+	 */
+	public static function has_comment_check( string $text ): bool {
+		return false === self::has_stray_comment( $text );
+	}
+
+	/**
+	 * Every block delimiter in a text, as core's grammar reads it (BlockMarkup::TOKEN), with its byte span. Null when PCRE fails.
+	 *
+	 * @param string $text Text.
+	 * @return array<int, array{start: int, end: int, text: string}>|null
+	 */
+	public static function tokens( string $text ): ?array {
+		$matches = null;
+		$found   = preg_match_all( BlockMarkup::TOKEN, $text, $matches, PREG_OFFSET_CAPTURE );
+		if ( false === $found || PREG_NO_ERROR !== preg_last_error() ) {
+			return null;
+		}
+
+		$out = array();
+		foreach ( $matches[0] as $match ) {
+			$out[] = array(
+				'start' => $match[1],
+				'end'   => $match[1] + strlen( $match[0] ),
+				'text'  => $match[0],
+			);
+		}
+
+		return $out;
+	}
+
+	/**
+	 * Whether a text holds an HTML comment that is not a block comment. Every "<!--" must start a block delimiter, or one of the
+	 * comments WordPress reads as a post break or page break ("<!--more-->", "<!--more text-->", "<!--nextpage-->", "<!--noteaser-->"),
+	 * and every "-->" must lie inside one of those. So neither half of a split delimiter can be sent. Null when PCRE fails.
+	 *
+	 * @param string $text Text.
+	 * @return bool|null
+	 */
+	public static function has_stray_comment( string $text ): ?bool {
+		$tokens  = self::tokens( $text );
+		$allowed = array();
+		$matches = null;
+		$found   = preg_match_all( self::ALLOWED_COMMENT, $text, $matches, PREG_OFFSET_CAPTURE );
+		if ( null === $tokens || false === $found || PREG_NO_ERROR !== preg_last_error() ) {
+			return null;
+		}
+		foreach ( $matches[0] as $match ) {
+			$allowed[] = array(
+				'start' => $match[1],
+				'end'   => $match[1] + strlen( $match[0] ),
+			);
+		}
+		$marked = array_merge( $tokens, $allowed );
+
+		$opens = null;
+		if ( false === preg_match_all( '/<!--/', $text, $opens, PREG_OFFSET_CAPTURE ) || PREG_NO_ERROR !== preg_last_error() ) {
+			return null;
+		}
+		foreach ( $opens[0] as $open ) {
+			$starts_marked = false;
+			foreach ( $marked as $span ) {
+				if ( $span['start'] === $open[1] ) {
+					$starts_marked = true;
+					break;
+				}
+			}
+			if ( ! $starts_marked ) {
+				return true;
+			}
+		}
+
+		$closes = null;
+		if ( false === preg_match_all( '/-->/', $text, $closes, PREG_OFFSET_CAPTURE ) || PREG_NO_ERROR !== preg_last_error() ) {
+			return null;
+		}
+		foreach ( $closes[0] as $close ) {
+			$inside = false;
+			foreach ( $marked as $span ) {
+				if ( $span['start'] <= $close[1] && $close[1] + 3 <= $span['end'] ) {
+					$inside = true;
+					break;
+				}
+			}
+			if ( ! $inside ) {
+				return true;
+			}
+		}
+
+		return false;
+	}
+
+	/**
+	 * Whether the final content's block delimiters are exactly the ones that can be accounted for: the stored delimiters that
+	 * were kept, and the delimiters core finds in each sent run when it reads that run alone. Three conditions, all required:
+	 *
+	 * 1. every delimiter of the final content lies wholly inside one kept range or one sent run;
+	 * 2. the delimiters inside each kept range are the stored delimiters that lie wholly inside that range: the same count, the same
+	 *    order, the same offset from the start of the range, and the same bytes. A stored delimiter that is cut by a kept range's
+	 *    edge, without lying wholly inside a kept range, is refused;
+	 * 3. the delimiters inside each sent run are the delimiters found by scanning that run alone, with the same offsets and bytes.
+	 *
+	 * Kept ranges are verbatim copies of the stored bytes, and the sent runs are the filtered text, so the final delimiters are the
+	 * stored ones that were kept plus the ones core would find in each run. A delimiter that is only whole once bytes from two
+	 * places are joined (the two halves of a split delimiter, for example) fails condition 1 or 3.
+	 *
+	 * @param string                                                    $stored Stored content.
+	 * @param array<int, array{start: int, end: int, final_start: int}> $kept   Kept ranges in stored offsets, with the offset each starts at in the final content.
+	 * @param array<int, array{at: int, text: string}>                  $runs   Sent runs as they were filtered, with the offset each starts at in the final content.
+	 * @param string                                                    $result_content The final content.
+	 * @return bool
+	 */
+	public static function aligned( string $stored, array $kept, array $runs, string $result_content ): bool {
+		$stored_tokens = self::tokens( $stored );
+		$final_tokens  = self::tokens( $result_content );
+		if ( null === $stored_tokens || null === $final_tokens ) {
+			return false;
+		}
+
+		$regions = array();
+		foreach ( $kept as $range ) {
+			$regions[] = array(
+				'from' => $range['final_start'],
+				'to'   => $range['final_start'] + $range['end'] - $range['start'],
+			);
+		}
+		foreach ( $runs as $run ) {
+			if ( substr( $result_content, $run['at'], strlen( $run['text'] ) ) !== $run['text'] ) {
+				return false;
+			}
+			$regions[] = array(
+				'from' => $run['at'],
+				'to'   => $run['at'] + strlen( $run['text'] ),
+			);
+		}
+
+		// Condition 1: every final delimiter lies wholly inside one region.
+		foreach ( $final_tokens as $token ) {
+			$inside = false;
+			foreach ( $regions as $region ) {
+				if ( $region['from'] <= $token['start'] && $token['end'] <= $region['to'] ) {
+					$inside = true;
+					break;
+				}
+			}
+			if ( ! $inside ) {
+				return false;
+			}
+		}
+
+		// Condition 2: a stored delimiter is wholly kept or wholly outside every kept range, and each kept range holds the same
+		// delimiters, at the same places and with the same bytes, as the stored content.
+		foreach ( $stored_tokens as $token ) {
+			$inside = false;
+			$touch  = false;
+			foreach ( $kept as $range ) {
+				if ( $range['start'] <= $token['start'] && $token['end'] <= $range['end'] ) {
+					$inside = true;
+				} elseif ( $token['start'] < $range['end'] && $range['start'] < $token['end'] ) {
+					$touch = true;
+				}
+			}
+			if ( $touch && ! $inside ) {
+				return false;
+			}
+		}
+		foreach ( $kept as $range ) {
+			$expected = array();
+			foreach ( $stored_tokens as $token ) {
+				if ( $range['start'] <= $token['start'] && $token['end'] <= $range['end'] ) {
+					$expected[] = array( $token['start'] - $range['start'], $token['text'] );
+				}
+			}
+			$actual = array();
+			$length = $range['end'] - $range['start'];
+			foreach ( $final_tokens as $token ) {
+				if ( $range['final_start'] <= $token['start'] && $token['end'] <= $range['final_start'] + $length ) {
+					$actual[] = array( $token['start'] - $range['final_start'], $token['text'] );
+				}
+			}
+			if ( $expected !== $actual ) {
+				return false;
+			}
+		}
+
+		// Condition 3: each sent run holds the delimiters core finds in it alone.
+		foreach ( $runs as $run ) {
+			$alone = self::tokens( $run['text'] );
+			if ( null === $alone ) {
+				return false;
+			}
+			$expected = array();
+			foreach ( $alone as $token ) {
+				$expected[] = array( $token['start'], $token['text'] );
+			}
+			$actual = array();
+			foreach ( $final_tokens as $token ) {
+				if ( $run['at'] <= $token['start'] && $token['end'] <= $run['at'] + strlen( $run['text'] ) ) {
+					$actual[] = array( $token['start'] - $run['at'], $token['text'] );
+				}
+			}
+			if ( $expected !== $actual ) {
+				return false;
+			}
+		}
+
+		return true;
 	}
 
 	/**

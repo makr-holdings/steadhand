@@ -450,6 +450,7 @@ final class PostWriter {
 		$content = '';
 		$altered = false;
 		$kept    = array();
+		$sent    = array();
 		foreach ( $runs as $run ) {
 			if ( 'kept' === $run['type'] ) {
 				$kept[]   = array(
@@ -478,7 +479,27 @@ final class PostWriter {
 				return self::unsupported( __( 'The markup you sent does not stay complete blocks once WordPress has filtered it, so nothing was changed. Send each block with its closing comment, and do not close a block you did not open.', 'steadhand' ) );
 			}
 
+			if ( ! BlockEditor::has_comment_check( $filtered ) ) {
+				return self::unsupported( __( 'The markup you sent contains an HTML comment that is not a block comment, so nothing was changed. Send complete blocks only.', 'steadhand' ) );
+			}
+
+			$sent[]   = array(
+				'at'   => strlen( $content ),
+				'text' => $filtered,
+			);
 			$content .= $filtered;
+		}
+
+		// A sent run that leaves HTML open would change how the stored bytes after it are read, so that is refused too.
+		foreach ( $sent as $run ) {
+			$end = $run['at'] + strlen( $run['text'] );
+			if ( $end < strlen( $content ) && self::leaves_html_open( substr( $content, 0, $end ) ) ) {
+				return self::unsupported( __( 'The markup you sent leaves HTML open, for example an unclosed script or textarea, so the stored content after it would be read differently. Nothing was changed. Send markup that closes what it opens.', 'steadhand' ) );
+			}
+		}
+
+		if ( ! BlockEditor::aligned( $stored, $kept, $sent, $content ) ) {
+			return self::unsupported( __( 'The markup you sent, together with the stored content around it, would form a block that neither is on its own, so nothing was changed. Send complete blocks only, and do not send HTML comments that are not block comments.', 'steadhand' ) );
 		}
 
 		if ( ! BlockEditor::preserved( $stored, $kept, $content ) ) {

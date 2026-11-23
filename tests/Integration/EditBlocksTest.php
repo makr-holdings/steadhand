@@ -637,29 +637,31 @@ final class EditBlocksTest extends PostWriteTestCase {
 		$this->assertSame( self::CONTENT . $run, $stored );
 	}
 
-	public function test_an_unterminated_comment_sent_before_a_block_cannot_swallow_that_block(): void {
+	public function test_an_unterminated_comment_sent_before_a_block_is_refused_and_the_row_is_unchanged(): void {
 		$post = $this->fixture();
 		$this->act_as_agent();
+		$before = $this->row( $post );
 
-		$this->output_of(
-			self::TOOL_NAME,
-			array(
-				'id'         => $post,
-				'operations' => array(
+		$this->assertSame(
+			'steadhand_invalid_input',
+			$this->refusal_code(
+				$this->execute_ability(
+					self::ABILITY,
 					array(
-						'op'     => 'insert_before',
-						'path'   => '1',
-						'name'   => 'core/paragraph',
-						'markup' => '<!--',
-					),
-				),
+						'id'         => $post,
+						'operations' => array(
+							array(
+								'op'     => 'insert_before',
+								'path'   => '1',
+								'name'   => 'core/paragraph',
+								'markup' => '<!--',
+							),
+						),
+					)
+				)
 			)
 		);
-
-		$stored = get_post( $post )->post_content;
-		$blocks = array_values( array_filter( parse_blocks( $stored ), static fn( array $block ): bool => null !== $block['blockName'] ) );
-		$this->assertSame( 'core/paragraph', $blocks[1]['blockName'] ?? null, 'The block after the piece must still be a block.' );
-		$this->assertStringContainsString( self::paragraph( 'Two' ), $stored, 'The following block keeps its bytes.' );
+		$this->assertSame( $before, $this->row( $post ) );
 	}
 
 	public function test_a_piece_that_is_not_complete_blocks_is_refused_as_invalid_input_with_nothing_written(): void {
