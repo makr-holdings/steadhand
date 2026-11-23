@@ -121,15 +121,39 @@ abstract class ReadToolTestCase extends TestCase {
 	}
 
 	/**
-	 * Asserts that a tool result is a refusal or error, and returns its text.
+	 * Asserts that a tool result is a refusal or error, and returns its text without the code suffix (see refusal_code()).
 	 *
 	 * @param array<string, mixed> $result Tool result.
 	 */
 	protected function refusal_text( array $result ): string {
+		return $this->split_refusal_text( $result )[0];
+	}
+
+	/**
+	 * Returns the Steadhand code of a refusal over MCP. Registry::with_code() appends it to the text as " (steadhand_<code>)",
+	 * because the MCP Adapter sends only the text, so the code must be there.
+	 *
+	 * @param array<string, mixed> $result Tool result.
+	 */
+	protected function refusal_code( array $result ): string {
+		return $this->split_refusal_text( $result )[1];
+	}
+
+	/**
+	 * Splits the text of an MCP refusal into its message and its Steadhand code.
+	 *
+	 * @param array<string, mixed> $result Tool result.
+	 * @return array{0: string, 1: string} The message without the suffix, and the code.
+	 */
+	private function split_refusal_text( array $result ): array {
 		$this->assertTrue( $result['isError'], 'The call must be refused.' );
 		$this->assertArrayNotHasKey( 'structuredContent', $result, 'A refused call must return no data.' );
 
-		return (string) $result['content'][0]['text'];
+		$text = (string) $result['content'][0]['text'];
+		$this->assertMatchesRegularExpression( '/ \((steadhand_[a-z0-9_]+)\)$/', $text, 'A refusal must end with its Steadhand code.' );
+		preg_match( '/ \((steadhand_[a-z0-9_]+)\)$/', $text, $matches );
+
+		return array( substr( $text, 0, - strlen( $matches[0] ) ), $matches[1] );
 	}
 
 	/**

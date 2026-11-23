@@ -294,7 +294,7 @@ final class UpdatePostTest extends PostWriteTestCase {
 			'type'           => 'page',
 			'comment_status' => 'open',
 		) as $key => $value ) {
-			$this->refusal_text(
+			$this->schema_refusal_text(
 				$this->tool_result(
 					self::TOOL_NAME,
 					array(

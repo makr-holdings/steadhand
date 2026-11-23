@@ -349,9 +349,9 @@ final class ListPostsTest extends ReadToolTestCase {
 	public function test_per_page_of_51_and_page_0_are_rejected(): void {
 		$this->act_as_agent();
 
-		$this->refusal_text( $this->tool_result( self::TOOL_NAME, array( 'per_page' => 51 ) ) );
-		$this->refusal_text( $this->tool_result( self::TOOL_NAME, array( 'page' => 0 ) ) );
-		$this->refusal_text( $this->tool_result( self::TOOL_NAME, array( 'page' => 10001 ) ) );
+		$this->schema_refusal_text( $this->tool_result( self::TOOL_NAME, array( 'per_page' => 51 ) ) );
+		$this->schema_refusal_text( $this->tool_result( self::TOOL_NAME, array( 'page' => 0 ) ) );
+		$this->schema_refusal_text( $this->tool_result( self::TOOL_NAME, array( 'page' => 10001 ) ) );
 	}
 
 	public function test_attachment_wp_block_and_unregistered_post_types_are_refused_and_name_the_allowed_types(): void {
@@ -383,16 +383,16 @@ final class ListPostsTest extends ReadToolTestCase {
 		$this->act_as_agent();
 
 		foreach ( array( 'trash', 'any', 'auto-draft', 'inherit' ) as $status ) {
-			$this->refusal_text( $this->tool_result( self::TOOL_NAME, array( 'status' => array( $status ) ) ) );
+			$this->schema_refusal_text( $this->tool_result( self::TOOL_NAME, array( 'status' => array( $status ) ) ) );
 		}
-		$this->refusal_text( $this->tool_result( self::TOOL_NAME, array( 'status' => array( 'draft', 'draft' ) ) ) );
-		$this->refusal_text( $this->tool_result( self::TOOL_NAME, array( 'status' => array() ) ) );
+		$this->schema_refusal_text( $this->tool_result( self::TOOL_NAME, array( 'status' => array( 'draft', 'draft' ) ) ) );
+		$this->schema_refusal_text( $this->tool_result( self::TOOL_NAME, array( 'status' => array() ) ) );
 	}
 
 	public function test_an_unknown_property_is_rejected(): void {
 		$this->act_as_agent();
 
-		$this->refusal_text( $this->tool_result( self::TOOL_NAME, array( 'author' => 1 ) ) );
+		$this->schema_refusal_text( $this->tool_result( self::TOOL_NAME, array( 'author' => 1 ) ) );
 	}
 
 	public function test_output_never_carries_passwords_emails_or_logins(): void {
@@ -528,8 +528,8 @@ final class ListPostsTest extends ReadToolTestCase {
 		$this->act_as_agent();
 
 		$this->assertStringContainsString( 'ISO 8601', $this->refusal_text( $this->tool_result( self::TOOL_NAME, array( 'after' => '2026-02-30T00:00:00Z' ) ) ) );
-		$this->assertStringContainsString( 'invalid input', $this->refusal_text( $this->tool_result( self::TOOL_NAME, array( 'after' => '2026-02-01T25:00:00Z' ) ) ) );
-		$this->assertStringContainsString( 'invalid input', $this->refusal_text( $this->tool_result( self::TOOL_NAME, array( 'after' => '2026-13-01T00:00:00Z' ) ) ) );
+		$this->assertStringContainsString( 'invalid input', $this->schema_refusal_text( $this->tool_result( self::TOOL_NAME, array( 'after' => '2026-02-01T25:00:00Z' ) ) ) );
+		$this->assertStringContainsString( 'invalid input', $this->schema_refusal_text( $this->tool_result( self::TOOL_NAME, array( 'after' => '2026-13-01T00:00:00Z' ) ) ) );
 		$this->assertStringContainsString( 'before must be', $this->refusal_text( $this->tool_result( self::TOOL_NAME, array( 'before' => '2026-02-31T00:00:00+01:00' ) ) ) );
 
 		$this->output( self::TOOL_NAME, array( 'after' => '2028-02-29T00:00:00Z' ) );

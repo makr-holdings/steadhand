@@ -372,14 +372,14 @@ final class ListTermsTest extends ReadToolTestCase {
 		);
 
 		foreach ( $cases as $arguments ) {
-			$this->refusal_text( $this->tool_result( self::TOOL_NAME, $arguments ) );
+			$this->schema_refusal_text( $this->tool_result( self::TOOL_NAME, $arguments ) );
 		}
 	}
 
 	public function test_taxonomy_is_required(): void {
 		$this->act_as_agent();
 
-		$this->refusal_text( $this->tool_result( self::TOOL_NAME, array( 'per_page' => 5 ) ) );
+		$this->schema_refusal_text( $this->tool_result( self::TOOL_NAME, array( 'per_page' => 5 ) ) );
 	}
 
 	public function test_an_agent_without_steadhand_read_gets_the_capability_refusal_and_not_the_allowed_list(): void {

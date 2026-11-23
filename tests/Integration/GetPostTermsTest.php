@@ -174,7 +174,7 @@ final class GetPostTermsTest extends ReadToolTestCase {
 		$this->act_as_agent();
 
 		foreach ( array( 0, -1, 1.5, 'abc' ) as $id ) {
-			$this->refusal_text( $this->tool_result( self::TOOL_NAME, array( 'id' => $id ) ) );
+			$this->schema_refusal_text( $this->tool_result( self::TOOL_NAME, array( 'id' => $id ) ) );
 		}
 	}
 

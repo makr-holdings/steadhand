@@ -80,7 +80,7 @@ final class GetChangeLogTest extends ReadToolTestCase {
 
 		foreach ( array( 'user_id', 'user', 'all', 'agent_id', 'scope' ) as $argument ) {
 			$result = $this->tool_result( self::TOOL_NAME, array( $argument => $other ) );
-			$this->refusal_text( $result );
+			$this->schema_refusal_text( $result );
 			$this->assertStringNotContainsString( 'the other agent', (string) wp_json_encode( $result ), "$argument must not reveal another agent's entries." );
 		}
 	}
@@ -196,15 +196,15 @@ final class GetChangeLogTest extends ReadToolTestCase {
 	public function test_per_page_above_fifty_and_page_zero_are_refused(): void {
 		$this->act_as( $this->make_agent() );
 
-		$this->refusal_text( $this->tool_result( self::TOOL_NAME, array( 'per_page' => 51 ) ) );
-		$this->refusal_text( $this->tool_result( self::TOOL_NAME, array( 'page' => 0 ) ) );
+		$this->schema_refusal_text( $this->tool_result( self::TOOL_NAME, array( 'per_page' => 51 ) ) );
+		$this->schema_refusal_text( $this->tool_result( self::TOOL_NAME, array( 'page' => 0 ) ) );
 	}
 
 	public function test_a_malformed_ability_or_result_filter_is_refused(): void {
 		$this->act_as( $this->make_agent() );
 
-		$this->refusal_text( $this->tool_result( self::TOOL_NAME, array( 'ability' => '../../etc' ) ) );
-		$this->refusal_text( $this->tool_result( self::TOOL_NAME, array( 'result' => 'all' ) ) );
+		$this->schema_refusal_text( $this->tool_result( self::TOOL_NAME, array( 'ability' => '../../etc' ) ) );
+		$this->schema_refusal_text( $this->tool_result( self::TOOL_NAME, array( 'result' => 'all' ) ) );
 	}
 
 	/**

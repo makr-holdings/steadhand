@@ -7,6 +7,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). The
 ## [Unreleased]
 
 ### Changed
+- Over MCP, the text of a refused or failed call now ends with its error code in parentheses, for example `(steadhand_forbidden)`. The MCP Adapter passes only the text and `isError` to the client, so the code was lost. The change log stores the message without the code.
 - For `update-post`, `edit-blocks`, `set-post-terms`, `set-featured-image`, and `upload-media` with the post as `parent`: when the agent can read a published, scheduled or private post and does not hold `steadhand_publish`, the refusal now says that the post needs `steadhand_publish`, instead of "Not found, or this agent may not access it." An agent that holds `steadhand_publish` always gets the generic text for these posts. The other capabilities the agent holds do not change this (`steadhand_write_drafts` and `steadhand_media` are not part of the condition). The code (`steadhand_forbidden`), the status (403) and the rule are the same, nothing is changed, and the change log still records the call as blocked. A missing, trashed, unreadable or disallowed post, and a draft, keep the generic text.
 
 ### Fixed

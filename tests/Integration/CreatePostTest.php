@@ -326,7 +326,7 @@ final class CreatePostTest extends PostWriteTestCase {
 		foreach ( self::forbidden_properties() as $case => $pair ) {
 			list( $key, $value ) = $pair;
 
-			$this->refusal_text(
+			$this->schema_refusal_text(
 				$this->tool_result(
 					self::TOOL_NAME,
 					array(
@@ -474,7 +474,7 @@ final class CreatePostTest extends PostWriteTestCase {
 	public function test_a_slug_that_is_not_lowercase_words_is_refused_by_the_schema(): void {
 		$this->act_as_agent();
 
-		$this->refusal_text(
+		$this->schema_refusal_text(
 			$this->tool_result(
 				self::TOOL_NAME,
 				array(
@@ -483,7 +483,7 @@ final class CreatePostTest extends PostWriteTestCase {
 				)
 			)
 		);
-		$this->refusal_text(
+		$this->schema_refusal_text(
 			$this->tool_result(
 				self::TOOL_NAME,
 				array(

@@ -578,7 +578,7 @@ final class SetPostTermsTest extends PostWriteTestCase {
 		$this->assign( $post, 'post_tag', array( $this->term( 'post_tag', 'Before' ) ) );
 		$before = $this->stored_ids( $post, 'post_tag' );
 
-		$this->refusal_text(
+		$this->schema_refusal_text(
 			$this->tool_result(
 				self::TOOL_NAME,
 				array(
@@ -597,7 +597,7 @@ final class SetPostTermsTest extends PostWriteTestCase {
 		$post = $this->draft();
 		$tag  = $this->term( 'post_tag', 'Twice' );
 
-		$this->refusal_text(
+		$this->schema_refusal_text(
 			$this->tool_result(
 				self::TOOL_NAME,
 				array(
@@ -616,7 +616,7 @@ final class SetPostTermsTest extends PostWriteTestCase {
 		$post = $this->draft();
 		$tag  = $this->term( 'post_tag', 'Extra' );
 
-		$this->refusal_text(
+		$this->schema_refusal_text(
 			$this->tool_result(
 				self::TOOL_NAME,
 				array(
@@ -641,7 +641,7 @@ final class SetPostTermsTest extends PostWriteTestCase {
 			)
 		);
 
-		$this->refusal_text(
+		$this->schema_refusal_text(
 			$this->tool_result(
 				self::TOOL_NAME,
 				array(
@@ -1486,7 +1486,7 @@ final class SetPostTermsTest extends PostWriteTestCase {
 				)
 			);
 			$this->assertTrue( $result['isError'], "$type must be refused." );
-			$this->assertSame( self::REFUSAL, $result['content'][0]['text'], $type );
+			$this->assertSame( self::REFUSAL . ' (steadhand_forbidden)', $result['content'][0]['text'], $type );
 			$this->assert_unchanged( $post, self::PAGE_TAX, array() );
 		}
 	}

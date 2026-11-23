@@ -115,8 +115,10 @@ final class PipelineTest extends TestCase {
 
 		$this->assertWPError( $result );
 		$this->assertSame( 'steadhand_forbidden', $result->get_error_code() );
+		$this->assertStringEndsWith( ' (steadhand_forbidden)', $result->get_error_message(), 'The registered callback appends the code for MCP.' );
 		$this->assertCount( 1, $logger->entries );
 		$this->assertSame( Entry::RESULT_BLOCKED, $logger->entries[0]->result );
+		$this->assertStringNotContainsString( ' (steadhand_', $logger->entries[0]->message, 'The log keeps the message without the code.' );
 	}
 
 	public function test_check_logs_one_blocked_entry_for_a_refused_agent(): void {
