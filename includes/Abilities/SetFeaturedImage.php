@@ -254,7 +254,7 @@ final class SetFeaturedImage extends Ability {
 	 */
 	public function execute( array $input ): array|\WP_Error {
 		if ( ! $this->authorize_object( $input ) ) {
-			return PostReader::not_found();
+			return new \WP_Error( 'steadhand_forbidden', __( 'Not found, or this agent may not access it.', 'steadhand' ), array( 'status' => 403 ) );
 		}
 
 		$checked = $this->validate_input( $input );

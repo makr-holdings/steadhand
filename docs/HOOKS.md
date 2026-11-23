@@ -247,10 +247,11 @@ An interface with two methods.
 
 The call as the rules see it. Every property is public and read-only.
 
-- `ability` (`string`): the ability name, `steadhand/create-post`, `steadhand/update-post`, `steadhand/edit-blocks` or `steadhand/set-post-terms`.
+- `ability` (`string`): the ability name: one of the six write tools, `steadhand/create-post`, `steadhand/update-post`, `steadhand/edit-blocks`, `steadhand/set-post-terms`, `steadhand/upload-media` or `steadhand/set-featured-image`.
 - `capability` (`string`): the Steadhand capability the ability names. The four post write tools name `steadhand_write_drafts`. A call that edits a live post or sets a live status also needs `steadhand_publish`. The object check decides that, not this property. `upload-media` and `set-featured-image` name `steadhand_media`, and both also need `steadhand_read`.
 - `user_id` (`int`): the agent user making the call.
 - `input` (`array<string, mixed>`): the validated and sanitized input, as the rules before this one left it. Defaults are filled in, so `create-post` always has `status` and `post_type`. After a fix, it is the rewritten input, already checked again.
+  - **Warning, `steadhand/upload-media`:** `input` carries the raw base64 payload, in `data_base64`, as the caller sent it: up to 7,200,000 characters, which decode to at most 5 MB. A rule must not log it, store it, or return it in a message. Log its digest, or nothing. The change log itself stores only the digest of the decoded bytes.
 - `object_type` (`string`): `post` for the four post write tools and for `set-featured-image`; `attachment` for `upload-media`, whose object ID is 0 until the file is stored and the new attachment's ID after.
 - `object_id` (`int`): the ID of the post the call changes. It is 0 for `create-post`, which has no ID until it runs.
 - `content` (`array<string, string>`): the input fields that will be stored as post content, keyed by field name, each holding block markup. For `create-post` and `update-post` it has `content` when the caller sent it, and is empty otherwise. For `edit-blocks` it has `content`, the whole resulting content, when the operations can be applied. When they cannot, it has `operations.<n>.markup` for each operation that sends markup instead. Those keys are not stored, and nothing is written. `set-post-terms` has no content, so its `content` is always empty. Title and excerpt are not included.
@@ -288,7 +289,7 @@ It does not throw for these cases. Rules run in the order they were added.
 
 These rules apply to every write. The order is fixed:
 
-1. The built-in rules that run first: `steadhand/rate-limit`, then `steadhand/edit-lock`.
+1. The built-in rules that run first: `steadhand/rate-limit`, then `steadhand/daily-upload-limit`, then `steadhand/edit-lock`.
 2. The third-party rules, in the order they were added.
 3. The built-in rules that run last: `steadhand/content-limits`, then `steadhand/block-markup`.
 

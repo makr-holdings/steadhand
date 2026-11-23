@@ -13,6 +13,9 @@ namespace Steadhand\Tests\Integration;
 
 use Steadhand\Abilities\PostFields;
 use Steadhand\Abilities\UploadMedia;
+use Steadhand\Guardrails\Rules\DailyUploadLimit;
+use Steadhand\Log\Schema;
+use Steadhand\Pipeline\MediaWriter;
 
 /**
  * Covers SPEC §5 (upload-media), §6.1, §7, §10 and §14.1. Every refusal test checks that no file and no attachment row
@@ -34,6 +37,22 @@ final class UploadMediaTest extends PostWriteTestCase {
 	private array $created = array();
 
 	/**
+	 * The memory_limit the process started with, restored in tearDown() after a test changes it.
+	 *
+	 * @var string
+	 */
+	private static string $memory_limit_before = '';
+
+	/**
+	 * Records the memory limit before each test.
+	 */
+	protected function setUp(): void {
+		parent::setUp();
+
+		self::$memory_limit_before = (string) ini_get( 'memory_limit' );
+	}
+
+	/**
 	 * Removes the filters and the attachments this file adds.
 	 */
 	protected function tearDown(): void {
@@ -41,6 +60,12 @@ final class UploadMediaTest extends PostWriteTestCase {
 		remove_all_filters( 'wp_handle_sideload_prefilter' );
 		remove_all_filters( 'wp_generate_attachment_metadata' );
 		remove_all_filters( 'steadhand_allowed_post_types' );
+		remove_all_filters( 'query' );
+		remove_all_filters( 'wp_check_filetype_and_ext' );
+		remove_all_filters( 'wp_unique_filename' );
+		remove_all_filters( 'wp_handle_upload' );
+		remove_all_filters( 'image_memory_limit' );
+		ini_set( 'memory_limit', self::$memory_limit_before ); // phpcs:ignore WordPress.PHP.IniSet.memory_limit_Disallowed -- Restores the limit the test changed.
 
 		foreach ( $this->created as $id ) {
 			if ( null !== get_post( $id ) ) {
@@ -181,7 +206,6 @@ final class UploadMediaTest extends PostWriteTestCase {
 			array( 'png', 'shot.png', 'image/png' ),
 			array( 'jpeg', 'photo.jpg', 'image/jpeg' ),
 			array( 'jpeg', 'photo.jpeg', 'image/jpeg' ),
-			array( 'gif', 'loop.gif', 'image/gif' ),
 			array( 'webp', 'card.webp', 'image/webp' ),
 		);
 
@@ -240,7 +264,7 @@ final class UploadMediaTest extends PostWriteTestCase {
 	public function test_the_title_defaults_to_the_file_name_without_its_extension(): void {
 		$this->act_as_agent( array( 'steadhand_media' => true ) );
 
-		$result = $this->upload( $this->args( $this->encode_image( 'gif' ), 'sea wall.gif' ) );
+		$result = $this->upload( $this->args( $this->encode_image( 'jpeg' ), 'sea-wall.jpg' ) );
 
 		$this->assertIsArray( $result );
 		$this->assertSame( 'sea-wall', get_post( (int) $result['id'] )->post_title );
@@ -374,32 +398,30 @@ final class UploadMediaTest extends PostWriteTestCase {
 	 */
 	public function test_the_pixel_limits_hold_at_the_edges(): void {
 		$this->act_as_agent( array( 'steadhand_media' => true ) );
-		$validate = static fn( int $width, int $height ): mixed => ( new UploadMedia() )->validate_input(
+		$validate = fn( int $width, int $height ): mixed => ( new UploadMedia() )->validate_input(
 			array(
 				'filename'    => 'header.png',
-				'data_base64' => base64_encode( self::png_header( $width, $height ) ),
+				'data_base64' => base64_encode( $this->png_header( $width, $height ) ),
 			)
 		);
 
-		$this->assertTrue( $validate( 12000, 1 ), 'A 12000 pixel side is at the limit.' );
-		$this->assertTrue( $validate( 1, 12000 ), 'A 12000 pixel side is at the limit.' );
-		$this->assertTrue( $validate( 10000, 4000 ), 'Exactly 40 million pixels is at the limit.' );
-		$this->assertWPError( $validate( 12001, 1 ), 'A side over 12000 is refused.' );
-		$this->assertWPError( $validate( 1, 12001 ), 'A side over 12000 is refused.' );
-		$this->assertWPError( $validate( 10001, 4000 ), 'More than 40 million pixels is refused.' );
-		$this->assertWPError( $validate( 12000, 3334 ), 'More than 40 million pixels is refused, with both sides allowed.' );
+		$this->assertTrue( $validate( 8000, 2000 ), 'An 8000 pixel side, at 16 million pixels, is at the limit.' );
+		$this->assertTrue( $validate( 2000, 8000 ), 'An 8000 pixel side is at the limit.' );
+		$this->assertTrue( $validate( 4000, 4000 ), 'Exactly 16 million pixels is at the limit.' );
+		$this->assertWPError( $validate( 8001, 1 ), 'A side over 8000 is refused.' );
+		$this->assertWPError( $validate( 1, 8001 ), 'A side over 8000 is refused.' );
+		$this->assertWPError( $validate( 4001, 4000 ), 'One pixel over 16 million is refused.' );
+		$this->assertWPError( $validate( 8000, 2001 ), 'More than 16 million pixels is refused, with both sides allowed.' );
 	}
 
 	/**
-	 * The IHDR of a PNG that claims these dimensions, followed by nothing decodable.
-	 *
-	 * @param int $width  Width.
-	 * @param int $height Height.
+	 * A header just over 16 million pixels is refused as a whole call, with the header alone: nothing is decoded or stored.
 	 */
-	private static function png_header( int $width, int $height ): string {
-		$png = "\x89PNG\r\n\x1a\n" . pack( 'N', 13 ) . 'IHDR' . pack( 'N', $width ) . pack( 'N', $height ) . "\x08\x02\x00\x00\x00" . pack( 'N', 0 );
+	public function test_an_image_over_the_16_million_pixel_limit_is_refused_by_the_header_alone(): void {
+		$this->act_as_agent( array( 'steadhand_media' => true ) );
+		$result = $this->refused( $this->args( $this->png_header( 4001, 4000 ), 'over.png' ), 'steadhand_invalid_input' );
 
-		return $png;
+		$this->assertStringContainsString( '16 million', $result->get_error_message() );
 	}
 
 	/**
@@ -461,30 +483,452 @@ final class UploadMediaTest extends PostWriteTestCase {
 		);
 
 		foreach ( $names as $name ) {
-			$result = $this->upload( $this->args( $jpeg, $name ) );
-			$this->assertWPError( $result, 'Refused: ' . wp_json_encode( $name ) );
+			$this->refused( $this->args( $jpeg, $name ), 'steadhand_invalid_input' );
 		}
 	}
 
 	/**
-	 * A GIF with PHP appended is stored only as a GIF: its detected type is GIF, its name ends in .gif, and no PHP file appears.
+	 * Names outside the rule are refused with steadhand_invalid_input, and nothing is stored: bidi and zero-width characters,
+	 * Windows device names, 81 characters before the extension, a multibyte base of 190 characters, spaces, and a leading dash
+	 * or dot.
+	 *
+	 * @return array<string, array{0: string}>
 	 */
-	public function test_a_gif_with_php_appended_is_stored_as_a_gif_and_no_php_file_appears(): void {
+	public static function names_outside_the_rule(): array {
+		return array(
+			'right-to-left override'   => array( "\u{202E}gnp.jpg" ),
+			'zero-width space'         => array( "zero\u{200B}width.jpg" ),
+			'CON device'               => array( 'CON.jpg' ),
+			'lower-case nul device'    => array( 'nul.png' ),
+			'COM1 device'              => array( 'com1.jpg' ),
+			'LPT9 device'              => array( 'LPT9.webp' ),
+			'81 character base'        => array( str_repeat( 'a', 81 ) . '.jpg' ),
+			'190 multibyte characters' => array( str_repeat( '漢', 190 ) . '.jpg' ),
+			'a space'                  => array( 'my photo.jpg' ),
+			'a leading dash'           => array( '-lead.jpg' ),
+			'a leading dot'            => array( '.hidden.jpg' ),
+			'a gif name'               => array( 'loop.gif' ),
+		);
+	}
+
+	/**
+	 * Each name outside the rule is refused, with the code, and no file or row is left.
+	 *
+	 * @dataProvider names_outside_the_rule
+	 *
+	 * @param string $name The file name.
+	 */
+	public function test_a_file_name_outside_the_rule_is_refused_and_nothing_is_stored( string $name ): void {
 		$this->act_as_agent( array( 'steadhand_media' => true ) );
-		$before = $this->uploads_files();
 
-		$result = $this->upload( $this->args( $this->encode_image( 'gif' ) . "<?php echo 'x'; ?>", 'appended.gif' ) );
+		$result = $this->refused( $this->args( $this->encode_image( 'jpeg' ), $name ), 'steadhand_invalid_input' );
 
-		$this->assertIsArray( $result, 'A GIF is an allowed image even with trailing bytes.' );
-		$path = get_attached_file( (int) $result['id'] );
-		$this->assertStringEndsWith( '.gif', $path );
-		$this->assertSame( 'image/gif', wp_get_image_mime( $path ) );
+		$this->assertStringContainsString( 'filename must be', $result->get_error_message(), 'The refusal must say the rule.' );
+	}
 
-		$added = array_diff_key( $this->uploads_files(), $before );
-		$this->assertNotEmpty( $added );
-		foreach ( array_keys( $added ) as $relative ) {
-			$this->assertStringNotContainsString( '.php', $relative, 'No PHP file may appear in the uploads directory.' );
+	/**
+	 * A name that is exactly 80 characters before the extension is accepted, and an upper-case extension is stored in lower case.
+	 */
+	public function test_the_edges_of_the_name_rule_are_accepted(): void {
+		$this->act_as_agent( array( 'steadhand_media' => true ) );
+		$jpeg = $this->encode_image( 'jpeg' );
+
+		$this->assertTrue( ( new UploadMedia() )->validate_input( $this->args( $jpeg, str_repeat( 'a', 80 ) . '.jpg' ) ) );
+
+		$result = $this->upload( $this->args( $jpeg, 'Holiday_2026-Photo.JPG' ) );
+		$this->assertIsArray( $result );
+		$this->assertStringEndsWith( 'Holiday_2026-Photo.jpg', get_attached_file( (int) $result['id'] ) );
+	}
+
+	/**
+	 * A GIF is refused whether it is still or animated, and PHP appended to it is refused too: no file is made.
+	 */
+	public function test_a_gif_is_refused_still_animated_and_with_php_appended(): void {
+		$this->act_as_agent( array( 'steadhand_media' => true ) );
+		$gif      = $this->encode_image( 'gif' );
+		$animated = $gif . "\x21\xFF\x0BNETSCAPE2.0\x03\x01\x00\x00\x00";
+
+		$this->refused( $this->args( $gif, 'still.gif' ), 'steadhand_invalid_input' );
+		$this->refused( $this->args( $animated, 'animated.gif' ), 'steadhand_invalid_input' );
+		$this->refused( $this->args( $gif . "<?php echo 'x'; ?>", 'appended.gif' ), 'steadhand_invalid_input' );
+	}
+
+	/**
+	 * An animated WebP is refused, flagged in its VP8X chunk or made of ANMF frames; an APNG, a PNG with an acTL chunk, is refused.
+	 * A still WebP and a still PNG are accepted.
+	 */
+	public function test_animated_webp_and_apng_are_refused_and_stills_are_accepted(): void {
+		$agent = $this->act_as_agent( array( 'steadhand_media' => true ) );
+		$still = $this->encode_image( 'webp' );
+		$png   = $this->encode_image( 'png' );
+
+		$flagged = $this->webp_file( $this->webp_vp8x( 0x02 ), $this->riff_chunk( 'VP8L', str_repeat( "\0", 8 ) ) );
+		$frames  = $this->webp_file( $this->webp_vp8x( 0x00 ), $this->riff_chunk( 'ANMF', str_repeat( "\0", 16 ) ) );
+		$apng    = $this->png_with_chunk( $png, 'acTL', pack( 'NN', 2, 0 ) );
+
+		foreach ( array(
+			'flagged.webp' => $flagged,
+			'frames.webp'  => $frames,
+			'animated.png' => $apng,
+		) as $name => $bytes ) {
+			$result = $this->refused( $this->args( $bytes, $name ), 'steadhand_invalid_input' );
+			$this->assertSame( 'Animated images are not accepted.', $result->get_error_message(), $name );
 		}
+
+		$this->assertIsArray( $this->upload( $this->args( $still, 'still.webp' ) ), 'A still WebP is accepted.' );
+		$this->assertIsArray( $this->upload( $this->args( $png, 'still.png' ) ), 'A still PNG is accepted.' );
+		$this->assertSame( 'ok', $this->latest_row( $agent )['result'] );
+	}
+
+	/**
+	 * A JPEG with more than 50 start-of-scan markers is refused. Exactly 50 passes the scan check. The header is enough for both,
+	 * so the check is run on validate_input() and on the full call for the refusal.
+	 */
+	public function test_a_jpeg_with_more_than_fifty_scans_is_refused(): void {
+		$this->act_as_agent( array( 'steadhand_media' => true ) );
+		$jpeg     = $this->encode_image( 'jpeg' );
+		$have     = substr_count( $jpeg, "\xFF\xDA" );
+		$fifty    = $jpeg . str_repeat( "\xFF\xDA", 50 - $have );
+		$fiftyone = $jpeg . str_repeat( "\xFF\xDA", 51 - $have );
+
+		$this->assertSame( 50, substr_count( $fifty, "\xFF\xDA" ) );
+		$this->assertTrue( ( new UploadMedia() )->validate_input( $this->args( $fifty, 'fifty.jpg' ) ), 'Exactly 50 scans is accepted.' );
+
+		$result = $this->refused( $this->args( $fiftyone, 'fiftyone.jpg' ), 'steadhand_invalid_input' );
+		$this->assertStringContainsString( '50 scans', $result->get_error_message() );
+	}
+
+	/**
+	 * A WebP or PNG whose container cannot be walked to its end is refused, with nothing stored. Each case is cut off or has a
+	 * length that runs past the end.
+	 */
+	public function test_a_malformed_webp_or_png_container_is_refused(): void {
+		$this->act_as_agent( array( 'steadhand_media' => true ) );
+		$png = $this->encode_image( 'png' );
+
+		// A PNG with no IEND, and a WebP whose RIFF size claims more bytes than the file has.
+		$this->refused( $this->args( substr( $png, 0, -12 ), 'cut.png' ), 'steadhand_invalid_input' );
+		$this->refused( $this->args( substr( $this->encode_image( 'webp' ), 0, -4 ), 'cut.webp' ), 'steadhand_invalid_input' );
+	}
+
+	/**
+	 * A PHP tag in a comment is refused, in any case: in a PNG text chunk and in a JPEG comment segment.
+	 *
+	 * @return array<string, array{0: string}>
+	 */
+	public static function php_tags(): array {
+		return array(
+			'lower case' => array( '<?php' ),
+			'upper case' => array( '<?PHP' ),
+			'mixed case' => array( '<?PhP' ),
+		);
+	}
+
+	/**
+	 * A valid PNG or JPEG that holds PHP code in a comment is refused, with the PHP message.
+	 *
+	 * @dataProvider php_tags
+	 *
+	 * @param string $tag The opening tag, in the case under test.
+	 */
+	public function test_php_code_inside_a_valid_png_or_jpeg_is_refused( string $tag ): void {
+		$this->act_as_agent( array( 'steadhand_media' => true ) );
+		$comment = $tag . ' echo "x"; ?>';
+
+		$png  = $this->png_with_chunk( $this->encode_image( 'png' ), 'tEXt', "Comment\0" . $comment );
+		$jpeg = $this->jpeg_with_comment( $this->encode_image( 'jpeg' ), $comment );
+
+		foreach ( array(
+			'comment.png' => $png,
+			'comment.jpg' => $jpeg,
+		) as $name => $bytes ) {
+			$result = $this->refused( $this->args( $bytes, $name ), 'steadhand_invalid_input' );
+			$this->assertSame( 'The file contains PHP code, so it was refused.', $result->get_error_message(), $name );
+		}
+	}
+
+	/**
+	 * A WordPress image_memory_limit filter cannot lower the limit below core's own: the limit the upload uses is at least
+	 * WP_MAX_MEMORY_LIMIT, and a value of -1 from the filter lifts it. The filter may only raise the limit.
+	 */
+	public function test_the_image_memory_limit_filter_cannot_lower_the_limit(): void {
+		ini_set( 'memory_limit', '256M' ); // phpcs:ignore WordPress.PHP.IniSet.memory_limit_Disallowed -- The test sets the limit it checks against.
+		add_filter( 'image_memory_limit', static fn(): string => '64M' );
+
+		$this->assertGreaterThanOrEqual( wp_convert_hr_to_bytes( WP_MAX_MEMORY_LIMIT ), MediaWriter::memory_limit(), 'A lower filter value is not used.' );
+	}
+
+	/**
+	 * The one-text warning every upload returns is passed through __() with the steadhand domain, so a translation replaces it.
+	 */
+	public function test_the_undo_warning_is_translatable(): void {
+		$this->act_as_agent( array( 'steadhand_media' => true ) );
+		$translate = static function ( string $translation, string $text, string $domain ): string {
+			return 'steadhand' === $domain && str_starts_with( $text, 'Steadhand cannot undo an upload yet' ) ? 'TRANSLATED WARNING' : $translation;
+		};
+		add_filter( 'gettext', $translate, 10, 3 );
+
+		try {
+			$result = $this->upload( $this->args( $this->encode_image( 'png' ), 'warned.png' ) );
+		} finally {
+			remove_filter( 'gettext', $translate, 10 );
+		}
+
+		$this->assertIsArray( $result );
+		$this->assertSame( array( 'TRANSLATED WARNING' ), $result['warnings'] );
+	}
+
+	/**
+	 * A file that is inserted into the media library after the parent check is refused when the parent has been trashed in
+	 * the meantime: the check runs again just before the row is made, and nothing is left.
+	 */
+	public function test_a_parent_trashed_between_the_check_and_the_write_is_refused_and_nothing_is_stored(): void {
+		$this->act_as_agent( array( 'steadhand_media' => true ) );
+		$draft = $this->admin_post( array( 'post_status' => 'draft' ) );
+
+		$trash = static function ( $upload, $context ) use ( $draft ) {
+			if ( 'sideload' === $context ) {
+				wp_trash_post( $draft );
+			}
+
+			return $upload;
+		};
+		add_filter( 'wp_handle_upload', $trash, 10, 2 );
+		$before = $this->attachment_ids();
+
+		try {
+			$result = $this->refused( $this->args( $this->encode_image( 'png' ), 'raced.png', array( 'parent' => $draft ) ), 'steadhand_forbidden' );
+		} finally {
+			remove_filter( 'wp_handle_upload', $trash, 10 );
+			$this->remove_attachments_since( $before );
+		}
+
+		$this->assertSame( self::NOT_FOUND, $result->get_error_message() );
+		$this->assertSame( 'trash', get_post_status( $draft ) );
+	}
+
+	/**
+	 * Core's own checks can be changed by filters. The type it returns, the extension it stores under, and the content type of
+	 * what it stored are each checked again, so a change is refused, with no file and no row left.
+	 *
+	 * @return array<string, array{0: callable}>
+	 */
+	public static function core_changes(): array {
+		return array(
+			'a filetype check that reports gif' => array(
+				static function (): void {
+					add_filter(
+						'wp_check_filetype_and_ext',
+						static fn(): array => array(
+							'ext'             => 'gif',
+							'type'            => 'image/gif',
+							'proper_filename' => false,
+						)
+					);
+				},
+			),
+			'a unique name that ends in php'    => array(
+				static function (): void {
+					add_filter( 'wp_unique_filename', static fn(): string => 'stored-name.php' );
+				},
+			),
+			'a stored type of text/html'        => array(
+				static function (): void {
+					add_filter(
+						'wp_handle_upload',
+						static function ( array $upload, string $context ): array {
+							if ( 'sideload' === $context ) {
+								$upload['type'] = 'text/html';
+							}
+
+							return $upload;
+						},
+						10,
+						2
+					);
+				},
+			),
+		);
+	}
+
+	/**
+	 * Each change that core's checks are made to is refused, and leaves no file and no row.
+	 *
+	 * @dataProvider core_changes
+	 *
+	 * @param callable $change Adds the filter that changes core's result.
+	 */
+	public function test_a_change_to_what_core_stored_is_refused_and_nothing_is_left( callable $change ): void {
+		$this->act_as_agent( array( 'steadhand_media' => true ) );
+		$change();
+
+		$result = $this->refused( $this->args( $this->encode_image( 'png' ), 'rechecked.png' ), 'steadhand_error' );
+
+		$this->assertStringContainsString( 'something other than the image that was checked', $result->get_error_message() );
+	}
+
+	/**
+	 * Twenty-four hours of uploads: 100 uploads in the last day are allowed, the 101st is refused as a guardrail block, and
+	 * logged as blocked. Rows are written directly, two hours old, so the per-minute limit does not count them.
+	 */
+	public function test_the_101st_upload_in_a_day_is_refused_and_logged_as_blocked(): void {
+		$agent = $this->act_as_agent( array( 'steadhand_media' => true ) );
+		$this->daily_rows( $agent, DailyUploadLimit::LIMIT, 7200 );
+		$files = $this->uploads_files();
+
+		$result = $this->refused( $this->args( $this->encode_image( 'png' ), 'daily.png' ), 'steadhand_guardrail_blocked' );
+
+		$this->assertSame( 422, $result->get_error_data()['status'] );
+		$this->assertStringContainsString( '100 uploads in 24 hours', $result->get_error_message() );
+		$this->assertSame( $files, $this->uploads_files() );
+		$this->assertSame( 'blocked', $this->latest_row( $agent )['result'] );
+	}
+
+	/**
+	 * Ninety-nine uploads in the day leave room for one more.
+	 */
+	public function test_ninety_nine_uploads_in_a_day_leave_room_for_one_more(): void {
+		$agent = $this->act_as_agent( array( 'steadhand_media' => true ) );
+		$this->daily_rows( $agent, DailyUploadLimit::LIMIT - 1, 7200 );
+
+		$this->assertIsArray( $this->upload( $this->args( $this->encode_image( 'png' ), 'last.png' ) ) );
+	}
+
+	/**
+	 * Uploads by another agent do not count toward this agent's day.
+	 */
+	public function test_another_agents_uploads_do_not_count_toward_the_daily_limit(): void {
+		$other = $this->make_agent( array( 'steadhand_media' => true ) );
+		$this->daily_rows( $other, DailyUploadLimit::LIMIT + 5, 7200 );
+		$this->act_as_agent( array( 'steadhand_media' => true ) );
+
+		$this->assertIsArray( $this->upload( $this->args( $this->encode_image( 'png' ), 'mine.png' ) ) );
+	}
+
+	/**
+	 * Uploads older than 24 hours are not counted.
+	 */
+	public function test_uploads_older_than_a_day_are_not_counted(): void {
+		$agent = $this->act_as_agent( array( 'steadhand_media' => true ) );
+		$this->daily_rows( $agent, DailyUploadLimit::LIMIT, 90000 );
+
+		$this->assertIsArray( $this->upload( $this->args( $this->encode_image( 'png' ), 'fresh.png' ) ) );
+	}
+
+	/**
+	 * If the change log cannot be counted, the upload is refused: the limit fails closed.
+	 */
+	public function test_an_upload_is_refused_when_the_daily_count_cannot_be_read(): void {
+		$this->act_as_agent( array( 'steadhand_media' => true ) );
+		$table = Schema::table();
+		add_filter(
+			'query',
+			static fn( string $query ): string => str_starts_with( $query, 'SELECT COUNT(*) FROM ' . $table )
+				? str_replace( 'FROM ' . $table, 'FROM ' . $table . '_missing', $query )
+				: $query
+		);
+
+		$this->refused( $this->args( $this->encode_image( 'png' ), 'nocount.png' ), 'steadhand_guardrail_blocked' );
+	}
+
+	/**
+	 * Every attachment ID in the table, for a test that may store an attachment without getting its ID back.
+	 *
+	 * @return int[]
+	 */
+	private function attachment_ids(): array {
+		return array_map(
+			'intval',
+			get_posts(
+				array(
+					'post_type'        => 'attachment',
+					'post_status'      => 'any',
+					'numberposts'      => -1,
+					'fields'           => 'ids',
+					'suppress_filters' => true,
+				)
+			)
+		);
+	}
+
+	/**
+	 * Removes every attachment that appeared since $before, with its files. A refused call can store a row and still return an
+	 * error, and then it has no ID to be tracked by.
+	 *
+	 * @param int[] $before Attachment IDs before the call.
+	 */
+	private function remove_attachments_since( array $before ): void {
+		foreach ( array_diff( $this->attachment_ids(), $before ) as $id ) {
+			wp_delete_attachment( $id, true );
+		}
+	}
+
+	/**
+	 * Adds successful upload rows for an agent, all at the same age.
+	 *
+	 * @param int $agent   Agent user ID.
+	 * @param int $count   How many rows.
+	 * @param int $seconds Age of each row, in seconds.
+	 */
+	private function daily_rows( int $agent, int $count, int $seconds ): void {
+		for ( $i = 0; $i < $count; $i++ ) {
+			$this->insert_row(
+				array(
+					'user_id'    => $agent,
+					'ability'    => self::ABILITY,
+					'result'     => 'ok',
+					'created_at' => gmdate( 'Y-m-d H:i:s', time() - $seconds ),
+				)
+			);
+		}
+	}
+
+	/**
+	 * A refused call with a title, alt, caption, filename or parent that is not what the schema allows: the change log keeps the
+	 * digest of the JSON of each one, never the value, and the stored input decodes to those digests.
+	 */
+	public function test_non_text_fields_and_a_non_integer_parent_are_logged_as_digests(): void {
+		$agent = $this->act_as_agent( array( 'steadhand_media' => true ) );
+		$title = array( 'part-one', 'part-two' );
+		$alt   = array_fill( 0, 40, base64_encode( random_bytes( 30 ) ) );
+
+		$this->execute_ability(
+			self::ABILITY,
+			array(
+				'filename'    => 'fields.png',
+				'data_base64' => base64_encode( $this->encode_image( 'png' ) ),
+				'title'       => $title,
+				'alt'         => $alt,
+				'caption'     => 5,
+				'parent'      => '7',
+			)
+		);
+
+		$this->assertSame( 'blocked', $this->latest_row( $agent )['result'] );
+		$logged = json_decode( $this->logged_input( $agent ), true );
+
+		$this->assertSame( PostFields::digest( (string) wp_json_encode( $title ) ), $logged['title'] );
+		$this->assertSame( PostFields::digest( (string) wp_json_encode( $alt ) ), $logged['alt'] );
+		$this->assertSame( PostFields::digest( '5' ), $logged['caption'] );
+		$this->assertSame( PostFields::digest( '"7"' ), $logged['parent'] );
+		$this->assertStringNotContainsString( $alt[0], $this->logged_input( $agent ), 'No part of the alt array may be stored as text.' );
+	}
+
+	/**
+	 * The log form of the payload is its digest, both from log_input() and in the stored row.
+	 */
+	public function test_log_input_returns_the_payload_digest(): void {
+		$png = $this->encode_image( 'png', 3, 3 );
+
+		$logged = ( new UploadMedia() )->log_input(
+			array(
+				'filename'    => 'probe.png',
+				'data_base64' => base64_encode( $png ),
+			)
+		);
+
+		$this->assertSame( PostFields::digest( $png ), $logged['data_base64'] );
+		$this->assertSame( 'probe.png', $logged['filename'] );
 	}
 
 	/**
@@ -501,12 +945,12 @@ final class UploadMediaTest extends PostWriteTestCase {
 	}
 
 	/**
-	 * A side of 12001 pixels is refused, although the pixel count is small.
+	 * A side of 8001 pixels is refused, although the pixel count is small.
 	 */
-	public function test_a_side_over_twelve_thousand_pixels_is_refused(): void {
+	public function test_a_side_over_eight_thousand_pixels_is_refused(): void {
 		$this->act_as_agent( array( 'steadhand_media' => true ) );
 
-		$this->refused( $this->args( $this->encode_image( 'png', 1, 12001 ), 'tall.png' ), 'steadhand_invalid_input' );
+		$this->refused( $this->args( $this->encode_image( 'png', 1, 8001 ), 'tall.png' ), 'steadhand_invalid_input' );
 	}
 
 	/**

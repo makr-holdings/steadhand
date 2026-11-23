@@ -1,7 +1,7 @@
 <?php
 /**
- * Steadhand\Pipeline\MediaWriter, called directly inside a write: the write guard, the argument checks, the cleanup after a
- * failed store, and the featured-image lost-update check.
+ * Steadhand\Pipeline\MediaWriter, called directly inside a write: the write guard, the argument checks, the memory check, the
+ * cleanup after a failed store, the re-checks, and the featured-image lost-update check.
  *
  * @package Steadhand
  */
@@ -27,11 +27,32 @@ final class MediaWriterTest extends PostWriteTestCase {
 	private array $created = array();
 
 	/**
-	 * Removes the filters and attachments this file adds.
+	 * The memory_limit the process started with, restored in tearDown().
+	 *
+	 * @var string
+	 */
+	private static string $memory_limit_before = '';
+
+	/**
+	 * Records the memory limit before each test.
+	 */
+	protected function setUp(): void {
+		parent::setUp();
+
+		self::$memory_limit_before = (string) ini_get( 'memory_limit' );
+	}
+
+	/**
+	 * Removes the filters, the memory limit and the attachments this file adds.
 	 */
 	protected function tearDown(): void {
 		remove_all_filters( 'wp_handle_sideload_prefilter' );
 		remove_all_filters( 'wp_generate_attachment_metadata' );
+		remove_all_filters( 'image_memory_limit' );
+		remove_all_filters( 'wp_check_filetype_and_ext' );
+		remove_all_filters( 'wp_unique_filename' );
+		remove_all_filters( 'wp_handle_upload' );
+		ini_set( 'memory_limit', self::$memory_limit_before ); // phpcs:ignore WordPress.PHP.IniSet.memory_limit_Disallowed -- Restores the limit the test changed.
 
 		foreach ( $this->created as $id ) {
 			if ( null !== get_post( $id ) ) {
@@ -104,7 +125,7 @@ final class MediaWriterTest extends PostWriteTestCase {
 		$rows  = $this->attachment_count();
 
 		try {
-			MediaWriter::create_image( $this->encode_image( 'png' ), 'outside.png', array(), 0 );
+			MediaWriter::create_image( $this->encode_image( 'png' ), 'outside.png', array(), 0, static fn(): bool => true );
 			$this->fail( 'create_image must refuse to run outside a write.' );
 		} catch ( \LogicException $thrown ) {
 			$this->assertStringContainsString( 'write ability', $thrown->getMessage() );
@@ -139,7 +160,7 @@ final class MediaWriterTest extends PostWriteTestCase {
 		);
 
 		foreach ( $cases as $case => $fields ) {
-			$this->assertSame( 'throws:InvalidArgumentException', $this->writer( static fn() => MediaWriter::create_image( $png, 'fields.png', $fields, 0 ) ), $case );
+			$this->assertSame( 'throws:InvalidArgumentException', $this->writer( static fn() => MediaWriter::create_image( $png, 'fields.png', $fields, 0, static fn(): bool => true ) ), $case );
 		}
 
 		$this->assertSame( $files, $this->uploads_files() );
@@ -153,9 +174,9 @@ final class MediaWriterTest extends PostWriteTestCase {
 		$this->act_as_agent( array( 'steadhand_media' => true ) );
 		$png = $this->encode_image( 'png' );
 
-		$this->assertSame( 'throws:InvalidArgumentException', $this->writer( static fn() => MediaWriter::create_image( '', 'empty.png', array(), 0 ) ) );
-		$this->assertSame( 'throws:InvalidArgumentException', $this->writer( static fn() => MediaWriter::create_image( $png, 'parent.png', array(), -1 ) ) );
-		$this->assertSame( 'throws:InvalidArgumentException', $this->writer( static fn() => MediaWriter::create_image( $png, '/', array(), 0 ) ) );
+		$this->assertSame( 'throws:InvalidArgumentException', $this->writer( static fn() => MediaWriter::create_image( '', 'empty.png', array(), 0, static fn(): bool => true ) ) );
+		$this->assertSame( 'throws:InvalidArgumentException', $this->writer( static fn() => MediaWriter::create_image( $png, 'parent.png', array(), -1, static fn(): bool => true ) ) );
+		$this->assertSame( 'throws:InvalidArgumentException', $this->writer( static fn() => MediaWriter::create_image( $png, '/', array(), 0, static fn(): bool => true ) ) );
 		$this->assertSame( 'throws:InvalidArgumentException', $this->writer( static fn() => MediaWriter::set_featured_image( 0, 0, 0, static fn(): bool => true ) ) );
 		$this->assertSame( 'throws:InvalidArgumentException', $this->writer( static fn() => MediaWriter::set_featured_image( 1, -1, 0, static fn(): bool => true ) ) );
 	}
@@ -177,7 +198,8 @@ final class MediaWriterTest extends PostWriteTestCase {
 					'alt'     => 'An alt text',
 					'caption' => 'A caption',
 				),
-				$parent
+				$parent,
+				static fn(): bool => true
 			)
 		);
 
@@ -212,7 +234,7 @@ final class MediaWriterTest extends PostWriteTestCase {
 		$files = $this->uploads_files();
 		$rows  = $this->attachment_count();
 
-		$result = $this->writer( static fn() => MediaWriter::create_image( $png, 'core.png', array(), 0 ) );
+		$result = $this->writer( static fn() => MediaWriter::create_image( $png, 'core.png', array(), 0, static fn(): bool => true ) );
 
 		$this->assertWPError( $result );
 		$this->assertSame( 'steadhand_invalid_input', $result->get_error_code() );
@@ -230,7 +252,7 @@ final class MediaWriterTest extends PostWriteTestCase {
 		$files = $this->uploads_files();
 		$rows  = $this->attachment_count();
 
-		$result = $this->writer( static fn() => MediaWriter::create_image( $png, 'metadata.png', array(), 0 ) );
+		$result = $this->writer( static fn() => MediaWriter::create_image( $png, 'metadata.png', array(), 0, static fn(): bool => true ) );
 
 		$this->assertWPError( $result );
 		$this->assertSame( 'steadhand_error', $result->get_error_code() );
@@ -239,25 +261,91 @@ final class MediaWriterTest extends PostWriteTestCase {
 	}
 
 	/**
-	 * Bytes that do not decode as an image are refused before core stores anything.
+	 * Bytes with a sound header but a damaged body are stored as sent: the writer makes no second decode, and core's metadata
+	 * reports the size from the header, so nothing reports the damage. The container and header checks are the ability's, and
+	 * they refuse a body that is not a valid container (see UploadMediaTest). This pins the writer's behaviour.
 	 */
-	public function test_bytes_that_do_not_decode_are_refused_before_storing(): void {
+	public function test_a_damaged_body_with_a_sound_header_is_stored_as_sent(): void {
 		$this->act_as_agent( array( 'steadhand_media' => true ) );
-		$png   = $this->encode_image( 'png' );
-		$torn  = substr( $png, 0, 33 ) . str_repeat( "\x5a", 64 );
+		$png  = $this->encode_image( 'png' );
+		$torn = substr( $png, 0, 33 ) . str_repeat( "\x5a", 64 );
+
+		$id = $this->writer( static fn() => MediaWriter::create_image( $torn, 'damaged.png', array(), 0, static fn(): bool => true ) );
+
+		$this->assertIsInt( $id );
+		$this->created[] = $id;
+		$this->assertSame( $torn, file_get_contents( get_attached_file( $id ) ) ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_get_contents_file_get_contents -- Reads the probe file this test stored.
+	}
+
+	/**
+	 * A header that claims more memory than the site allows is refused before the file is written: the image needs 3.2 GB, and
+	 * neither the default limit nor a filter raising it to 1 GB can hold it. The filter is set to show it is not enough.
+	 */
+	public function test_an_image_that_needs_more_memory_than_the_site_allows_is_refused_before_anything_is_written(): void {
+		$this->act_as_agent( array( 'steadhand_media' => true ) );
+		ini_set( 'memory_limit', '256M' ); // phpcs:ignore WordPress.PHP.IniSet.memory_limit_Disallowed -- The test sets the limit it checks against.
+		add_filter( 'image_memory_limit', static fn(): string => '1G' );
 		$files = $this->uploads_files();
 		$rows  = $this->attachment_count();
 
-		$result = $this->writer( static fn() => MediaWriter::create_image( $torn, 'torn.png', array(), 0 ) );
+		$huge   = $this->png_header( 20000, 20000 );
+		$result = $this->writer( static fn() => MediaWriter::create_image( $huge, 'memory.png', array(), 0, static fn(): bool => true ) );
+		if ( is_int( $result ) ) {
+			$this->created[] = $result; // Only if the check fails: removed in tearDown().
+		}
 
 		$this->assertWPError( $result );
 		$this->assertSame( 'steadhand_invalid_input', $result->get_error_code() );
+		$this->assertSame( 'The image needs more memory than this site allows, so nothing was stored.', $result->get_error_message() );
 		$this->assertSame( $files, $this->uploads_files() );
 		$this->assertSame( $rows, $this->attachment_count() );
 	}
 
 	/**
-	 * The permission check, run again just before the write: when it refuses, nothing is written.
+	 * The memory limit is core's: with memory_limit at -1 there is none, and a filter can raise the limit to what it says.
+	 */
+	public function test_the_memory_limit_follows_core_and_the_filter_may_only_raise_it(): void {
+		ini_set( 'memory_limit', '-1' ); // phpcs:ignore WordPress.PHP.IniSet.memory_limit_Disallowed -- The test sets the limit it checks against.
+		$this->assertSame( -1, MediaWriter::memory_limit(), 'With no limit in PHP there is none to check against.' );
+
+		ini_set( 'memory_limit', '256M' ); // phpcs:ignore WordPress.PHP.IniSet.memory_limit_Disallowed -- The test sets the limit it checks against.
+		add_filter( 'image_memory_limit', static fn(): string => '1G' );
+		$this->assertSame( 1073741824, MediaWriter::memory_limit(), 'A higher filter value is the limit.' );
+	}
+
+	/**
+	 * The arithmetic of the check: pixels at 8 bytes each, the memory in use, and 64 MB. Tested at limits that are far from the
+	 * memory in use, so the answer does not depend on how much the test process holds.
+	 */
+	public function test_fits_memory_counts_pixels_at_eight_bytes_plus_64_mb(): void {
+		$this->assertTrue( MediaWriter::fits_memory( 16000000, 1, -1 ), 'A limit of -1 is unlimited.' );
+		$this->assertFalse( MediaWriter::fits_memory( 1, 1, 0 ), 'Nothing fits in a limit of 0.' );
+		$this->assertFalse( MediaWriter::fits_memory( 4000, 4000, 128 * 1024 * 1024 ), '128 MB of pixels does not fit in 128 MB.' );
+		$this->assertTrue( MediaWriter::fits_memory( 1, 1, PHP_INT_MAX ), 'A tiny image fits a huge limit.' );
+	}
+
+	/**
+	 * The permission check, run again just before the row is made: when it refuses, nothing is stored, and the file is removed.
+	 */
+	public function test_a_closure_that_refuses_the_row_stores_nothing(): void {
+		$this->act_as_agent( array( 'steadhand_media' => true ) );
+		$png   = $this->encode_image( 'png' );
+		$files = $this->uploads_files();
+		$rows  = $this->attachment_count();
+
+		$result = $this->writer( static fn() => MediaWriter::create_image( $png, 'refused.png', array(), 0, static fn(): bool => false ) );
+		if ( is_int( $result ) ) {
+			$this->created[] = $result; // Only if the refusal fails: removed in tearDown().
+		}
+
+		$this->assertWPError( $result );
+		$this->assertSame( 'steadhand_forbidden', $result->get_error_code() );
+		$this->assertSame( $files, $this->uploads_files() );
+		$this->assertSame( $rows, $this->attachment_count() );
+	}
+
+	/**
+	 * The permission check, run again on the post as it is now: when it refuses, nothing is written.
 	 */
 	public function test_a_closure_that_refuses_writes_nothing(): void {
 		$this->act_as_agent( array( 'steadhand_media' => true ) );
@@ -356,6 +444,47 @@ final class MediaWriterTest extends PostWriteTestCase {
 		}
 
 		$this->assertFalse( $called );
+	}
+
+	/**
+	 * The crash cleanup routine removes the temporary file, the stored file, a generated size and the attachment row. A path
+	 * outside its directory is not removed.
+	 */
+	public function test_the_cleanup_removes_every_file_and_the_row_it_is_given(): void {
+		$id    = $this->set_thumbnail_target();
+		$file  = get_attached_file( $id );
+		$size  = trailingslashit( dirname( $file ) ) . 'steadhand-cleanup-probe-1x1.jpg';
+		$tmp   = trailingslashit( get_temp_dir() ) . 'steadhand-cleanup-probe-' . wp_generate_password( 8, false ) . '.png';
+		$other = trailingslashit( get_temp_dir() ) . 'steadhand-cleanup-outside-' . wp_generate_password( 8, false ) . '.jpg';
+
+		copy( $file, $size );
+		file_put_contents( $tmp, 'temporary' ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents -- A probe file in the temporary directory.
+		file_put_contents( $other, 'outside' ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents -- A probe file outside the uploads directory.
+
+		MediaWriter::remove_unfinished( $tmp, $file, $id, array( $size ) );
+
+		$this->assertFileDoesNotExist( $tmp, 'The temporary file must be removed.' );
+		$this->assertFileDoesNotExist( $file, 'The stored file must be removed.' );
+		$this->assertFileDoesNotExist( $size, 'A generated size must be removed.' );
+		$this->assertNull( get_post( $id ), 'The attachment row must be removed.' );
+		$this->assertFileExists( $other, 'A path outside its directory is never removed.' );
+
+		wp_delete_file( $other );
+		$this->created = array();
+	}
+
+	/**
+	 * The shutdown function does nothing when no write is running, so a finished write is not cleaned up twice.
+	 */
+	public function test_the_shutdown_cleanup_does_nothing_when_no_write_is_running(): void {
+		$this->act_as_agent( array( 'steadhand_media' => true ) );
+		$id   = $this->set_thumbnail_target();
+		$file = get_attached_file( $id );
+
+		MediaWriter::finish_after_fatal();
+
+		$this->assertFileExists( $file );
+		$this->assertNotNull( get_post( $id ) );
 	}
 
 	/**

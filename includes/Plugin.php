@@ -61,6 +61,7 @@ final class Plugin {
 		$engine = new Guardrails\Engine(
 			array(
 				new Guardrails\Rules\RateLimit( $change_log, fn(): array => $this->registry->write_names() ),
+				new Guardrails\Rules\DailyUploadLimit( $change_log ),
 				new Guardrails\Rules\EditLock(),
 			),
 			array(
