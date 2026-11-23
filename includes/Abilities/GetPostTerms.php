@@ -180,7 +180,7 @@ final class GetPostTerms extends Ability {
 			if ( is_wp_error( $terms ) ) {
 				return new \WP_Error( 'steadhand_error', __( 'The ability failed to complete. Try again, or check the site error log.', 'steadhand' ), array( 'status' => 500 ) );
 			}
-			$total = self::assigned_count( (int) $post->ID, $name );
+			$total = TermReader::assigned_count( (int) $post->ID, $name );
 
 			$object       = get_taxonomy( $name );
 			$taxonomies[] = array(
@@ -198,26 +198,6 @@ final class GetPostTerms extends Ability {
 		return array(
 			'id'         => (int) $post->ID,
 			'taxonomies' => $taxonomies,
-		);
-	}
-
-	/**
-	 * How many terms of one taxonomy a post has, counted in the database. wp_get_object_terms() cannot return a count
-	 * (fields => count fails in core), and the terms themselves are not loaded for it.
-	 *
-	 * @param int    $post_id  Post ID.
-	 * @param string $taxonomy Taxonomy name, already checked against the allowlist.
-	 */
-	private static function assigned_count( int $post_id, string $taxonomy ): int {
-		global $wpdb;
-
-		// Not cached on purpose: a count must reflect the term assignments made just before this call.
-		return (int) $wpdb->get_var( // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching -- See the comment above.
-			$wpdb->prepare(
-				"SELECT COUNT(*) FROM {$wpdb->term_relationships} AS tr INNER JOIN {$wpdb->term_taxonomy} AS tt ON tt.term_taxonomy_id = tr.term_taxonomy_id WHERE tr.object_id = %d AND tt.taxonomy = %s",
-				$post_id,
-				$taxonomy
-			)
 		);
 	}
 }

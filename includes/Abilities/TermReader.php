@@ -12,7 +12,7 @@ namespace Steadhand\Abilities;
 defined( 'ABSPATH' ) || exit;
 
 /**
- * Helpers shared by list-terms and get-post-terms. Holds no state.
+ * Helpers shared by the term tools: list-terms, get-post-terms and set-post-terms. Holds no state.
  *
  * Output rules that the term tools follow, the same as the post tools:
  * - Names and labels are plain text (entities decoded), through PostReader::plain_text().
@@ -66,6 +66,49 @@ final class TermReader {
 			'slug'   => PostReader::utf8( (string) $term->slug ),
 			'parent' => (int) $term->parent,
 		);
+	}
+
+	/**
+	 * How many terms of one taxonomy a post has, counted in the database. wp_get_object_terms() cannot return a count
+	 * (fields => count fails in core), and the terms themselves are not loaded for it.
+	 *
+	 * @param int    $post_id  Post ID.
+	 * @param string $taxonomy Taxonomy name, already checked against the allowlist.
+	 */
+	public static function assigned_count( int $post_id, string $taxonomy ): int {
+		global $wpdb;
+
+		// Not cached on purpose: a count must reflect the term assignments made just before this call.
+		return (int) $wpdb->get_var( // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching -- See the comment above.
+			$wpdb->prepare(
+				"SELECT COUNT(*) FROM {$wpdb->term_relationships} AS tr INNER JOIN {$wpdb->term_taxonomy} AS tt ON tt.term_taxonomy_id = tr.term_taxonomy_id WHERE tr.object_id = %d AND tt.taxonomy = %s",
+				$post_id,
+				$taxonomy
+			)
+		);
+	}
+
+	/**
+	 * The term IDs a post has in one taxonomy, ascending, with no repeats. The object-term cache for the post is cleared
+	 * first, so the IDs reflect the assignments made just before this call. Callers must bound the count first (see
+	 * assigned_count()).
+	 *
+	 * @param int    $post_id  Post ID.
+	 * @param string $taxonomy Taxonomy name, already checked against the allowlist.
+	 * @return int[]|\WP_Error
+	 */
+	public static function assigned_ids( int $post_id, string $taxonomy ): array|\WP_Error {
+		clean_object_term_cache( array( $post_id ), (string) get_post_type( $post_id ) );
+
+		$ids = wp_get_object_terms( $post_id, $taxonomy, array( 'fields' => 'ids' ) );
+		if ( is_wp_error( $ids ) ) {
+			return $ids;
+		}
+
+		$ids = array_values( array_unique( array_map( 'intval', $ids ) ) );
+		sort( $ids, SORT_NUMERIC );
+
+		return $ids;
 	}
 
 	/**
