@@ -404,7 +404,7 @@ final class UploadMedia extends Ability {
 	 */
 	public function execute( array $input ): array|\WP_Error {
 		if ( ! $this->authorize_object( $input ) ) {
-			return self::forbidden();
+			return PostReader::not_found();
 		}
 
 		$checked = $this->validate_input( $input );
@@ -488,15 +488,6 @@ final class UploadMedia extends Ability {
 		}
 
 		return $fields;
-	}
-
-	/**
-	 * The refusal for an object the caller may not edit, with the one text the pipeline uses for the same object.
-	 *
-	 * @return \WP_Error
-	 */
-	private static function forbidden(): \WP_Error {
-		return new \WP_Error( 'steadhand_forbidden', __( 'Not found, or this agent may not access it.', 'steadhand' ), array( 'status' => 403 ) );
 	}
 
 	/**
