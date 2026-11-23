@@ -240,6 +240,9 @@ final class EditBlocksRegressionTest extends PostWriteTestCase {
 		$this->assertTrue( $out['changed'] );
 		$this->assertSame( $names, self::names( (string) get_post( $post )->post_content ) );
 		$this->assertSame( $flagged, $out['content_modified_on_save'] );
+		if ( str_contains( $markup, 'wp:more' ) || str_contains( $markup, 'wp:nextpage' ) ) {
+			$this->assert_display_is_safe( $post );
+		}
 	}
 
 
@@ -394,7 +397,6 @@ final class EditBlocksRegressionTest extends PostWriteTestCase {
 		$after = self::names( (string) get_post( $post )->post_content );
 		$this->assertSame( array(), array_diff( $after, $names ), 'The edit must not create a block name the stored content did not have.' );
 	}
-
 
 	/**
 	 * Attribute shapes that must be filtered, or refused, and never stored raw.
@@ -607,5 +609,192 @@ final class EditBlocksRegressionTest extends PostWriteTestCase {
 			)
 		);
 		$this->assertTrue( $out['changed'] );
+	}
+
+	/**
+	 * The admin content with a core/more block, and on one line after a paragraph, an inert attribute that holds markup.
+	 *
+	 * @return string
+	 */
+	private static function display_fixture(): string {
+		return '<!-- wp:more -->' . "\n" . '<!--more-->' . "\n" . '<!-- /wp:more -->' . "\n\n" . self::paragraph( 'One' ) . '<!-- wp:html --><b>old</b><!-- /wp:html --><p title="x --> <img src=x onerror=alert(9)>">admin</p>';
+	}
+
+	/**
+	 * Asserts what WordPress shows for the post, with and without the more tag: no event-handler attribute, and no block that is
+	 * neither stored nor sent.
+	 *
+	 * @param int $post Post ID.
+	 */
+	private function assert_display_is_safe( int $post ): void {
+		global $more;
+
+		$stored_names = self::names( (string) get_post( $post )->post_content );
+		setup_postdata( get_post( $post ) );
+		try {
+			foreach ( array( 0, 1 ) as $value ) {
+				$more  = $value; // phpcs:ignore WordPress.WP.GlobalVariablesOverride.Prohibited -- get_the_content() reads core's own global.
+				$shown = get_the_content();
+				$this->assertDoesNotMatchRegularExpression( '/\son[a-z]+\s*=/i', do_blocks( $shown ), "No event handler at display, more=$value." );
+				$this->assertSame( array(), array_diff( self::names( $shown ), $stored_names ), "No block that was not stored, more=$value." );
+			}
+		} finally {
+			wp_reset_postdata();
+		}
+	}
+
+	/**
+	 * A void core/more delimiter at a path where the display pattern would run past it into the admin's bytes is refused.
+	 *
+	 * @return array<string, array{0: string}>
+	 */
+	public static function void_more_spellings(): array {
+		return array(
+			'wp:more'         => array( '<!-- wp:more /-->' ),
+			'wp:more-x'       => array( '<!-- wp:more-x /-->' ),
+			'wp:moreplugin/x' => array( '<!-- wp:moreplugin/x {"a":1} /-->' ),
+		);
+	}
+
+	/**
+	 * A sent void delimiter that display would extend into admin bytes is refused, and the row is unchanged.
+	 *
+	 * @dataProvider void_more_spellings
+	 *
+	 * @param string $delimiter The void delimiter the agent sends.
+	 */
+	public function test_a_sent_void_more_delimiter_that_display_would_extend_is_refused_and_the_row_is_unchanged( string $delimiter ): void {
+		$post   = $this->raw_post( self::display_fixture() );
+		$before = $this->row( $post );
+
+		$result = $this->call(
+			$post,
+			array(
+				array(
+					'op'     => 'replace',
+					'path'   => '1',
+					'name'   => 'core/paragraph',
+					'markup' => $delimiter,
+				),
+			)
+		);
+
+		$this->assertSame( 'steadhand_refused_unsupported_markup', $this->refusal_code( $result ) );
+		$this->assertStringContainsString( 'drop part of the content', $result->get_error_message() );
+		$this->assertSame( $before, $this->row( $post ) );
+	}
+
+	public function test_an_insert_of_a_void_more_delimiter_is_accepted_because_the_join_rule_puts_a_newline_before_the_next_block(): void {
+		// The display pattern does not cross a newline, and the separator the join rule adds puts one between the inserted
+		// delimiter and the admin's bytes. So display cannot reach them, and the display check passes.
+		$post = $this->raw_post( self::display_fixture() );
+
+		$out = $this->output_of(
+			self::TOOL_NAME,
+			array(
+				'id'         => $post,
+				'operations' => array(
+					array(
+						'op'     => 'insert_after',
+						'path'   => '1',
+						'name'   => 'core/paragraph',
+						'markup' => '<!-- wp:more /-->',
+					),
+				),
+			)
+		);
+
+		$this->assertTrue( $out['changed'] );
+		$this->assert_display_is_safe( $post );
+	}
+
+	public function test_a_void_more_delimiter_with_the_more_block_supplied_in_the_same_call_is_refused_and_the_row_is_unchanged(): void {
+		$post   = $this->raw_post( self::display_fixture() );
+		$before = $this->row( $post );
+
+		$result = $this->call(
+			$post,
+			array(
+				array(
+					'op'     => 'replace',
+					'path'   => '1',
+					'name'   => 'core/paragraph',
+					'markup' => '<!-- wp:more /-->',
+				),
+				array(
+					'op'     => 'insert_after',
+					'path'   => '0',
+					'name'   => 'core/more',
+					'markup' => '<!-- wp:more -->' . "\n" . '<!--more-->' . "\n" . '<!-- /wp:more -->',
+				),
+			)
+		);
+
+		$this->assertSame( 'steadhand_refused_unsupported_markup', $this->refusal_code( $result ) );
+		$this->assertSame( $before, $this->row( $post ) );
+	}
+
+	public function test_a_stored_void_more_delimiter_on_the_line_of_a_sent_run_is_refused_and_the_row_is_unchanged(): void {
+		// The stored void delimiter is kept; the sent paragraph carries the " -->" that display would stop at.
+		$post   = $this->raw_post( '<!-- wp:more /-->' . self::paragraph( 'One' ) );
+		$before = $this->row( $post );
+
+		$result = $this->call(
+			$post,
+			array(
+				array(
+					'op'     => 'replace',
+					'path'   => '1',
+					'name'   => 'core/paragraph',
+					'markup' => self::paragraph( 'Two' ),
+				),
+			)
+		);
+
+		$this->assertSame( 'steadhand_refused_unsupported_markup', $this->refusal_code( $result ) );
+		$this->assertSame( $before, $this->row( $post ) );
+	}
+
+	public function test_a_void_more_inside_sent_markup_that_display_would_extend_is_refused_as_invalid_input(): void {
+		$post   = $this->raw_post( self::paragraph( 'One' ) );
+		$before = $this->row( $post );
+
+		$result = $this->call(
+			$post,
+			array(
+				array(
+					'op'     => 'replace',
+					'path'   => '0',
+					'name'   => 'core/paragraph',
+					'markup' => '<!-- wp:more /-->' . self::paragraph( 'x' ),
+				),
+			)
+		);
+
+		$this->assertSame( 'steadhand_invalid_input', $this->refusal_code( $result ) );
+		$this->assertStringContainsString( 'drop part of the content', $result->get_error_message() );
+		$this->assertSame( $before, $this->row( $post ) );
+	}
+
+	public function test_a_sent_wp_more_block_is_accepted_and_display_shows_no_event_handler_or_foreign_block(): void {
+		$post = $this->raw_post( self::paragraph( 'One' ) . "\n\n" . self::paragraph( 'Two' ) );
+
+		$out = $this->output_of(
+			self::TOOL_NAME,
+			array(
+				'id'         => $post,
+				'operations' => array(
+					array(
+						'op'     => 'replace',
+						'path'   => '1',
+						'name'   => 'core/paragraph',
+						'markup' => '<!-- wp:more -->' . "\n" . '<!--more-->' . "\n" . '<!-- /wp:more -->',
+					),
+				),
+			)
+		);
+
+		$this->assertTrue( $out['changed'] );
+		$this->assert_display_is_safe( $post );
 	}
 }

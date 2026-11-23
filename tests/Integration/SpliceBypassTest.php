@@ -510,6 +510,97 @@ final class SpliceBypassTest extends PostWriteTestCase {
 		}
 	}
 
+	/**
+	 * Removing a block whose open textarea would leave the following script inert-looking is refused, and the row is unchanged.
+	 */
+	public function test_removing_the_block_that_opens_a_textarea_before_a_script_is_refused_and_the_row_is_unchanged(): void {
+		$post   = $this->raw_post( "<!-- wp:html -->\n<textarea>\n<!-- /wp:html -->\n\n<!-- wp:html -->\n<script>alert(1)</script>\n<!-- /wp:html -->" );
+		$before = $this->row( $post );
+
+		$result = $this->call(
+			$post,
+			array(
+				array(
+					'op'   => 'remove',
+					'path' => '0',
+					'name' => 'core/html',
+				),
+			)
+		);
+
+		$this->assertSame( 'steadhand_refused_unsupported_markup', $this->refusal_code( $result ) );
+		$this->assertSame( $before, $this->row( $post ) );
+	}
+
+	/**
+	 * Replacing a block whose open textarea would leave the following script inert-looking is refused, and the row is unchanged.
+	 */
+	public function test_replacing_the_block_that_opens_a_textarea_before_a_script_is_refused_and_the_row_is_unchanged(): void {
+		$post   = $this->raw_post( "<!-- wp:html -->\n<textarea>\n<!-- /wp:html -->\n\n<!-- wp:html -->\n<script>alert(1)</script>\n<!-- /wp:html -->" );
+		$before = $this->row( $post );
+
+		$result = $this->call(
+			$post,
+			array(
+				array(
+					'op'     => 'replace',
+					'path'   => '0',
+					'name'   => 'core/html',
+					'markup' => "<!-- wp:html -->\n<p>New</p>\n<!-- /wp:html -->",
+				),
+			)
+		);
+
+		$this->assertSame( 'steadhand_refused_unsupported_markup', $this->refusal_code( $result ) );
+		$this->assertSame( $before, $this->row( $post ) );
+	}
+
+	/**
+	 * A break comment that is not the sole inner content of its owner core/more or core/nextpage block is refused.
+	 */
+	public function test_a_break_comment_that_is_not_the_sole_inner_content_of_its_owner_is_refused_and_the_row_is_unchanged(): void {
+		$forms = array(
+			'core/more > core/group > comment' => '<!-- wp:more -->' . "\n" . '<!-- wp:group -->' . "\n" . '<div class="wp-block-group"><!--more--></div>' . "\n" . '<!-- /wp:group -->' . "\n" . '<!-- /wp:more -->',
+			'nextpage inside more'             => '<!-- wp:more -->' . "\n" . '<!--more-->' . "\n" . '<!-- wp:nextpage -->' . "\n" . '<!--nextpage-->' . "\n" . '<!-- /wp:nextpage -->' . "\n" . '<!-- /wp:more -->',
+			'more comment in nextpage'         => '<!-- wp:nextpage -->' . "\n" . '<!--more-->' . "\n" . '<!-- /wp:nextpage -->',
+			'comment in more attribute'        => '<!-- wp:more {"x":"<!--more-->"} -->' . "\n" . '<!--more-->' . "\n" . '<!-- /wp:more -->',
+		);
+
+		foreach ( $forms as $label => $markup ) {
+			$post   = $this->raw_post( self::paragraph( 'One' ) . "\n\n" . self::paragraph( 'Two' ) );
+			$before = $this->row( $post );
+
+			$result = $this->call( $post, array( $this->replace( '1', self::paragraph( 'Two' ) . "\n" . $markup ) ) );
+
+			$this->assertSame( 'steadhand_invalid_input', $this->refusal_code( $result ), $label );
+			$this->assertSame( $before, $this->row( $post ), $label );
+		}
+	}
+
+	/**
+	 * Removing a block between closed paragraphs is not refused by the join check.
+	 */
+	public function test_removing_a_block_between_closed_paragraphs_is_accepted(): void {
+		$post = $this->raw_post( self::paragraph( 'One' ) . "\n\n" . self::paragraph( 'Two' ) . "\n\n" . self::paragraph( 'Three' ) );
+
+		$out = $this->output_of(
+			'steadhand-edit-blocks',
+			array(
+				'id'         => $post,
+				'operations' => array(
+					array(
+						'op'   => 'remove',
+						'path' => '1',
+						'name' => 'core/paragraph',
+					),
+				),
+			)
+		);
+
+		$this->assertTrue( $out['changed'] );
+		$this->assertStringNotContainsString( 'Two', (string) get_post( $post )->post_content );
+	}
+
 	public function test_an_ordinary_html_comment_in_stored_bytes_is_kept_and_the_edit_goes_ahead(): void {
 		$post = $this->raw_post( '<!-- note -->' . "\n\n" . self::paragraph( 'Two' ) );
 
@@ -609,6 +700,7 @@ final class SpliceBypassTest extends PostWriteTestCase {
 	}
 
 	public function test_a_css_value_with_an_escaped_quote_is_stripped(): void {
+		$this->skip_without_custom_css_strip();
 		$post = $this->raw_post( self::paragraph( 'One' ) . "\n\n" . self::paragraph( 'Two' ) );
 		$css  = '<!-- wp:paragraph {"style":{"css":"x\\"y"}} -->' . "\n<p>Css</p>\n" . '<!-- /wp:paragraph -->';
 
@@ -625,6 +717,7 @@ final class SpliceBypassTest extends PostWriteTestCase {
 		$this->assertStringNotContainsString( 'u0022', $stored );
 	}
 	public function test_an_agent_who_may_edit_css_still_has_the_css_stripped_from_its_sent_blocks(): void {
+		$this->skip_without_custom_css_strip();
 		$post = $this->raw_post( self::paragraph( 'One' ) . "\n\n" . self::paragraph( 'Two' ) );
 		$this->act_as_agent( array( 'edit_css' => true ) );
 

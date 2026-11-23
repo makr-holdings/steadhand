@@ -266,6 +266,37 @@ final class EditBlocksSafetyTest extends PostWriteTestCase {
 		remove_all_filters( 'wp_revisions_to_keep' );
 	}
 
+	public function test_a_result_that_changes_between_the_guard_and_the_plan_is_refused_and_nothing_is_written(): void {
+		$post   = $this->raw_post( self::paragraph( 'One' ) . "\n\n" . self::paragraph( 'Two' ) );
+		$before = $this->row( $post );
+		// The guardrails run after the guard read the content (NEW) and before the plan builds its preview (NEW2).
+		$stage  = 'NEW';
+		$filter = static function ( string $content ) use ( &$stage ): string {
+			return $content . '<em>' . $stage . '</em>';
+		};
+		add_filter(
+			'steadhand_rate_limit_per_minute',
+			static function ( $limit ) use ( &$stage ) {
+				$stage = 'NEW2';
+
+				return $limit;
+			},
+			10,
+			1
+		);
+
+		$this->with_save_filter(
+			$filter,
+			function () use ( $post, $before ): void {
+				$result = $this->replace( $post, '1', 'core/paragraph', self::paragraph( 'Changed' ) );
+
+				$this->assertSame( 'steadhand_update_failed', $this->refusal_code( $result ) );
+				$this->assertSame( $before, $this->row( $post ) );
+			}
+		);
+		remove_all_filters( 'steadhand_rate_limit_per_minute' );
+	}
+
 	public function test_removing_the_only_block_of_a_post_with_no_title_or_excerpt_is_refused_before_the_write(): void {
 		$post = $this->admin_post(
 			array(
@@ -331,6 +362,7 @@ final class EditBlocksSafetyTest extends PostWriteTestCase {
 	}
 
 	public function test_a_custom_css_strip_is_put_in_place_for_a_sent_block_when_core_has_removed_it(): void {
+		$this->skip_without_custom_css_strip();
 		$post = $this->raw_post( self::paragraph( 'One' ) . "\n\n" . self::paragraph( 'Two' ) );
 		wp_custom_css_remove_filters();
 

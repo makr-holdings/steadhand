@@ -50,6 +50,14 @@ final class EditBlocks extends Ability {
 	private array $guarded = array();
 
 	/**
+	 * SHA-256 of the content guarded_content() returned, by post ID: the content the guardrails checked. An empty string when it
+	 * returned the per-operation markup instead. plan() checks its own preview against it.
+	 *
+	 * @var array<int, string>
+	 */
+	private array $guarded_preview = array();
+
+	/**
 	 * What snapshot() found for each call, by post ID. execute() takes its entry.
 	 *
 	 * Each entry: 'refusal' (WP_Error|null), 'content' (string, the new content), 'stored_hash' (string, the SHA-256 of the
@@ -276,7 +284,7 @@ final class EditBlocks extends Ability {
 	 */
 	public function guarded_content( array $input ): array {
 		$post_id = (int) $input['id'];
-		unset( $this->guarded[ $post_id ], $this->plans[ $post_id ] );
+		unset( $this->guarded[ $post_id ], $this->guarded_preview[ $post_id ], $this->plans[ $post_id ] );
 		$this->update->discard( $post_id );
 
 		clean_post_cache( $post_id );
@@ -293,11 +301,14 @@ final class EditBlocks extends Ability {
 		if ( ! is_wp_error( $segments ) ) {
 			$content = PostWriter::assemble( $post_id, $stored, $segments );
 			if ( ! is_wp_error( $content ) ) {
+				$this->guarded_preview[ $post_id ] = hash( 'sha256', $content );
+
 				return array( 'content' => $content );
 			}
 		}
 
-		$fields = array();
+		$this->guarded_preview[ $post_id ] = '';
+		$fields                            = array();
 		foreach ( array_values( $operations ) as $number => $operation ) {
 			if ( is_array( $operation ) && isset( $operation['markup'] ) && is_string( $operation['markup'] ) ) {
 				$fields[ 'operations.' . $number . '.markup' ] = $operation['markup'];
@@ -317,11 +328,12 @@ final class EditBlocks extends Ability {
 	 * @throws \Throwable When called outside a write call, or when update-post's snapshot throws. This call's entries are dropped first.
 	 */
 	public function snapshot( array $input ): array {
-		$post_id = (int) $input['id'];
-		$guard   = $this->guarded[ $post_id ] ?? null;
-		unset( $this->guarded[ $post_id ], $this->plans[ $post_id ] );
+		$post_id       = (int) $input['id'];
+		$guard         = $this->guarded[ $post_id ] ?? null;
+		$guard_preview = $this->guarded_preview[ $post_id ] ?? null;
+		unset( $this->guarded[ $post_id ], $this->guarded_preview[ $post_id ], $this->plans[ $post_id ] );
 
-		$plan = $this->plan( $input, $guard );
+		$plan = $this->plan( $input, $guard, $guard_preview );
 		if ( null !== $plan['refusal'] ) {
 			$this->plans[ $post_id ] = $plan;
 
@@ -461,9 +473,10 @@ final class EditBlocks extends Ability {
 	 *
 	 * @param array<string, mixed> $input Validated, sanitized input.
 	 * @param string|null          $guard SHA-256 of the stored content the guardrails read, or null when they did not.
+	 * @param string|null          $guard_preview SHA-256 of the content the guardrails checked, or null or empty when none was recorded.
 	 * @return array{refusal: \WP_Error|null, content: string, stored_hash: string, changed: bool, segments: array<int, array<string, mixed>>, altered: bool, preview_sha256: string}
 	 */
-	private function plan( array $input, ?string $guard ): array {
+	private function plan( array $input, ?string $guard, ?string $guard_preview ): array {
 		$post_id = (int) $input['id'];
 		clean_post_cache( $post_id );
 
@@ -486,6 +499,12 @@ final class EditBlocks extends Ability {
 		$preview = PostWriter::assemble_report( $post_id, $stored, $segments );
 		if ( is_wp_error( $preview ) ) {
 			return self::refused( $preview );
+		}
+
+		// The guardrails checked the content guarded_content() returned. This preview must be that content, or a filter changed
+		// its output between the two steps. No recorded hash (the per-operation fallback) also refuses.
+		if ( null === $guard_preview || '' === $guard_preview || ! hash_equals( $guard_preview, hash( 'sha256', $preview['content'] ) ) ) {
+			return self::refused( PostWriter::preview_changed() );
 		}
 
 		if ( $preview['content'] === $stored ) {

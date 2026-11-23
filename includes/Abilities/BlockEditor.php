@@ -47,6 +47,13 @@ final class BlockEditor {
 	/** The HTML comments WordPress reads as post breaks: "<!--more-->" (as core's own pattern), "<!--nextpage-->", "<!--noteaser-->". */
 	private const ALLOWED_COMMENT = '/<!--more(.*?)?-->|<!--nextpage-->|<!--noteaser-->/';
 
+	/**
+	 * The pattern get_the_content() uses to remove core/more delimiters when it shows a post. Copied from
+	 * wp-includes/post-template.php, get_the_content() (WordPress 7.x, the same line in 6.9): '/<!-- \/?wp:more(.*?) -->/'. Keep it
+	 * identical, so that Steadhand checks what WordPress does at display time.
+	 */
+	public const DISPLAY_MORE = '/<!-- \/?wp:more(.*?) -->/';
+
 	/** Bytes that count as whitespace when deciding whether a separator is needed. */
 	private const WHITESPACE = " \t\n\r\f\v";
 
@@ -261,6 +268,21 @@ final class BlockEditor {
 					sprintf( __( 'The markup of operation %d contains an HTML comment that is not a block comment. Send complete blocks only; use the core/more or core/nextpage block for a break.', 'steadhand' ), $where )
 				);
 			}
+
+			if ( false !== self::display_split_problem(
+				$markup,
+				array(
+					array(
+						'at'   => 0,
+						'text' => $markup,
+					),
+				)
+			) ) {
+				return self::invalid(
+					/* translators: %d: the number of the operation, counting from 1. */
+					sprintf( __( 'The markup of operation %d would make WordPress drop part of the content when it shows the post. Send the core/more block with its opening and closing comments, not as a self-closing block.', 'steadhand' ), $where )
+				);
+			}
 		}
 
 		foreach ( $paths as $i => $path ) {
@@ -393,6 +415,43 @@ final class BlockEditor {
 	}
 
 	/**
+	 * Whether a break comment is the sole inner content of its block: it lies between the block's opening and closing delimiters,
+	 * and the whole inner content (whitespace trimmed) is the break as core serialises it. A core/more block holds "<!--more-->" or
+	 * "<!--more text-->", optionally followed by "<!--noteaser-->" (core's more block, with customText and noTeaser). A core/nextpage
+	 * block holds "<!--nextpage-->". Anything else inside the block, or a comment inside a delimiter's attributes, is refused.
+	 *
+	 * @param string                                                $text  The text.
+	 * @param array<int, array{start: int, end: int, text: string}> $tokens The block delimiters of the text.
+	 * @param array<string, mixed>                                  $owner The innermost node that holds the comment.
+	 * @param string                                                $kind  The block name the comment needs: core/more or core/nextpage.
+	 * @param int                                                   $start Start of the comment.
+	 * @param int                                                   $end   End of the comment.
+	 * @return bool
+	 */
+	private static function sole_break_content( string $text, array $tokens, array $owner, string $kind, int $start, int $end ): bool {
+		$open  = null;
+		$close = null;
+		foreach ( $tokens as $token ) {
+			if ( $token['start'] === $owner['start'] ) {
+				$open = $token;
+			}
+			if ( $token['end'] === $owner['end'] && $token['start'] > $owner['start'] ) {
+				$close = $token;
+			}
+		}
+		if ( null === $open || null === $close || $start < $open['end'] || $end > $close['start'] ) {
+			return false;
+		}
+
+		$inner   = substr( $text, $open['end'], $close['start'] - $open['end'] );
+		$pattern = 'core/nextpage' === $kind
+			? '/\A\s*<!--nextpage-->\s*\z/'
+			: '/\A\s*<!--more( [^>\n]*)?-->(\s*<!--noteaser-->)?\s*\z/';
+
+		return 1 === preg_match( $pattern, $inner );
+	}
+
+	/**
 	 * Whether a text has no stray HTML comment (see has_stray_comment()). Returns true when it has none, and false when it has
 	 * one or when PCRE fails, so a caller refuses in either case.
 	 *
@@ -401,6 +460,58 @@ final class BlockEditor {
 	 */
 	public static function has_comment_check( string $text ): bool {
 		return false === self::has_stray_comment( $text );
+	}
+
+	/**
+	 * Whether a match of core's display-time pattern overlaps a sent run without being exactly one whole block delimiter token.
+	 *
+	 * Core's get_the_content() removes the core/more delimiters from the content it shows (see DISPLAY_MORE), and the pattern is not
+	 * anchored to the end of a delimiter, so a void delimiter can run on to the next " -->" and take the bytes in between with it.
+	 * A match that overlaps a sent run is allowed only when it is exactly one whole delimiter token of the content. Null when PCRE
+	 * fails, and the caller refuses.
+	 *
+	 * @param string                                   $content The content to check.
+	 * @param array<int, array{at: int, text: string}> $runs    Sent runs, with the offset each starts at in $content.
+	 * @return bool|null True when a match is a problem.
+	 */
+	public static function display_split_problem( string $content, array $runs ): ?bool {
+		$matches = null;
+		if ( false === preg_match_all( self::DISPLAY_MORE, $content, $matches, PREG_OFFSET_CAPTURE ) || PREG_NO_ERROR !== preg_last_error() ) {
+			return null;
+		}
+		$tokens = self::tokens( $content );
+		if ( null === $tokens ) {
+			return null;
+		}
+
+		foreach ( $matches[0] as $match ) {
+			$start   = $match[1];
+			$end     = $start + strlen( $match[0] );
+			$overlap = false;
+			foreach ( $runs as $run ) {
+				$run_end = $run['at'] + strlen( $run['text'] );
+				if ( $start < $run_end && $run['at'] < $end ) {
+					$overlap = true;
+					break;
+				}
+			}
+			if ( ! $overlap ) {
+				continue;
+			}
+
+			$whole = false;
+			foreach ( $tokens as $token ) {
+				if ( $token['start'] === $start && $token['end'] === $end ) {
+					$whole = true;
+					break;
+				}
+			}
+			if ( ! $whole ) {
+				return true;
+			}
+		}
+
+		return false;
 	}
 
 	/**
@@ -470,7 +581,7 @@ final class BlockEditor {
 			}
 
 			$wanted = str_starts_with( $match[0], '<!--nextpage' ) ? 'core/nextpage' : 'core/more';
-			if ( null !== $owner && $wanted === $owner['name'] ) {
+			if ( null !== $owner && $wanted === $owner['name'] && self::sole_break_content( $text, $tokens, $owner, $wanted, $start, $end ) ) {
 				$marked[] = array(
 					'start' => $start,
 					'end'   => $end,

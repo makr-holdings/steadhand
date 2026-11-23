@@ -157,14 +157,11 @@ final class PostWriter {
 			return $content;
 		}
 
-		// The guardrails checked the content this hash was taken from. A different content now means a filter gave a different
-		// result for the same markup, so nothing is written.
+		// The plan took this hash from its own preview, and checked that preview against the content the guardrails saw. So the
+		// content assembled here must be the one the guardrails saw. A different result means a filter gave a different output
+		// between the steps, so nothing is written.
 		if ( ! hash_equals( $preview_sha256, hash( 'sha256', $content ) ) ) {
-			return new \WP_Error(
-				'steadhand_update_failed',
-				__( 'The content WordPress produced for this save was not the same as the content that was checked, so nothing was changed. Try again.', 'steadhand' ),
-				array( 'status' => 500 )
-			);
+			return self::preview_changed();
 		}
 
 		return self::save(
@@ -271,6 +268,19 @@ final class PostWriter {
 		} finally {
 			remove_filter( 'wp_insert_post_data', $mirror, PHP_INT_MAX );
 		}
+	}
+
+	/**
+	 * The refusal for content that WordPress produced differently from the content that was checked. The one text for it.
+	 *
+	 * @return \WP_Error
+	 */
+	public static function preview_changed(): \WP_Error {
+		return new \WP_Error(
+			'steadhand_update_failed',
+			__( 'The content WordPress produced for this save was not the same as the content that was checked, so nothing was changed. Try again.', 'steadhand' ),
+			array( 'status' => 500 )
+		);
 	}
 
 	/**
@@ -447,33 +457,34 @@ final class PostWriter {
 			return self::unsupported( __( 'Steadhand cannot read the block structure of this post the way WordPress does, so it cannot edit single blocks in it. Nothing was changed. Use steadhand/update-post with the complete new content instead.', 'steadhand' ) );
 		}
 
-		$content       = '';
-		$altered       = false;
-		$kept          = array();
-		$sent          = array();
-		$last_kept_end = null;
+		$content    = '';
+		$altered    = false;
+		$kept       = array();
+		$sent       = array();
+		$stored_end = 0;
 		foreach ( $runs as $run ) {
 			if ( 'kept' === $run['type'] ) {
-				// Two kept ranges with a removed span between them are joined here. The bytes on either side were not adjacent in
-				// the stored content, so the join must not leave HTML open, as it would for a sent run.
-				if ( null !== $last_kept_end && $run['start'] !== $last_kept_end && self::leaves_html_open( $content ) ) {
+				// A kept range that does not start where the previous kept range ended follows a removed or replaced span, or a sent
+				// run. The bytes on either side were not adjacent in the stored content. Two things must hold: the assembled content
+				// before the join leaves no HTML open, and so does the stored content before the range, because the removed span may
+				// have been what kept the range inert (a textarea, say, that the following script was inside).
+				if ( $run['start'] !== $stored_end && ( self::leaves_html_open( $content ) || self::leaves_html_open( substr( $stored, 0, $run['start'] ) ) ) ) {
 					return self::unsupported( __( 'The stored content leaves HTML open where the edit removes the content between two of its parts, for example a script, a comment or an attribute that is not closed. Steadhand cannot tell how the content after the removal would be read. Nothing was changed. A person must fix the post in the block editor.', 'steadhand' ) );
 				}
 
-				$kept[]        = array(
+				$kept[]     = array(
 					'start'       => $run['start'],
 					'end'         => $run['start'] + $run['length'],
 					'final_start' => strlen( $content ),
 				);
-				$content      .= substr( $stored, $run['start'], $run['length'] );
-				$last_kept_end = $run['start'] + $run['length'];
+				$content   .= substr( $stored, $run['start'], $run['length'] );
+				$stored_end = $run['start'] + $run['length'];
 				continue;
 			}
 
 			if ( '' === $run['text'] ) {
 				continue;
 			}
-			$last_kept_end = null;
 
 			if ( self::leaves_html_open( $content ) ) {
 				return self::unsupported( __( 'The stored content leaves HTML open before the place where the markup you sent would go, for example a script, a comment or an attribute that is not closed. Steadhand cannot tell where the sent markup would land. Nothing was changed. A person must fix the post in the block editor.', 'steadhand' ) );
@@ -505,6 +516,12 @@ final class PostWriter {
 			if ( $end < strlen( $content ) && self::leaves_html_open( substr( $content, 0, $end ) ) ) {
 				return self::unsupported( __( 'The markup you sent leaves HTML open, for example an unclosed script or textarea, so the stored content after it would be read differently. Nothing was changed. Send markup that closes what it opens.', 'steadhand' ) );
 			}
+		}
+
+		// WordPress removes core/more delimiters from the content it shows, with a pattern that can run past a void delimiter. A
+		// match that overlaps a sent run must be exactly one whole delimiter of the final content.
+		if ( false !== BlockEditor::display_split_problem( $content, $sent ) ) {
+			return self::unsupported( __( 'The markup you sent would make WordPress drop part of the content when it shows the post, so nothing was changed. Send the core/more block with its opening and closing comments, not as a self-closing block.', 'steadhand' ) );
 		}
 
 		if ( ! BlockEditor::aligned( $stored, $kept, $sent, $content ) ) {
