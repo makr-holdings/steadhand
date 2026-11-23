@@ -6,6 +6,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). The
 
 ## [Unreleased]
 
+### Changed
+- When an agent that holds `steadhand_read` and `steadhand_write_drafts`, but not `steadhand_publish`, calls `update-post`, `edit-blocks`, `set-post-terms` or `set-featured-image` on a published, scheduled or private post that it can read, or `upload-media` with such a post as `parent`, the refusal now says that the post needs `steadhand_publish`, instead of "Not found, or this agent may not access it." The code (`steadhand_forbidden`), the status (403) and the rule are the same, nothing is changed, and the change log still records the call as blocked. This applies only to a post the agent can already read with `get-post`. A missing, trashed, unreadable or disallowed post, and a draft, keep the generic text.
+
+### Fixed
+- The refusal for a status other than draft, sent without `steadhand_publish` to `create-post` or `update-post`, said the post was saved as a draft. The call is refused and nothing is saved, and the text now says so.
+- `modified` in the create-post and update-post output, and `modified_gmt` in the post and media tools, were null for a new draft, because WordPress stores its GMT date as zero. They now fall back to the local modified date, so a new draft has a date.
+
 ## [0.2.0] - 2026-11-23
 
 ### Added

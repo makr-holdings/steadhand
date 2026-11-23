@@ -1051,8 +1051,9 @@ final class UploadMediaTest extends PostWriteTestCase {
 	}
 
 	/**
-	 * A parent the caller may not edit is refused with the one text, and nothing is stored. The cases: missing, trashed, a type
-	 * that is not allowed, an attachment, and a published post when the agent may not publish.
+	 * A parent the caller may not edit is refused, and nothing is stored. Missing, trashed, a type that is not allowed and an
+	 * attachment get the one text. A published post the agent can read, when the agent may not publish, gets the text that
+	 * names steadhand_publish.
 	 */
 	public function test_a_parent_the_caller_may_not_edit_is_refused_with_the_one_text(): void {
 		$this->act_as_agent( array( 'steadhand_media' => true ) );
@@ -1078,8 +1079,11 @@ final class UploadMediaTest extends PostWriteTestCase {
 		);
 
 		foreach ( $parents as $case => $parent ) {
-			$result = $this->refused( $this->args( $bytes, 'parent.png', array( 'parent' => $parent ) ), 'steadhand_forbidden' );
-			$this->assertSame( self::NOT_FOUND, $result->get_error_message(), $case );
+			$result   = $this->refused( $this->args( $bytes, 'parent.png', array( 'parent' => $parent ) ), 'steadhand_forbidden' );
+			$expected = 'a published post' === $case
+				? 'The parent post is published, scheduled or private. Attaching an image to it needs the steadhand_publish capability, which this agent does not hold. Nothing was uploaded.'
+				: self::NOT_FOUND;
+			$this->assertSame( $expected, $result->get_error_message(), $case );
 		}
 	}
 

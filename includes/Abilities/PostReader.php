@@ -180,7 +180,7 @@ final class PostReader {
 			'title'              => self::plain_text( (string) $post->post_title ),
 			'slug'               => self::utf8( (string) $post->post_name ),
 			'date_gmt'           => self::iso_utc( (string) $post->post_date_gmt ),
-			'modified_gmt'       => self::iso_utc( (string) $post->post_modified_gmt ),
+			'modified_gmt'       => self::modified_utc( $post ),
 			'author'             => self::author( $post ),
 			'excerpt'            => self::excerpt( $post ),
 			'password_protected' => '' !== (string) $post->post_password,
@@ -278,6 +278,28 @@ final class PostReader {
 		}
 
 		return $clauses ? array_merge( array( 'relation' => 'AND' ), $clauses ) : array();
+	}
+
+	/**
+	 * The last-modified time of a post as ISO 8601 UTC, or null when none is stored.
+	 *
+	 * WordPress stores post_modified_gmt as zero on a draft that was never saved after creation, so when it is zero the
+	 * local post_modified is converted to GMT instead.
+	 *
+	 * @param \WP_Post $post The post.
+	 */
+	public static function modified_utc( \WP_Post $post ): ?string {
+		$gmt = self::iso_utc( (string) $post->post_modified_gmt );
+		if ( null !== $gmt ) {
+			return $gmt;
+		}
+
+		$local = (string) $post->post_modified;
+		if ( '' === $local || str_starts_with( $local, '0000-00-00' ) ) {
+			return null;
+		}
+
+		return self::iso_utc( get_gmt_from_date( $local ) );
 	}
 
 	/**

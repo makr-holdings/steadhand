@@ -298,6 +298,16 @@ final class SetPostTerms extends Ability {
 	}
 
 	/**
+	 * Names the publish refusal for a readable published, scheduled or private post the caller may not publish.
+	 *
+	 * @param array<string, mixed> $input Validated input.
+	 * @return \WP_Error|null
+	 */
+	public function object_refusal_detail( array $input ): ?\WP_Error {
+		return PostFields::publish_needed_refusal( (int) ( $input['id'] ?? 0 ) );
+	}
+
+	/**
 	 * Whether the caller may assign terms of this taxonomy to this post, beyond the object check. See authorize_object().
 	 *
 	 * @param \WP_Post $post     The post.

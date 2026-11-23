@@ -224,6 +224,16 @@ final class UpdatePost extends Ability {
 	}
 
 	/**
+	 * Names the publish refusal for a readable published, scheduled or private post the caller may not publish.
+	 *
+	 * @param array<string, mixed> $input Validated input.
+	 * @return \WP_Error|null
+	 */
+	public function object_refusal_detail( array $input ): ?\WP_Error {
+		return PostFields::publish_needed_refusal( (int) ( $input['id'] ?? 0 ) );
+	}
+
+	/**
 	 * The copy of the input kept in the change log: content and long excerpts are digests, not text (see PostFields::log_copy()).
 	 *
 	 * @param array<string, mixed> $input Input: prepared, or as sent when it did not pass prepare().

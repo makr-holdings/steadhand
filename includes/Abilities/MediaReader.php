@@ -249,7 +249,7 @@ final class MediaReader {
 			'alt'          => self::label( is_string( $alt ) ? $alt : '' ),
 			'caption'      => self::label( (string) $post->post_excerpt ),
 			'date_gmt'     => PostReader::iso_utc( (string) $post->post_date_gmt ),
-			'modified_gmt' => PostReader::iso_utc( (string) $post->post_modified_gmt ),
+			'modified_gmt' => PostReader::modified_utc( $post ),
 			'author'       => PostReader::author( $post ),
 			'parent'       => (int) $post->post_parent,
 			'width'        => self::dimension( $meta, 'width', in_array( $media_type, array( 'image', 'video' ), true ) ),

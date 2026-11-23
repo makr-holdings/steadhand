@@ -365,7 +365,7 @@ final class SetPostTermsTest extends PostWriteTestCase {
 		$this->act_as_agent();
 		$live = $this->admin_post();
 		$this->assertSame(
-			self::REFUSAL,
+			'This post is published, scheduled or private. Changing it needs the steadhand_publish capability, which this agent does not hold. Nothing was changed.',
 			$this->refusal_text(
 				$this->tool_result(
 					self::TOOL_NAME,

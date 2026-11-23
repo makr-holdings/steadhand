@@ -96,6 +96,21 @@ abstract class Ability {
 	abstract public function authorize_object( array $input ): bool;
 
 	/**
+	 * Returns a more specific refusal for a call whose object check failed.
+	 *
+	 * Called only after authorize_object() returned false. An ability may return a steadhand_forbidden WP_Error that says
+	 * why the object check failed. It must return null unless the detail reveals nothing the caller could not already
+	 * read through a read tool. The default returns null, so the generic "Not found" refusal is used.
+	 *
+	 * @param array<string, mixed> $input Validated input.
+	 * @return \WP_Error|null The refusal to return instead of the generic one, or null for the generic one.
+	 */
+	public function object_refusal_detail( array $input ): ?\WP_Error {
+		unset( $input );
+		return null;
+	}
+
+	/**
 	 * Checks an input rule that the schema cannot express, such as a value that depends on a filter.
 	 *
 	 * Runs after the schema check and sanitization, before authorization. A refusal is logged as blocked and names the
