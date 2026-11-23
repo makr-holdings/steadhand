@@ -105,12 +105,12 @@ final class EditBlocksTest extends PostWriteTestCase {
 	}
 
 	/**
-	 * The digest the change log keeps for text: the SHA-256 in groups of eight hex digits.
+	 * The digest the change log keeps for text: the SHA-256 in groups of eight hex digits, separated by colons.
 	 *
 	 * @param string $text Text.
 	 */
 	private static function digest( string $text ): string {
-		return implode( ' ', str_split( hash( 'sha256', $text ), 8 ) );
+		return PostFields::group_hex( hash( 'sha256', $text ) );
 	}
 
 	/**
