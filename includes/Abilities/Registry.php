@@ -131,7 +131,8 @@ final class Registry {
 	 *
 	 * Only a WP_Error whose code matches the Steadhand pattern is changed. Anything else, including a result that is not
 	 * an error, is returned unchanged. A message that already ends with the suffix is returned unchanged too. A changed
-	 * error is a new WP_Error with the same code and data; the original is not modified.
+	 * error is a new WP_Error with the same code and data; the original is not modified. Only the first code, message and
+	 * data of a WP_Error are carried over. Steadhand errors have exactly one, so nothing is lost.
 	 *
 	 * @param mixed $result A value returned by the pipeline.
 	 * @return mixed The same value, or a new WP_Error with the code appended to its message.

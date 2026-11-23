@@ -698,9 +698,9 @@ final class UploadMediaTest extends PostWriteTestCase {
 
 	/**
 	 * A parent trashed after the permission check, while the guardrails run, is refused by the ability's own re-check with the
-	 * not-found refusal, and nothing is stored.
+	 * same refusal as the permission check (steadhand_forbidden, 403), and nothing is stored.
 	 */
-	public function test_a_parent_trashed_after_the_check_is_refused_as_not_found(): void {
+	public function test_a_parent_trashed_after_the_check_is_refused_as_forbidden(): void {
 		$this->act_as_agent( array( 'steadhand_media' => true ) );
 		$draft = $this->admin_post( array( 'post_status' => 'draft' ) );
 		$done  = false;
@@ -717,10 +717,10 @@ final class UploadMediaTest extends PostWriteTestCase {
 			}
 		);
 
-		$result = $this->refused( $this->args( $this->encode_image( 'png' ), 'late.png', array( 'parent' => $draft ) ), 'steadhand_not_found' );
+		$result = $this->refused( $this->args( $this->encode_image( 'png' ), 'late.png', array( 'parent' => $draft ) ), 'steadhand_forbidden' );
 
 		$this->assertSame( self::NOT_FOUND, $result->get_error_message() );
-		$this->assertSame( 404, $result->get_error_data()['status'] );
+		$this->assertSame( 403, $result->get_error_data()['status'] );
 		$this->assertTrue( $done, 'The parent must be trashed during the guardrails.' );
 		$this->assertSame( 'trash', get_post_status( $draft ) );
 	}

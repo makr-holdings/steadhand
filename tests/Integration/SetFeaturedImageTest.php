@@ -417,9 +417,9 @@ final class SetFeaturedImageTest extends PostWriteTestCase {
 
 	/**
 	 * A post trashed after the permission check, while the guardrails run, is refused by the ability's own re-check with the
-	 * not-found refusal, and nothing is written.
+	 * same refusal as the permission check (steadhand_forbidden, 403), and nothing is written.
 	 */
-	public function test_a_post_trashed_after_the_check_is_refused_as_not_found(): void {
+	public function test_a_post_trashed_after_the_check_is_refused_as_forbidden(): void {
 		$this->act_as_agent( array( 'steadhand_media' => true ) );
 		$post  = $this->draft();
 		$image = $this->image();
@@ -444,9 +444,9 @@ final class SetFeaturedImageTest extends PostWriteTestCase {
 			)
 		);
 
-		$this->refused_leaving( $result, 'steadhand_not_found', $post, 0 );
+		$this->refused_leaving( $result, 'steadhand_forbidden', $post, 0 );
 		$this->assertSame( self::NOT_FOUND, $result->get_error_message() );
-		$this->assertSame( 404, $result->get_error_data()['status'] );
+		$this->assertSame( 403, $result->get_error_data()['status'] );
 		$this->assertTrue( $done, 'The post must be trashed during the guardrails.' );
 		$this->assertSame( 'trash', get_post_status( $post ) );
 	}

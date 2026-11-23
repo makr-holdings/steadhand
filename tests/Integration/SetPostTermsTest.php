@@ -1284,7 +1284,7 @@ final class SetPostTermsTest extends PostWriteTestCase {
 			)
 		);
 
-		$this->assertSame( 'steadhand_not_found', $this->refusal_code( $result ) );
+		$this->assertSame( 'steadhand_forbidden', $this->refusal_code( $result ) );
 		$this->assertSame( array(), $this->stored_ids( $post, 'post_tag' ) );
 	}
 
