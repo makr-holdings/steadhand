@@ -316,7 +316,15 @@ final class Pipeline {
 	 * @return bool|\WP_Error True if allowed, otherwise the steadhand_forbidden WP_Error from authorize().
 	 */
 	public function check( Ability $ability, array $input ): bool|\WP_Error {
-		$prepared = $this->prepare( $ability, $input );
+		// A throw from prepare() or authorize() (a third-party capability filter, for one) fails closed: the call is
+		// refused with a fixed message, logged as an error, and never allowed.
+		try {
+			$prepared = $this->prepare( $ability, $input );
+		} catch ( \Throwable ) {
+			$this->write_entry( $ability, Entry::RESULT_ERROR, $this->check_failed()->get_error_message(), $this->loggable( $ability, $input ) );
+			return $this->check_failed();
+		}
+
 		if ( is_wp_error( $prepared ) ) {
 			$this->write_entry( $ability, Entry::RESULT_BLOCKED, $prepared->get_error_message(), $this->loggable( $ability, $input ) );
 			return $prepared;
@@ -325,8 +333,15 @@ final class Pipeline {
 		self::enter( ! self::is_read_only_ability( $ability ) );
 		try {
 			$authorized = $this->authorize( $ability, $prepared );
+		} catch ( \Throwable ) {
+			$authorized = null;
 		} finally {
 			self::leave();
+		}
+
+		if ( null === $authorized ) {
+			$this->write_entry( $ability, Entry::RESULT_ERROR, $this->check_failed()->get_error_message(), $this->loggable( $ability, $prepared ), $this->target_for( $ability, $prepared ) );
+			return $this->check_failed();
 		}
 
 		if ( is_wp_error( $authorized ) ) {
@@ -355,7 +370,13 @@ final class Pipeline {
 			);
 		}
 
-		$prepared = $this->prepare( $ability, $input );
+		// A throw from prepare() or authorize() fails closed (see check()): nothing executes after it.
+		try {
+			$prepared = $this->prepare( $ability, $input );
+		} catch ( \Throwable ) {
+			return $this->finish( $ability, Entry::RESULT_ERROR, $this->check_failed(), $this->loggable( $ability, $input ) );
+		}
+
 		if ( is_wp_error( $prepared ) ) {
 			return $this->finish( $ability, Entry::RESULT_BLOCKED, $prepared, $this->loggable( $ability, $input ) );
 		}
@@ -367,7 +388,12 @@ final class Pipeline {
 		self::enter( ! self::is_read_only_ability( $ability ) );
 		try {
 			// (c) Authorize.
-			$authorized = $this->authorize( $ability, $prepared );
+			try {
+				$authorized = $this->authorize( $ability, $prepared );
+			} catch ( \Throwable ) {
+				return $this->finish( $ability, Entry::RESULT_ERROR, $this->check_failed(), $this->loggable( $ability, $prepared ), $target );
+			}
+
 			if ( is_wp_error( $authorized ) ) {
 				return $this->finish( $ability, Entry::RESULT_BLOCKED, $authorized, $this->loggable( $ability, $prepared ), $target );
 			}
@@ -906,12 +932,23 @@ final class Pipeline {
 	}
 
 	/**
-	 * The generic error for an ability that failed. It never carries the exception's text.
+	 * The generic error for an ability that failed. It never carries the exception's text. Public so that Registry can
+	 * return the same error when a throw escapes the pipeline altogether.
 	 *
 	 * @return \WP_Error
 	 */
-	private function generic_error(): \WP_Error {
+	public static function generic_error(): \WP_Error {
 		return new \WP_Error( 'steadhand_error', __( 'The ability failed to complete. Try again, or check the site error log.', 'steadhand' ), array( 'status' => 500 ) );
+	}
+
+	/**
+	 * The refusal for a permission check that threw before it could decide. It fails closed: the call is refused, and
+	 * the exception's text is never returned or logged.
+	 *
+	 * @return \WP_Error
+	 */
+	private function check_failed(): \WP_Error {
+		return new \WP_Error( 'steadhand_error', __( 'The permission check could not be completed, so the call was refused. Try again, or check the site error log.', 'steadhand' ), array( 'status' => 500 ) );
 	}
 
 	/**

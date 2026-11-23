@@ -6,6 +6,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). The
 
 ## [Unreleased]
 
+### Security
+- An exception thrown during Steadhand's permission check could reach the agent. The check calls the ability's input and object rules, and `current_user_can()`, which runs other plugins' `map_meta_cap` and `user_has_cap` filters. Steadhand did not catch a throw from those calls, so the MCP Adapter returned the exception's message as the tool's error text, and that message can contain a file path or internal detail. Affects 0.1.0 and 0.2.0, which both run the same unguarded `authorize()` call in `check()` and `run()`.
+- Fixed: a throw during the permission check now fails closed. The call is refused with `steadhand_error` (500) and the fixed message "The permission check could not be completed, so the call was refused. Try again, or check the site error log.", and it is logged once as `error` with that message. Nothing runs after the throw. A throw that escapes the pipeline entirely is turned into the generic `steadhand_error` by the ability callbacks, and is not logged. The exception message is never returned or logged.
+
 ### Changed
 - Over MCP, the text of a refusal or failure that Steadhand returns now ends with its error code in parentheses, for example `(steadhand_forbidden)`. The MCP Adapter passes only the text and `isError` to the client, so the code was lost. The change log stores the message without the code. Refusals from WordPress's own input-schema check, and errors raised by the MCP Adapter itself, carry no code.
 - The execute-time refusal for an object that stops being accessible during a call changed from `steadhand_not_found` (404) to `steadhand_forbidden` (403), with the same text as the permission-stage refusal. `steadhand_not_found` was in release 0.2.0. The code is now visible to the agent, so it must not show that an object changed during the call; every object refusal now has one code and one status.

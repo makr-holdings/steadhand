@@ -157,6 +157,25 @@ final class Registry {
 	}
 
 	/**
+	 * Runs one pipeline call and turns any Throwable that escapes it into the generic error, so an exception message
+	 * never reaches the MCP Adapter. A throw from a permission check becomes a refusal, never true.
+	 *
+	 * This is the outer belt. The pipeline catches its own throws first (see Pipeline::check() and Pipeline::run()), so
+	 * this only runs if something outside those guards throws. The pipeline could not have logged such a call, so the
+	 * belt does not log it either.
+	 *
+	 * @param callable $call The pipeline call.
+	 * @return mixed The call's result, with the code added (see with_code()), or the generic error.
+	 */
+	private static function contain( callable $call ): mixed {
+		try {
+			return self::with_code( $call() );
+		} catch ( \Throwable ) {
+			return self::with_code( Pipeline::generic_error() );
+		}
+	}
+
+	/**
 	 * Builds the registration arguments for one ability.
 	 *
 	 * Steadhand abilities are exposed only through the Steadhand MCP server, never the
@@ -173,8 +192,8 @@ final class Registry {
 			'category'            => self::CATEGORY,
 			'input_schema'        => $ability->input_schema(),
 			'output_schema'       => $ability->output_schema(),
-			'permission_callback' => fn( $input = null ) => self::with_code( $this->pipeline->check( $ability, is_array( $input ) ? $input : array() ) ),
-			'execute_callback'    => fn( $input = null ) => self::with_code( $this->pipeline->run( $ability, $input ) ),
+			'permission_callback' => fn( $input = null ) => self::contain( fn() => $this->pipeline->check( $ability, is_array( $input ) ? $input : array() ) ),
+			'execute_callback'    => fn( $input = null ) => self::contain( fn() => $this->pipeline->run( $ability, $input ) ),
 			'meta'                => array(
 				'annotations'  => $ability->annotations(),
 				'show_in_rest' => false,
