@@ -126,13 +126,40 @@ abstract class PostWriteTestCase extends LogTestCase {
 			$callbacks = $registry->args_for( $ability );
 			$allowed   = $callbacks['permission_callback']( $args );
 			if ( true !== $allowed ) {
-				return $allowed;
+				return $this->without_code_suffix( $allowed );
 			}
 
-			return $callbacks['execute_callback']( $args );
+			return $this->without_code_suffix( $callbacks['execute_callback']( $args ) );
 		}
 
 		$this->fail( "No ability named $name." );
+	}
+
+	/**
+	 * Removes the " (steadhand_<code>)" suffix that Registry::with_code() adds to a Steadhand refusal, so that a test
+	 * compares the bare text, as it did before the suffix existed.
+	 *
+	 * The suffix is asserted on every refusal here, not only read: the MCP Adapter sends only the text, so the code must
+	 * be in the text. A refusal without the suffix fails the test. Other results are returned unchanged. The returned
+	 * error has the same code and data.
+	 *
+	 * @param mixed $result The callback's result.
+	 * @return mixed
+	 */
+	private function without_code_suffix( mixed $result ): mixed {
+		if ( ! $result instanceof \WP_Error || ! str_starts_with( $result->get_error_code(), 'steadhand_' ) ) {
+			return $result;
+		}
+
+		$code   = $result->get_error_code();
+		$suffix = ' (' . $code . ')';
+		$this->assertStringEndsWith( $suffix, $result->get_error_message(), 'A Steadhand refusal must end with its code, for MCP clients.' );
+
+		return new \WP_Error(
+			$code,
+			substr( $result->get_error_message(), 0, - strlen( $suffix ) ),
+			$result->get_error_data()
+		);
 	}
 
 	/**
@@ -186,15 +213,32 @@ abstract class PostWriteTestCase extends LogTestCase {
 	}
 
 	/**
-	 * Asserts that an MCP tool result is a refusal, and returns its text.
+	 * Asserts that an MCP tool result is a refusal, and returns its text without the code suffix (see refusal_code()).
 	 *
 	 * @param array<string, mixed> $result Tool result.
 	 */
 	protected function refusal_text( array $result ): string {
+		return $this->split_refusal_text( $result )[0];
+	}
+
+	/**
+	 * Splits the text of an MCP refusal into its message and the Steadhand code it must end with.
+	 *
+	 * The MCP Adapter sends only the text, so the code is the suffix " (steadhand_<code>)" that Registry::with_code()
+	 * appends. The suffix is required here, because every refusal over MCP must carry it.
+	 *
+	 * @param array<string, mixed> $result Tool result.
+	 * @return array{0: string, 1: string} The message without the suffix, and the code.
+	 */
+	private function split_refusal_text( array $result ): array {
 		$this->assertTrue( $result['isError'], 'The call must be refused.' );
 		$this->assertArrayNotHasKey( 'structuredContent', $result, 'A refused call must return no data.' );
 
-		return (string) $result['content'][0]['text'];
+		$text = (string) $result['content'][0]['text'];
+		$this->assertMatchesRegularExpression( '/ \((steadhand_[a-z0-9_]+)\)$/', $text, 'A refusal must end with its Steadhand code.' );
+		preg_match( '/ \((steadhand_[a-z0-9_]+)\)$/', $text, $matches );
+
+		return array( substr( $text, 0, - strlen( $matches[0] ) ), $matches[1] );
 	}
 
 	/**
@@ -240,11 +284,16 @@ abstract class PostWriteTestCase extends LogTestCase {
 	}
 
 	/**
-	 * Asserts that a result is a refusal, and returns its code.
+	 * Asserts that a result is a refusal, and returns its code. Accepts a WP_Error from execute_ability(), or an MCP tool
+	 * result, whose code is read from the end of its text.
 	 *
-	 * @param mixed $result Ability result.
+	 * @param mixed $result Ability result, or an MCP tool result (array).
 	 */
 	protected function refusal_code( mixed $result ): string {
+		if ( is_array( $result ) ) {
+			return $this->split_refusal_text( $result )[1];
+		}
+
 		$this->assertWPError( $result, 'The call must be refused.' );
 
 		return $result->get_error_code();

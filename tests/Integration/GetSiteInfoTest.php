@@ -68,6 +68,7 @@ final class GetSiteInfoTest extends TestCase {
 		$this->assertTrue( $result['isError'] );
 		$this->assertArrayNotHasKey( 'structuredContent', $result );
 		$this->assertStringContainsString( 'steadhand_read', $result['content'][0]['text'] );
+		$this->assertStringEndsWith( ' (steadhand_forbidden)', $result['content'][0]['text'], 'The code is appended for MCP clients.' );
 	}
 
 	public function test_unexpected_arguments_are_refused(): void {

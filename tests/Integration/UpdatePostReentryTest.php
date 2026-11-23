@@ -60,8 +60,8 @@ final class UpdatePostReentryTest extends PostWriteTestCase {
 			)
 		);
 
-		// execute() re-checks the object and refuses with the same not-found error an unknown post gets.
-		$this->assertSame( 'steadhand_not_found', $this->refusal_code( $result ) );
+		// execute() re-checks the object and refuses with the same error an unknown post gets.
+		$this->assertSame( 'steadhand_forbidden', $this->refusal_code( $result ) );
 		$this->assertIsArray( $seen_after_flip );
 		$this->assertSame( $seen_after_flip, $this->row( $post ), 'The write must not run.' );
 		$this->assertSame( 'draft text', get_post( $post )->post_content );

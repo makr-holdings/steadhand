@@ -123,6 +123,40 @@ final class Registry {
 	}
 
 	/**
+	 * Adds a Steadhand error code to the end of a refusal's message, for the MCP Adapter.
+	 *
+	 * The adapter turns a WP_Error into a result that holds only the message text and isError, so the code and status
+	 * are lost. Appending " (steadhand_<code>)" lets an agent see which refusal it got. The change log is written before
+	 * the pipeline returns, so it still stores the message without the suffix.
+	 *
+	 * Only a WP_Error whose code matches the Steadhand pattern is changed. Anything else, including a result that is not
+	 * an error, is returned unchanged. A message that already ends with the suffix is returned unchanged too. A changed
+	 * error is a new WP_Error with the same code and data; the original is not modified. Only the first code, message and
+	 * data of a WP_Error are carried over. Steadhand errors have exactly one, so nothing is lost.
+	 *
+	 * @param mixed $result A value returned by the pipeline.
+	 * @return mixed The same value, or a new WP_Error with the code appended to its message.
+	 */
+	public static function with_code( mixed $result ): mixed {
+		if ( ! $result instanceof \WP_Error ) {
+			return $result;
+		}
+
+		$code = $result->get_error_code();
+		if ( ! is_string( $code ) || 1 !== preg_match( '/^steadhand_[a-z0-9_]{1,60}$/', $code ) ) {
+			return $result;
+		}
+
+		$suffix  = ' (' . $code . ')';
+		$message = $result->get_error_message();
+		if ( str_ends_with( $message, $suffix ) ) {
+			return $result;
+		}
+
+		return new \WP_Error( $code, $message . $suffix, $result->get_error_data() );
+	}
+
+	/**
 	 * Builds the registration arguments for one ability.
 	 *
 	 * Steadhand abilities are exposed only through the Steadhand MCP server, never the
@@ -139,8 +173,8 @@ final class Registry {
 			'category'            => self::CATEGORY,
 			'input_schema'        => $ability->input_schema(),
 			'output_schema'       => $ability->output_schema(),
-			'permission_callback' => fn( $input = null ) => $this->pipeline->check( $ability, is_array( $input ) ? $input : array() ),
-			'execute_callback'    => fn( $input = null ) => $this->pipeline->run( $ability, $input ),
+			'permission_callback' => fn( $input = null ) => self::with_code( $this->pipeline->check( $ability, is_array( $input ) ? $input : array() ) ),
+			'execute_callback'    => fn( $input = null ) => self::with_code( $this->pipeline->run( $ability, $input ) ),
 			'meta'                => array(
 				'annotations'  => $ability->annotations(),
 				'show_in_rest' => false,

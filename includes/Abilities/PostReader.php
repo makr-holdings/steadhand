@@ -91,10 +91,15 @@ final class PostReader {
 	 * The refusal every object-level miss gets: the same text whether the post is missing, trashed, of a type that is
 	 * not allowed, or not readable. Callers must not add detail.
 	 *
+	 * This is the same refusal as the permission stage (steadhand_forbidden, 403), on purpose. An execute-time re-check
+	 * that found the object gone would otherwise show a different code, and the agent could tell that the object passed
+	 * the check earlier in the same call and changed mid-call. The code cannot show at which stage an object stopped
+	 * being accessible.
+	 *
 	 * @return \WP_Error
 	 */
 	public static function not_found(): \WP_Error {
-		return new \WP_Error( 'steadhand_not_found', __( 'Not found, or this agent may not access it.', 'steadhand' ), array( 'status' => 404 ) );
+		return new \WP_Error( 'steadhand_forbidden', __( 'Not found, or this agent may not access it.', 'steadhand' ), array( 'status' => 403 ) );
 	}
 
 	/**

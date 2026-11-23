@@ -398,6 +398,7 @@ final class GetDiagnosticsTest extends TestCase {
 		$this->assertTrue( $result['isError'] );
 		$this->assertArrayNotHasKey( 'structuredContent', $result );
 		$this->assertStringContainsString( 'steadhand_read', $result['content'][0]['text'] );
+		$this->assertStringEndsWith( ' (steadhand_forbidden)', $result['content'][0]['text'], 'The code is appended for MCP clients.' );
 	}
 
 	public function test_an_administrator_is_refused_at_the_transport_gate(): void {

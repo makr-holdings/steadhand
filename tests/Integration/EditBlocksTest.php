@@ -802,7 +802,7 @@ final class EditBlocksTest extends PostWriteTestCase {
 		( new EditBlocks() )->guarded_content( $this->replace_two( $post ) );
 	}
 
-	public function test_a_post_that_became_unreadable_after_the_snapshot_is_refused_as_not_found(): void {
+	public function test_a_post_that_became_unreadable_after_the_snapshot_is_refused_as_forbidden(): void {
 		$post = $this->fixture();
 		$this->act_as_agent();
 		$done = false;
@@ -821,7 +821,7 @@ final class EditBlocksTest extends PostWriteTestCase {
 			}
 		);
 
-		$this->assertSame( 'steadhand_not_found', $this->refusal_code( $this->execute_ability( self::ABILITY, $this->replace_two( $post ) ) ) );
+		$this->assertSame( 'steadhand_forbidden', $this->refusal_code( $this->execute_ability( self::ABILITY, $this->replace_two( $post ) ) ) );
 		$this->assertTrue( $done );
 		$this->assertSame( self::CONTENT, get_post( $post )->post_content );
 	}

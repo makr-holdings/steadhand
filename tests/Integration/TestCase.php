@@ -150,6 +150,24 @@ abstract class TestCase extends WP_UnitTestCase {
 	}
 
 	/**
+	 * Asserts that an MCP tool result is a refusal from the input schema, and returns its text.
+	 *
+	 * Core checks the input schema before any Steadhand callback runs, so its text is not one Steadhand made and has no
+	 * code at the end. The text must not end with a Steadhand code: a Steadhand refusal needs refusal_text() instead.
+	 *
+	 * @param array<string, mixed> $result Tool result.
+	 */
+	protected function schema_refusal_text( array $result ): string {
+		$this->assertTrue( $result['isError'], 'The call must be refused.' );
+		$this->assertArrayNotHasKey( 'structuredContent', $result, 'A refused call must return no data.' );
+
+		$text = (string) $result['content'][0]['text'];
+		$this->assertDoesNotMatchRegularExpression( '/ \(steadhand_[a-z0-9_]+\)$/', $text, 'A schema refusal is not a Steadhand refusal, so it has no Steadhand code.' );
+
+		return $text;
+	}
+
+	/**
 	 * Sends one REST request through rest_do_request() as the current user.
 	 *
 	 * @param string                    $method HTTP method.
