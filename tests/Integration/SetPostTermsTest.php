@@ -1449,7 +1449,8 @@ final class SetPostTermsTest extends PostWriteTestCase {
 
 	/**
 	 * A taxonomy with its default capabilities is refused on a page, on a custom-capability type and on a type without meta
-	 * mapping, because the post type's edit capability is not the one the taxonomy assigns.
+	 * mapping, because the post type's edit capability is not the one the taxonomy assigns. The type without meta mapping
+	 * is never allowed, even when the filter adds it (SPEC §14.1), so it is refused by the allowlist before that check.
 	 */
 	public function test_a_default_capability_taxonomy_is_refused_on_a_page_a_custom_capability_type_and_an_unmapped_type(): void {
 		add_filter(
@@ -1561,10 +1562,13 @@ final class SetPostTermsTest extends PostWriteTestCase {
 			'steadhand_allowed_post_types',
 			static fn( array $types ): array => array_merge( $types, array( self::LOCKED ) )
 		);
+		// map_meta_cap is on, so the type is allowed and the do_not_allow match is what is tested. A type registered with it
+		// off is never allowed (SPEC §14.1), and would be refused before the match was reached.
 		register_post_type(
 			self::LOCKED,
 			array(
 				'public'       => true,
+				'map_meta_cap' => true,
 				'capabilities' => array( 'edit_posts' => 'do_not_allow' ),
 			)
 		);

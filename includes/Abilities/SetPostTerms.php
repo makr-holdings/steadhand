@@ -12,6 +12,7 @@ namespace Steadhand\Abilities;
 use Steadhand\Capabilities;
 use Steadhand\Guardrails\Engine;
 use Steadhand\Pipeline\TermWriter;
+use Steadhand\PostTypes;
 use Steadhand\Taxonomies;
 
 defined( 'ABSPATH' ) || exit;
@@ -282,9 +283,9 @@ final class SetPostTerms extends Ability {
 			return false;
 		}
 
-		// A post type registered without meta mapping is never edited through Steadhand (SPEC §14.1).
-		$type = get_post_type_object( $post->post_type );
-		if ( ! $type instanceof \WP_Post_Type || true !== $type->map_meta_cap ) {
+		// A post type registered without meta mapping is never edited through Steadhand. PostTypes::allowed() already
+		// excludes it, so this is a second check on the same definition (SPEC §14.1).
+		if ( ! PostTypes::uses_meta_caps( (string) $post->post_type ) ) {
 			return false;
 		}
 

@@ -15,8 +15,8 @@ namespace Steadhand\Tests\Integration;
 abstract class ReadToolTestCase extends TestCase {
 
 	/**
-	 * A plugin-style post type registered the way the reviewer's bypass used it: map_meta_cap off, and read_post
-	 * mapped straight to core's read capability.
+	 * A plugin-style post type registered with map_meta_cap off and read_post mapped to core's read capability. It is never
+	 * allowed, so the read tools refuse its posts whatever the filter says (SPEC §14.1).
 	 */
 	protected const SECRET_TYPE = 'steadhand_secret';
 
