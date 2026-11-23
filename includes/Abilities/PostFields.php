@@ -161,9 +161,11 @@ final class PostFields {
 	 * stored content only when content_modified_on_save is false. A value that is not text (an input that failed
 	 * validation can hold one) is stored as 0 bytes and its type, so the text of such a value is never kept.
 	 *
-	 * The SHA-256 is written as eight groups of eight hex digits, separated by spaces. The log redactor masks any run of 32
-	 * or more letters and digits as a token, and a bare 64-character hex digest would be masked. Removing the spaces gives
-	 * the digest back.
+	 * The SHA-256 is written as eight groups of eight hex digits, separated by colons (see group_hex()). The log redactor
+	 * masks any run of 32 or more letters and digits as a token, and a bare 64-character hex digest would be masked. The
+	 * groups keep it below that length. Colons are used, not spaces, because the redactor's payment-card rule accepts runs
+	 * of digits separated by single spaces or dashes, and a space-separated digest could be partly masked as a card number.
+	 * Removing the colons gives the digest back.
 	 *
 	 * @param array<string, mixed> $input Input: prepared, or as sent when it did not pass prepare().
 	 * @return array<string, mixed>
@@ -196,8 +198,23 @@ final class PostFields {
 
 		return array(
 			'bytes'  => strlen( $value ),
-			'sha256' => implode( ' ', str_split( hash( 'sha256', $value ), 8 ) ),
+			'sha256' => self::group_hex( hash( 'sha256', $value ) ),
 		);
+	}
+
+	/**
+	 * The log form of a hex digest: its groups of eight characters, separated by colons. This is the only place the format
+	 * is built; the change log's tests and any reader of a stored digest must use it too.
+	 *
+	 * Colons, not spaces, because the redactor's payment-card rule (13 to 19 digits, optionally separated by single spaces
+	 * or dashes, Luhn-valid) can match digits across a space-separated group and mask part of the digest as [card]. The
+	 * redactor never changes a colon or a dot, so the digest is stored intact.
+	 *
+	 * @param string $hex A hex digest, such as a SHA-256 of 64 characters.
+	 * @return string
+	 */
+	public static function group_hex( string $hex ): string {
+		return implode( ':', str_split( $hex, 8 ) );
 	}
 
 	/**
