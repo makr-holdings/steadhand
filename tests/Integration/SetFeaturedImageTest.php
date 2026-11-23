@@ -359,7 +359,10 @@ final class SetFeaturedImageTest extends PostWriteTestCase {
 			)
 		);
 		$this->refused_leaving( $result, 'steadhand_forbidden', $live, 0 );
-		$this->assertSame( self::NOT_FOUND, $result->get_error_message() );
+		$this->assertSame(
+			'This post is published, scheduled or private. Changing it needs the steadhand_publish capability, which this agent does not hold. Nothing was changed.',
+			$result->get_error_message()
+		);
 
 		$this->act_as_agent(
 			array(

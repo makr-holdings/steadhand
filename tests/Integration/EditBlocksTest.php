@@ -254,7 +254,6 @@ final class EditBlocksTest extends PostWriteTestCase {
 		$cases = array(
 			'missing'    => 999999999,
 			'trashed'    => $this->fixture( 'trash' ),
-			'private'    => $this->fixture( 'private' ),
 			'attachment' => $attachment,
 			'revision'   => $revision,
 			'wp_block'   => $block,
@@ -267,6 +266,13 @@ final class EditBlocksTest extends PostWriteTestCase {
 
 		$this->assertCount( 1, array_unique( array_values( $texts ) ), 'Every refusal must read the same: ' . wp_json_encode( $texts ) );
 		$this->assertStringContainsString( self::NOT_FOUND, $texts['missing'] );
+
+		// A private post the agent can read is the one case that names the missing capability (see RefusalDetailTest).
+		$private = $this->fixture( 'private' );
+		$this->assertSame(
+			'This post is published, scheduled or private. Changing it needs the steadhand_publish capability, which this agent does not hold. Nothing was changed.',
+			$this->refusal_text( $this->tool_result( self::TOOL_NAME, $this->replace_two( $private ) ) )
+		);
 	}
 
 	public function test_an_administrator_without_steadhand_capabilities_is_refused(): void {

@@ -11,6 +11,7 @@ namespace Steadhand\Abilities;
 
 use Steadhand\Capabilities;
 use Steadhand\Guardrails\Engine;
+use Steadhand\MetaCaps;
 
 defined( 'ABSPATH' ) || exit;
 
@@ -256,7 +257,41 @@ final class PostFields {
 	public static function publish_refusal(): \WP_Error {
 		return new \WP_Error(
 			'steadhand_forbidden',
-			__( 'Setting a status other than draft needs the steadhand_publish capability. Without it, the post is saved as a draft.', 'steadhand' ),
+			__( 'Setting a status other than draft needs the steadhand_publish capability, which this agent does not hold. The call was refused and nothing was saved.', 'steadhand' ),
+			array( 'status' => 403 )
+		);
+	}
+
+	/**
+	 * The refusal for a post the caller can read but may not change because it is published, scheduled or private and the
+	 * caller does not hold steadhand_publish. Returns null in every other case, so the generic object refusal applies.
+	 *
+	 * Only a post that PostReader::readable_post() returns can get this text, so it reveals nothing a read tool would
+	 * not already show.
+	 *
+	 * @param int  $post_id   The post the call targets.
+	 * @param bool $as_parent True when the post is the parent of an upload, which changes the wording only.
+	 * @return \WP_Error|null The refusal, or null.
+	 */
+	public static function publish_needed_refusal( int $post_id, bool $as_parent = false ): ?\WP_Error {
+		$post = PostReader::readable_post( $post_id );
+		if ( null === $post ) {
+			return null;
+		}
+
+		if ( Capabilities::PUBLISH !== MetaCaps::edit_capability( (string) $post->post_status ) ) {
+			return null;
+		}
+
+		if ( Capabilities::user_has( wp_get_current_user(), Capabilities::PUBLISH ) ) {
+			return null;
+		}
+
+		return new \WP_Error(
+			'steadhand_forbidden',
+			$as_parent
+				? __( 'The parent post is published, scheduled or private. Attaching an image to it needs the steadhand_publish capability, which this agent does not hold. Nothing was uploaded.', 'steadhand' )
+				: __( 'This post is published, scheduled or private. Changing it needs the steadhand_publish capability, which this agent does not hold. Nothing was changed.', 'steadhand' ),
 			array( 'status' => 403 )
 		);
 	}
@@ -398,7 +433,7 @@ final class PostFields {
 			'title'                    => (string) $item['title'],
 			'slug'                     => (string) $item['slug'],
 			'link'                     => (string) $item['link'],
-			'modified'                 => PostReader::iso_utc( (string) $post->post_modified_gmt ),
+			'modified'                 => PostReader::modified_utc( $post ),
 			'changed'                  => $changed,
 			'content_modified_on_save' => $content_modified_on_save,
 			'warnings'                 => array_slice( array_values( $warnings ), 0, self::MAX_WARNINGS ),

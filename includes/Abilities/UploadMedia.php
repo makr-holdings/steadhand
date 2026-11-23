@@ -330,6 +330,22 @@ final class UploadMedia extends Ability {
 	}
 
 	/**
+	 * Names the publish refusal for a parent the caller can read but may not change, because it is published, scheduled or
+	 * private. A caller without steadhand_read, and a call with no parent, get the generic refusal.
+	 *
+	 * @param array<string, mixed> $input Validated input.
+	 * @return \WP_Error|null
+	 */
+	public function object_refusal_detail( array $input ): ?\WP_Error {
+		$parent = (int) ( $input['parent'] ?? 0 );
+		if ( 0 === $parent || ! self::caller_reads() ) {
+			return null;
+		}
+
+		return PostFields::publish_needed_refusal( $parent, true );
+	}
+
+	/**
 	 * The copy of the input kept in the change log. The payload is never kept: data_base64 is stored only as the digest of its
 	 * decoded bytes, or of the text as sent when it does not decode. A text field that is not a string, or a parent that is
 	 * not an integer, is stored as the digest of its JSON encoding. Other text fields over 1000 bytes, and any key that is not

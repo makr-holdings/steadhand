@@ -227,9 +227,17 @@ final class Pipeline {
 		}
 
 		// One text for every object refusal (missing, trashed, disallowed type, no access), so a caller cannot use
-		// the refusal to learn which IDs exist. Do not add detail here.
+		// the refusal to learn which IDs exist. The one exception is the ability's object_refusal_detail(), for a
+		// post the caller can already read but may not change because it needs steadhand_publish. Any other ability
+		// result, a throw included, gets the generic text. Do not add detail here.
 		if ( ! $ability->authorize_object( $input ) ) {
-			return $this->object_refusal();
+			try {
+				$detail = $ability->object_refusal_detail( $input );
+			} catch ( \Throwable ) {
+				$detail = null;
+			}
+
+			return $detail instanceof \WP_Error ? $detail : $this->object_refusal();
 		}
 
 		return true;
