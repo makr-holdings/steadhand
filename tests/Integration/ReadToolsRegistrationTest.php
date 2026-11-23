@@ -1,6 +1,6 @@
 <?php
 /**
- * Registration of the thirteen read tools and the four write tools: the MCP tool list, annotations, strict schemas and exposure.
+ * Registration of the thirteen read tools and the six write tools: the MCP tool list, annotations, strict schemas and exposure.
  *
  * @package Steadhand
  */
@@ -52,13 +52,15 @@ final class ReadToolsRegistrationTest extends TestCase {
 	);
 
 	/**
-	 * The four write tools, which come after the read tools in the registry.
+	 * The six write tools, which come after the read tools in the registry.
 	 */
 	private const WRITE_ABILITIES = array(
 		'steadhand/create-post',
 		'steadhand/update-post',
 		'steadhand/edit-blocks',
 		'steadhand/set-post-terms',
+		'steadhand/upload-media',
+		'steadhand/set-featured-image',
 	);
 
 	private const WRITE_TOOLS = array(
@@ -66,6 +68,8 @@ final class ReadToolsRegistrationTest extends TestCase {
 		'steadhand-update-post',
 		'steadhand-edit-blocks',
 		'steadhand-set-post-terms',
+		'steadhand-upload-media',
+		'steadhand-set-featured-image',
 	);
 
 	/**
@@ -89,6 +93,8 @@ final class ReadToolsRegistrationTest extends TestCase {
 		'steadhand/update-post',
 		'steadhand/edit-blocks',
 		'steadhand/set-post-terms',
+		'steadhand/upload-media',
+		'steadhand/set-featured-image',
 	);
 
 	public function test_server_lists_exactly_the_read_and_write_tools(): void {
@@ -121,6 +127,10 @@ final class ReadToolsRegistrationTest extends TestCase {
 		$this->assertTrue( wp_get_ability( 'steadhand/set-post-terms' )->get_meta()['annotations']['destructive'] );
 		$this->assertTrue( wp_get_ability( 'steadhand/set-post-terms' )->get_meta()['annotations']['idempotent'] );
 		$this->assertFalse( wp_get_ability( 'steadhand/create-post' )->get_meta()['annotations']['destructive'] );
+		$this->assertFalse( wp_get_ability( 'steadhand/upload-media' )->get_meta()['annotations']['destructive'] );
+		$this->assertFalse( wp_get_ability( 'steadhand/upload-media' )->get_meta()['annotations']['idempotent'] );
+		$this->assertTrue( wp_get_ability( 'steadhand/set-featured-image' )->get_meta()['annotations']['destructive'] );
+		$this->assertTrue( wp_get_ability( 'steadhand/set-featured-image' )->get_meta()['annotations']['idempotent'] );
 	}
 
 	public function test_every_read_tool_is_readonly_not_destructive_and_idempotent(): void {

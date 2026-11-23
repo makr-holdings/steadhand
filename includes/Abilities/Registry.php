@@ -67,6 +67,8 @@ final class Registry {
 			new UpdatePost(),
 			new EditBlocks(),
 			new SetPostTerms(),
+			new UploadMedia(),
+			new SetFeaturedImage(),
 		);
 	}
 
