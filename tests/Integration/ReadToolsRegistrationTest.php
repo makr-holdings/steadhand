@@ -52,16 +52,18 @@ final class ReadToolsRegistrationTest extends TestCase {
 	);
 
 	/**
-	 * The two write tools, which come after the read tools in the registry.
+	 * The three write tools, which come after the read tools in the registry.
 	 */
 	private const WRITE_ABILITIES = array(
 		'steadhand/create-post',
 		'steadhand/update-post',
+		'steadhand/edit-blocks',
 	);
 
 	private const WRITE_TOOLS = array(
 		'steadhand-create-post',
 		'steadhand-update-post',
+		'steadhand-edit-blocks',
 	);
 
 	/**
@@ -83,6 +85,7 @@ final class ReadToolsRegistrationTest extends TestCase {
 		'steadhand/get-change-log',
 		'steadhand/create-post',
 		'steadhand/update-post',
+		'steadhand/edit-blocks',
 	);
 
 	public function test_server_lists_exactly_the_read_and_write_tools(): void {
@@ -110,6 +113,8 @@ final class ReadToolsRegistrationTest extends TestCase {
 			$this->assertFalse( $meta['annotations']['readonly'], $name );
 		}
 		$this->assertTrue( wp_get_ability( 'steadhand/update-post' )->get_meta()['annotations']['destructive'] );
+		$this->assertTrue( wp_get_ability( 'steadhand/edit-blocks' )->get_meta()['annotations']['destructive'] );
+		$this->assertFalse( wp_get_ability( 'steadhand/edit-blocks' )->get_meta()['annotations']['idempotent'] );
 		$this->assertFalse( wp_get_ability( 'steadhand/create-post' )->get_meta()['annotations']['destructive'] );
 	}
 
@@ -170,7 +175,8 @@ final class ReadToolsRegistrationTest extends TestCase {
 	}
 
 	/**
-	 * Integers have bounds, strings and array items have length limits or enums, and every array is capped.
+	 * Integers have bounds, strings and array items have length limits or enums, and every array is capped. The items of an
+	 * array of objects are checked property by property.
 	 *
 	 * @param array<string, mixed> $schema Input schema.
 	 * @param string               $name   Ability name, for the failure message.
@@ -188,7 +194,13 @@ final class ReadToolsRegistrationTest extends TestCase {
 			}
 			if ( 'array' === $type ) {
 				$this->assertArrayHasKey( 'maxItems', $child, "$name.$property" );
-				$this->assertTrue( isset( $child['items']['enum'] ) || isset( $child['items']['maxLength'] ), "$name.$property items" );
+				$items = $child['items'] ?? array();
+				$this->assertTrue( isset( $items['enum'] ) || isset( $items['maxLength'] ) || 'object' === ( $items['type'] ?? null ), "$name.$property items" );
+
+				// An array of objects is bounded when each of its properties is.
+				if ( 'object' === ( $items['type'] ?? null ) ) {
+					$this->assert_bounded_input( $items, "{$name}.{$property}[]" );
+				}
 			}
 		}
 	}

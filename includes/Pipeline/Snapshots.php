@@ -44,7 +44,10 @@ final class Snapshots {
 
 		// Saves a revision of the current state, unless it matches the latest one. Its return value is not used: the
 		// revision looked up below is checked either way.
-		wp_save_post_revision( $post->ID );
+		PostWriter::with_revision_mirror(
+			$post->ID,
+			static fn(): mixed => wp_save_post_revision( $post->ID )
+		);
 
 		$revisions = wp_get_post_revisions(
 			$post->ID,

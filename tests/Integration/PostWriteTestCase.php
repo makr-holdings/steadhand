@@ -31,6 +31,17 @@ abstract class PostWriteTestCase extends LogTestCase {
 	}
 
 	/**
+	 * Skips the test unless WordPress has core's custom-CSS strip, wp_strip_custom_css_from_blocks(). Core added it in 7.0 (see
+	 * wp-includes/block-supports/custom-css.php, @since 7.0.0), so it is not in WordPress 6.9, the plugin's minimum. Steadhand
+	 * adds the strip only where core has it, so a test of that behaviour has nothing to run on 6.9.
+	 */
+	protected function skip_without_custom_css_strip(): void {
+		if ( ! function_exists( 'wp_strip_custom_css_from_blocks' ) ) {
+			$this->markTestSkipped( 'The custom-CSS strip is WordPress 7.0 and later.' );
+		}
+	}
+
+	/**
 	 * Administrator who owns the fixture posts.
 	 *
 	 * @var int|null

@@ -46,7 +46,7 @@ final class BlockMarkup implements Rule {
 	 * Core's block delimiter grammar, copied from WP_Block_Parser::next_token() in wp-includes/class-wp-block-parser.php
 	 * (WordPress 7.1). Keep it identical to core's, so that the rule agrees with what WordPress reads.
 	 */
-	private const TOKEN = '/<!--[ \t\f\r\n]+(?P<closer>\/)?wp:(?P<namespace>[a-z][a-z0-9_-]*\/)?(?P<name>[a-z][a-z0-9_-]*)[ \t\f\r\n]+(?P<attrs>{(?:(?:[^}]+|}+(?=})|(?!}[ \t\f\r\n]+\/?-->).)*+)?}[ \t\f\r\n]+)?(?P<void>\/)?-->/s';
+	public const TOKEN = '/<!--[ \t\f\r\n]+(?P<closer>\/)?wp:(?P<namespace>[a-z][a-z0-9_-]*\/)?(?P<name>[a-z][a-z0-9_-]*)[ \t\f\r\n]+(?P<attrs>{(?:(?:[^}]+|}+(?=})|(?!}[ \t\f\r\n]+\/?-->).)*+)?}[ \t\f\r\n]+)?(?P<void>\/)?-->/s';
 
 	/**
 	 * Every comment that looks like an opener or a void block. It is matched as core's token grammar matches a delimiter: the

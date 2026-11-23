@@ -186,7 +186,7 @@ final class PostFields {
 	 * @param mixed $value The field as sent.
 	 * @return array{bytes: int, sha256?: string, type?: string}
 	 */
-	private static function digest( mixed $value ): array {
+	public static function digest( mixed $value ): array {
 		if ( ! is_string( $value ) ) {
 			return array(
 				'bytes' => 0,

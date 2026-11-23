@@ -65,6 +65,7 @@ final class Registry {
 			new GetChangeLog( $this->change_log ),
 			new CreatePost(),
 			new UpdatePost(),
+			new EditBlocks(),
 		);
 	}
 
