@@ -797,4 +797,180 @@ final class EditBlocksRegressionTest extends PostWriteTestCase {
 		$this->assertTrue( $out['changed'] );
 		$this->assert_display_is_safe( $post );
 	}
+
+	/**
+	 * A stored line with a void core/more, an html block and an admin paragraph whose attribute holds " -->" and an image.
+	 *
+	 * @return string
+	 */
+	private static function odd_match_fixture(): string {
+		return '<!-- wp:more /--><!-- wp:html --><b>x</b><!-- /wp:html --><p title="x --> <img src=x onerror=alert(9)>">admin</p>';
+	}
+
+	/**
+	 * Removing the html block that a stored void core/more reaches into is refused: the match would run into the admin's bytes.
+	 */
+	public function test_removing_the_block_between_a_stored_void_more_and_the_admin_bytes_is_refused_and_the_row_is_unchanged(): void {
+		$post   = $this->raw_post( self::paragraph( 'One' ) . "\n\n" . self::odd_match_fixture() );
+		$before = $this->row( $post );
+
+		$result = $this->call(
+			$post,
+			array(
+				array(
+					'op'   => 'remove',
+					'path' => '2',
+					'name' => 'core/html',
+				),
+			)
+		);
+
+		$this->assertSame( 'steadhand_refused_unsupported_markup', $this->refusal_code( $result ) );
+		$this->assertStringContainsString( 'drop part of the content', $result->get_error_message() );
+		$this->assertSame( $before, $this->row( $post ) );
+	}
+
+	/**
+	 * Replacing that html block with a clean paragraph is refused: the match would end inside the sent run.
+	 */
+	public function test_replacing_the_block_between_a_stored_void_more_and_the_admin_bytes_is_refused_and_the_row_is_unchanged(): void {
+		$post   = $this->raw_post( self::paragraph( 'One' ) . "\n\n" . self::odd_match_fixture() );
+		$before = $this->row( $post );
+
+		$result = $this->call(
+			$post,
+			array(
+				array(
+					'op'     => 'replace',
+					'path'   => '2',
+					'name'   => 'core/html',
+					'markup' => self::paragraph( 'Clean' ),
+				),
+			)
+		);
+
+		$this->assertSame( 'steadhand_refused_unsupported_markup', $this->refusal_code( $result ) );
+		$this->assertStringContainsString( 'drop part of the content', $result->get_error_message() );
+		$this->assertSame( $before, $this->row( $post ) );
+	}
+
+	/**
+	 * A stored match that lies wholly in one kept range, and is untouched, is accepted, and what WordPress shows for it is unchanged.
+	 */
+	public function test_an_untouched_stored_match_in_a_kept_range_is_accepted_and_the_display_is_unchanged(): void {
+		$post = $this->raw_post( self::paragraph( 'One' ) . "\n\n" . self::odd_match_fixture() );
+
+		$shown_before = array();
+		foreach ( array( 0, 1 ) as $value ) {
+			$shown_before[ $value ] = self::shown_with_more( $post, $value );
+		}
+
+		$out = $this->output_of(
+			'steadhand-edit-blocks',
+			array(
+				'id'         => $post,
+				'operations' => array(
+					array(
+						'op'     => 'replace',
+						'path'   => '0',
+						'name'   => 'core/paragraph',
+						'markup' => self::paragraph( 'Changed' ),
+					),
+				),
+			)
+		);
+
+		$this->assertTrue( $out['changed'] );
+		foreach ( array( 0, 1 ) as $value ) {
+			$this->assertSame(
+				str_replace( 'One', 'Changed', $shown_before[ $value ] ),
+				self::shown_with_more( $post, $value ),
+				"The display for the untouched part is unchanged, more=$value."
+			);
+		}
+	}
+
+	/**
+	 * Normal removal and replacement on a post with a proper core/more block are accepted.
+	 */
+	public function test_a_normal_removal_and_a_normal_replace_on_a_post_with_a_proper_more_block_are_accepted(): void {
+		$more = '<!-- wp:more -->' . "\n" . '<!--more-->' . "\n" . '<!-- /wp:more -->';
+
+		$post = $this->raw_post( $more . "\n\n" . self::paragraph( 'One' ) . "\n\n" . self::paragraph( 'Two' ) );
+		$out  = $this->output_of(
+			'steadhand-edit-blocks',
+			array(
+				'id'         => $post,
+				'operations' => array(
+					array(
+						'op'   => 'remove',
+						'path' => '2',
+						'name' => 'core/paragraph',
+					),
+				),
+			)
+		);
+		$this->assertTrue( $out['changed'] );
+
+		$post = $this->raw_post( $more . "\n\n" . self::paragraph( 'One' ) . "\n\n" . self::paragraph( 'Two' ) );
+		$out  = $this->output_of(
+			'steadhand-edit-blocks',
+			array(
+				'id'         => $post,
+				'operations' => array(
+					array(
+						'op'     => 'replace',
+						'path'   => '1',
+						'name'   => 'core/paragraph',
+						'markup' => self::paragraph( 'Changed' ),
+					),
+				),
+			)
+		);
+		$this->assertTrue( $out['changed'] );
+	}
+
+	/**
+	 * What WordPress shows for a post with core's more tag shown (more = 1) or cut (more = 0).
+	 *
+	 * @param int $post Post ID.
+	 * @param int $value The value of the global $more.
+	 * @return string
+	 */
+	private static function shown_with_more( int $post, int $value ): string {
+		global $more;
+
+		setup_postdata( get_post( $post ) );
+		try {
+			$more = $value; // phpcs:ignore WordPress.WP.GlobalVariablesOverride.Prohibited -- get_the_content() reads core's own global.
+
+			return (string) get_the_content();
+		} finally {
+			wp_reset_postdata();
+		}
+	}
+
+	/**
+	 * A stored match that covers the start of a second match: removing the first void delimiter leaves a second match in kept bytes
+	 * that the stored content never had, because the first match consumed it. That is refused, and the row is unchanged.
+	 */
+	public function test_removing_the_block_whose_stored_match_covers_a_second_match_is_refused_and_the_row_is_unchanged(): void {
+		$post   = $this->raw_post( '<!-- wp:more /--><p title="<!-- wp:more /-->">admin --></p>' );
+		$before = $this->row( $post );
+
+		$result = $this->call(
+			$post,
+			array(
+				array(
+					'op'   => 'remove',
+					'path' => '0',
+					'name' => 'core/more',
+				),
+			)
+		);
+
+		$this->assertSame( 'steadhand_refused_unsupported_markup', $this->refusal_code( $result ) );
+		$this->assertStringContainsString( 'drop part of the content', $result->get_error_message() );
+		$this->assertSame( $before, $this->row( $post ) );
+	}
 }

@@ -518,10 +518,10 @@ final class PostWriter {
 			}
 		}
 
-		// WordPress removes core/more delimiters from the content it shows, with a pattern that can run past a void delimiter. A
-		// match that overlaps a sent run must be exactly one whole delimiter of the final content.
-		if ( false !== BlockEditor::display_split_problem( $content, $sent ) ) {
-			return self::unsupported( __( 'The markup you sent would make WordPress drop part of the content when it shows the post, so nothing was changed. Send the core/more block with its opening and closing comments, not as a self-closing block.', 'steadhand' ) );
+		// WordPress removes core/more delimiters from the content it shows, with a pattern that can run past a void delimiter. This
+		// checks the whole final content: every match must be one whole delimiter, or an untouched match of the stored content.
+		if ( false !== BlockEditor::display_split_problem( $content, $stored, $kept ) ) {
+			return self::unsupported( __( 'This edit would make WordPress drop part of the content when it shows the post, so nothing was changed. If you sent a core/more block, send it with its opening and closing comments, not as a self-closing block.', 'steadhand' ) );
 		}
 
 		if ( ! BlockEditor::aligned( $stored, $kept, $sent, $content ) ) {

@@ -269,15 +269,7 @@ final class BlockEditor {
 				);
 			}
 
-			if ( false !== self::display_split_problem(
-				$markup,
-				array(
-					array(
-						'at'   => 0,
-						'text' => $markup,
-					),
-				)
-			) ) {
+			if ( false !== self::markup_display_split_problem( $markup ) ) {
 				return self::invalid(
 					/* translators: %d: the number of the operation, counting from 1. */
 					sprintf( __( 'The markup of operation %d would make WordPress drop part of the content when it shows the post. Send the core/more block with its opening and closing comments, not as a self-closing block.', 'steadhand' ), $where )
@@ -463,42 +455,75 @@ final class BlockEditor {
 	}
 
 	/**
-	 * Whether a match of core's display-time pattern overlaps a sent run without being exactly one whole block delimiter token.
+	 * Whether the content WordPress would show, cut where its display-time pattern matches, differs from what was checked.
 	 *
-	 * Core's get_the_content() removes the core/more delimiters from the content it shows (see DISPLAY_MORE), and the pattern is not
-	 * anchored to the end of a delimiter, so a void delimiter can run on to the next " -->" and take the bytes in between with it.
-	 * A match that overlaps a sent run is allowed only when it is exactly one whole delimiter token of the content. Null when PCRE
-	 * fails, and the caller refuses.
+	 * Core's get_the_content() removes the core/more delimiters from the content it shows (see DISPLAY_MORE). The pattern is not
+	 * anchored to the end of a delimiter, so a void delimiter can run on to the next " -->" and take bytes in between with it.
+	 * This applies to the whole final content, not only to sent runs. Every match must be one of two things: exactly one whole
+	 * delimiter token of the final content, or a match wholly inside one kept range that is byte-identical to a match of the stored
+	 * content at the stored offset the kept range maps to (a match that was already there, and that the edit did not touch).
+	 * Anything else is a problem. Null when PCRE fails, and the caller refuses.
 	 *
-	 * @param string                                   $content The content to check.
-	 * @param array<int, array{at: int, text: string}> $runs    Sent runs, with the offset each starts at in $content.
+	 * @param string                                                    $content The final content to check.
+	 * @param string                                                    $stored  The stored content the kept ranges come from.
+	 * @param array<int, array{start: int, end: int, final_start: int}> $kept   Kept ranges, with their stored bounds and the offset each starts at in $content.
 	 * @return bool|null True when a match is a problem.
 	 */
-	public static function display_split_problem( string $content, array $runs ): ?bool {
-		$matches = null;
-		if ( false === preg_match_all( self::DISPLAY_MORE, $content, $matches, PREG_OFFSET_CAPTURE ) || PREG_NO_ERROR !== preg_last_error() ) {
-			return null;
-		}
-		$tokens = self::tokens( $content );
-		if ( null === $tokens ) {
+	public static function display_split_problem( string $content, string $stored, array $kept ): ?bool {
+		$stored_at = self::display_matches( $stored );
+		$final_at  = self::display_matches( $content );
+		$tokens    = self::tokens( $content );
+		if ( null === $stored_at || null === $final_at || null === $tokens ) {
 			return null;
 		}
 
-		foreach ( $matches[0] as $match ) {
-			$start   = $match[1];
-			$end     = $start + strlen( $match[0] );
-			$overlap = false;
-			foreach ( $runs as $run ) {
-				$run_end = $run['at'] + strlen( $run['text'] );
-				if ( $start < $run_end && $run['at'] < $end ) {
-					$overlap = true;
+		foreach ( $final_at as $start => $text ) {
+			$end = $start + strlen( $text );
+
+			$whole = false;
+			foreach ( $tokens as $token ) {
+				if ( $token['start'] === $start && $token['end'] === $end ) {
+					$whole = true;
 					break;
 				}
 			}
-			if ( ! $overlap ) {
+			if ( $whole ) {
 				continue;
 			}
 
+			$stored_start = null;
+			foreach ( $kept as $range ) {
+				$length = $range['end'] - $range['start'];
+				if ( $range['final_start'] <= $start && $end <= $range['final_start'] + $length ) {
+					$stored_start = $range['start'] + ( $start - $range['final_start'] );
+					break;
+				}
+			}
+
+			if ( null === $stored_start || ! isset( $stored_at[ $stored_start ] ) || $stored_at[ $stored_start ] !== $text ) {
+				return true;
+			}
+		}
+
+		return false;
+	}
+
+	/**
+	 * Whether a sent markup has a display-time match of DISPLAY_MORE that is not exactly one whole block delimiter token of that markup.
+	 * The raw check on each operation's markup, before any content is assembled. Null when PCRE fails, and the caller refuses.
+	 *
+	 * @param string $markup The markup one operation sends.
+	 * @return bool|null True when a match is a problem.
+	 */
+	public static function markup_display_split_problem( string $markup ): ?bool {
+		$matches = self::display_matches( $markup );
+		$tokens  = self::tokens( $markup );
+		if ( null === $matches || null === $tokens ) {
+			return null;
+		}
+
+		foreach ( $matches as $start => $text ) {
+			$end   = $start + strlen( $text );
 			$whole = false;
 			foreach ( $tokens as $token ) {
 				if ( $token['start'] === $start && $token['end'] === $end ) {
@@ -512,6 +537,26 @@ final class BlockEditor {
 		}
 
 		return false;
+	}
+
+	/**
+	 * The matches of DISPLAY_MORE in a text, keyed by byte offset. Null when PCRE fails.
+	 *
+	 * @param string $text Text.
+	 * @return array<int, string>|null
+	 */
+	private static function display_matches( string $text ): ?array {
+		$matches = null;
+		if ( false === preg_match_all( self::DISPLAY_MORE, $text, $matches, PREG_OFFSET_CAPTURE ) || PREG_NO_ERROR !== preg_last_error() ) {
+			return null;
+		}
+
+		$out = array();
+		foreach ( $matches[0] as $match ) {
+			$out[ $match[1] ] = $match[0];
+		}
+
+		return $out;
 	}
 
 	/**
