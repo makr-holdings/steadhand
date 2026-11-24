@@ -768,4 +768,238 @@ final class UpdatePostTest extends PostWriteTestCase {
 		$this->assertSame( $rows + 1, $this->count_rows( $agent ) );
 		$this->assertSame( 'blocked', $this->latest_row( $agent )['result'] );
 	}
+
+
+	/**
+	 * A content change on a site with revisions records the state before (snapshot_id) and the state after (a newer
+	 * revision that holds exactly what was stored), and the row is undoable.
+	 */
+	public function test_a_content_change_records_the_state_after_as_a_newer_revision_holding_the_stored_text(): void {
+		$post  = $this->admin_post(
+			array(
+				'post_status'  => 'draft',
+				'post_title'   => 'Before title',
+				'post_content' => 'Before content',
+				'post_excerpt' => 'Before excerpt',
+			)
+		);
+		$agent = $this->act_as_agent();
+
+		$this->output_of(
+			self::TOOL_NAME,
+			array(
+				'id'      => $post,
+				'content' => 'After content',
+			)
+		);
+
+		$row = $this->latest_row( $agent );
+		$this->assertSame( 'ok', $row['result'] );
+		$this->assertSame( 1, (int) $row['undoable'] );
+
+		$before = (int) $row['snapshot_id'];
+		$after  = (int) $row['after_snapshot_id'];
+		$this->assertGreaterThan( 0, $after );
+		$this->assertGreaterThan( $before, $after, 'The after-state is a newer revision than the before-state.' );
+		$this->assertSame( 'Before content', get_post( $before )->post_content );
+
+		$stored   = get_post( $post );
+		$revision = get_post( $after );
+		$this->assertSame( 'After content', $revision->post_content );
+		$this->assertSame( $stored->post_title, $revision->post_title );
+		$this->assertSame( $stored->post_content, $revision->post_content );
+		$this->assertSame( $stored->post_excerpt, $revision->post_excerpt );
+		$this->assertSame( $post, (int) $revision->post_parent );
+	}
+
+	public function test_a_call_that_changes_nothing_records_no_after_snapshot(): void {
+		$post  = $this->admin_post(
+			array(
+				'post_status' => 'draft',
+				'post_title'  => 'Same',
+			)
+		);
+		$agent = $this->act_as_agent();
+
+		$this->output_of(
+			self::TOOL_NAME,
+			array(
+				'id'    => $post,
+				'title' => 'Same',
+			)
+		);
+
+		$row = $this->latest_row( $agent );
+		$this->assertSame( 0, (int) $row['after_snapshot_id'] );
+		$this->assertSame( 0, (int) $row['snapshot_id'] );
+		$this->assertSame( 0, (int) $row['undoable'] );
+	}
+
+	public function test_a_call_that_also_sets_the_slug_is_not_undoable_and_records_no_after_snapshot(): void {
+		$post  = $this->admin_post(
+			array(
+				'post_status'  => 'draft',
+				'post_content' => 'Before',
+			)
+		);
+		$agent = $this->act_as_agent();
+
+		$this->output_of(
+			self::TOOL_NAME,
+			array(
+				'id'      => $post,
+				'content' => 'After',
+				'slug'    => 'a-new-slug',
+			)
+		);
+
+		$row = $this->latest_row( $agent );
+		$this->assertSame( 0, (int) $row['undoable'] );
+		$this->assertSame( 0, (int) $row['after_snapshot_id'] );
+	}
+
+	public function test_with_one_revision_kept_no_after_snapshot_is_recorded(): void {
+		add_filter( 'wp_revisions_to_keep', static fn(): int => 1 );
+		$post  = $this->admin_post(
+			array(
+				'post_status'  => 'draft',
+				'post_content' => 'Before',
+			)
+		);
+		$agent = $this->act_as_agent();
+
+		$this->output_of(
+			self::TOOL_NAME,
+			array(
+				'id'      => $post,
+				'content' => 'After',
+			)
+		);
+
+		$row = $this->latest_row( $agent );
+		$this->assertSame( 0, (int) $row['undoable'] );
+		$this->assertSame( 0, (int) $row['after_snapshot_id'] );
+	}
+
+	public function test_a_post_type_without_revisions_records_no_after_snapshot(): void {
+		$type = 'steadhand_memo';
+		register_post_type(
+			$type,
+			array(
+				'public'   => true,
+				'supports' => array( 'title', 'editor' ),
+			)
+		);
+		add_filter(
+			'steadhand_allowed_post_types',
+			static fn( array $types ): array => array_merge( $types, array( $type ) )
+		);
+
+		try {
+			$post  = $this->admin_post(
+				array(
+					'post_type'    => $type,
+					'post_status'  => 'draft',
+					'post_content' => 'Before',
+				)
+			);
+			$agent = $this->act_as_agent();
+
+			$this->output_of(
+				self::TOOL_NAME,
+				array(
+					'id'      => $post,
+					'content' => 'After',
+				)
+			);
+
+			$row = $this->latest_row( $agent );
+			$this->assertSame( 'ok', $row['result'] );
+			$this->assertSame( 0, (int) $row['undoable'] );
+			$this->assertSame( 0, (int) $row['after_snapshot_id'] );
+		} finally {
+			remove_all_filters( 'steadhand_allowed_post_types' );
+			unregister_post_type( $type );
+		}
+	}
+
+	public function test_a_guardrail_refusal_records_no_after_snapshot(): void {
+		$post  = $this->fixture( 'draft' );
+		$agent = $this->act_as_agent();
+
+		$this->refusal_code(
+			$this->execute_ability(
+				self::ABILITY,
+				array(
+					'id'      => $post,
+					'content' => str_repeat( "\xc3\xa9", 131073 ),
+				)
+			)
+		);
+
+		$row = $this->latest_row( $agent );
+		$this->assertSame( 'blocked', $row['result'] );
+		$this->assertSame( 0, (int) $row['after_snapshot_id'] );
+	}
+
+	/**
+	 * The stored text is what the after-state holds, not the text the agent sent: a script tag is removed on save, and
+	 * the revision keeps the stored version.
+	 */
+	public function test_the_after_snapshot_holds_the_text_as_stored_when_the_save_filters_change_it(): void {
+		$post  = $this->fixture( 'draft' );
+		$agent = $this->act_as_agent();
+
+		$this->output_of(
+			self::TOOL_NAME,
+			array(
+				'id'      => $post,
+				'content' => '<p>Hello</p><script>alert(1)</script>',
+			)
+		);
+
+		$row      = $this->latest_row( $agent );
+		$after    = (int) $row['after_snapshot_id'];
+		$revision = get_post( $after );
+		$this->assertGreaterThan( 0, $after );
+		$this->assertStringNotContainsString( '<script', $revision->post_content );
+		$this->assertSame( get_post( $post )->post_content, $revision->post_content );
+	}
+
+	/**
+	 * The state one write leaves is the state the next write starts from: the second row's before-snapshot is the first
+	 * row's after-snapshot.
+	 */
+	public function test_the_next_write_starts_from_the_snapshot_the_previous_write_left(): void {
+		$post  = $this->admin_post(
+			array(
+				'post_status'  => 'draft',
+				'post_content' => 'Start',
+			)
+		);
+		$agent = $this->act_as_agent();
+
+		$this->output_of(
+			self::TOOL_NAME,
+			array(
+				'id'      => $post,
+				'content' => 'One',
+			)
+		);
+		$first = $this->latest_row( $agent );
+
+		$this->output_of(
+			self::TOOL_NAME,
+			array(
+				'id'      => $post,
+				'content' => 'Two',
+			)
+		);
+		$second = $this->latest_row( $agent );
+
+		$this->assertGreaterThan( 0, (int) $first['after_snapshot_id'] );
+		$this->assertSame( (int) $first['after_snapshot_id'], (int) $second['snapshot_id'] );
+		$this->assertSame( 'One', get_post( (int) $second['snapshot_id'] )->post_content );
+		$this->assertSame( 1, (int) $second['undoable'] );
+	}
 }

@@ -29,6 +29,7 @@ final class SchemaTest extends LogTestCase {
 		'message',
 		'guardrail_notes',
 		'snapshot_id',
+		'after_snapshot_id',
 		'undoable',
 		'undone_by',
 	);
@@ -37,7 +38,7 @@ final class SchemaTest extends LogTestCase {
 		Schema::install();
 
 		$this->assertTrue( Schema::exists() );
-		$this->assertSame( self::COLUMNS, $this->column_names() );
+		$this->assertSame( $this->expected_columns(), $this->column_names() );
 	}
 
 	public function test_install_is_idempotent_and_records_the_version(): void {
@@ -46,7 +47,7 @@ final class SchemaTest extends LogTestCase {
 
 		$this->assertTrue( Schema::exists() );
 		$this->assertSame( Schema::DB_VERSION, get_option( Schema::OPTION ) );
-		$this->assertSame( self::COLUMNS, $this->column_names() );
+		$this->assertSame( $this->expected_columns(), $this->column_names() );
 	}
 
 	public function test_maybe_upgrade_installs_when_the_version_option_is_missing(): void {
@@ -65,6 +66,79 @@ final class SchemaTest extends LogTestCase {
 
 		$this->assertSame( Schema::DB_VERSION, get_option( Schema::OPTION ) );
 		$this->assertTrue( Schema::exists() );
+	}
+
+	/**
+	 * A table made with the layout before after_snapshot_id (version 1) gains the column when the version is stale, and
+	 * its existing rows are kept, with the new column at 0.
+	 */
+	public function test_a_table_with_the_old_layout_gains_the_column_and_keeps_its_rows(): void {
+		global $wpdb;
+
+		$this->let_ddl_reach_the_table();
+		$table = Schema::table();
+
+		try {
+			Schema::uninstall();
+
+			// The version 1 layout: every column of the current table except after_snapshot_id.
+			// The table name is fixed (see Schema::table()), and the statement has no input.
+			// phpcs:disable WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.DirectDatabaseQuery.SchemaChange,WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- Test builds the old table layout; the table name is fixed.
+			$wpdb->query(
+				"CREATE TABLE {$table} (
+  id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  created_at DATETIME NOT NULL,
+  user_id BIGINT UNSIGNED NOT NULL DEFAULT 0,
+  agent_label VARCHAR(191) NOT NULL DEFAULT '',
+  ability VARCHAR(100) NOT NULL DEFAULT '',
+  object_type VARCHAR(40) NOT NULL DEFAULT '',
+  object_id BIGINT UNSIGNED NOT NULL DEFAULT 0,
+  input LONGTEXT NOT NULL,
+  result VARCHAR(20) NOT NULL DEFAULT '',
+  message TEXT NOT NULL,
+  guardrail_notes TEXT NOT NULL,
+  snapshot_id BIGINT UNSIGNED NOT NULL DEFAULT 0,
+  undoable TINYINT(1) NOT NULL DEFAULT 0,
+  undone_by BIGINT UNSIGNED NOT NULL DEFAULT 0,
+  PRIMARY KEY  (id),
+  KEY created_at (created_at),
+  KEY user_created (user_id, created_at),
+  KEY user_id_id (user_id, id)
+) {$wpdb->get_charset_collate()};"
+			);
+			// phpcs:enable WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.DirectDatabaseQuery.SchemaChange,WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+			$this->assertNotContains( 'after_snapshot_id', $this->column_names(), 'The fixture must be the old layout.' );
+
+			$wpdb->insert( // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery -- Test fixture written straight to the change-log table.
+				$table,
+				array(
+					'created_at'  => gmdate( 'Y-m-d H:i:s' ),
+					'user_id'     => 5,
+					'ability'     => 'steadhand/update-post',
+					'result'      => 'ok',
+					'snapshot_id' => 7,
+					'undoable'    => 1,
+				)
+			);
+			$id = (int) $wpdb->insert_id;
+
+			update_option( Schema::OPTION, '1' );
+			Schema::maybe_upgrade();
+
+			$this->assertSame( $this->expected_columns(), $this->column_names() );
+			$this->assertSame( Schema::DB_VERSION, get_option( Schema::OPTION ) );
+
+			$kept = $wpdb->get_row( $wpdb->prepare( "SELECT * FROM {$table} WHERE id = %d", $id ), ARRAY_A ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared,WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching -- The table name is fixed.
+			$this->assertIsArray( $kept, 'The row written before the upgrade must still exist.' );
+			$this->assertSame( 'steadhand/update-post', $kept['ability'] );
+			$this->assertSame( '7', (string) $kept['snapshot_id'] );
+			$this->assertSame( '0', (string) $kept['after_snapshot_id'], 'A row from before the upgrade has no after-state.' );
+			$this->assertSame( '1', (string) $kept['undoable'] );
+		} finally {
+			Schema::install();
+		}
+
+		$this->assertSame( $this->expected_columns(), $this->column_names() );
 	}
 
 	public function test_a_missing_table_is_reported_as_missing(): void {
@@ -94,7 +168,7 @@ final class SchemaTest extends LogTestCase {
 		}
 
 		$this->assertTrue( Schema::exists(), 'The table must be back for the other tests.' );
-		$this->assertSame( self::COLUMNS, $this->column_names() );
+		$this->assertSame( $this->expected_columns(), $this->column_names() );
 	}
 
 	/**
@@ -248,7 +322,20 @@ final class SchemaTest extends LogTestCase {
 	}
 
 	/**
-	 * The column names of the change-log table, in table order.
+	 * The expected column names, sorted. A table upgraded from an older layout gets a new column at its end, so the order
+	 * of the columns depends on the history of the table, and only the set of names is compared.
+	 *
+	 * @return string[]
+	 */
+	private function expected_columns(): array {
+		$columns = self::COLUMNS;
+		sort( $columns );
+
+		return $columns;
+	}
+
+	/**
+	 * The column names of the change-log table, sorted (see expected_columns()).
 	 *
 	 * @return string[]
 	 */
@@ -259,6 +346,9 @@ final class SchemaTest extends LogTestCase {
 		// The table name is fixed (see Schema::table()); SHOW COLUMNS cannot bind an identifier.
 		$columns = $wpdb->get_results( "SHOW COLUMNS FROM {$table}", ARRAY_A ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- Test reads the table definition; the table name is fixed.
 
-		return array_column( (array) $columns, 'Field' );
+		$names = array_column( (array) $columns, 'Field' );
+		sort( $names );
+
+		return $names;
 	}
 }

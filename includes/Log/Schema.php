@@ -17,7 +17,7 @@ defined( 'ABSPATH' ) || exit;
 final class Schema {
 
 	/** Version of the table layout. Bump it with any change to the columns or keys. */
-	public const DB_VERSION = '1';
+	public const DB_VERSION = '2';
 
 	/** Option that stores the installed layout version. */
 	public const OPTION = 'steadhand_db_version';
@@ -70,6 +70,7 @@ final class Schema {
   message TEXT NOT NULL,
   guardrail_notes TEXT NOT NULL,
   snapshot_id BIGINT UNSIGNED NOT NULL DEFAULT 0,
+  after_snapshot_id BIGINT UNSIGNED NOT NULL DEFAULT 0,
   undoable TINYINT(1) NOT NULL DEFAULT 0,
   undone_by BIGINT UNSIGNED NOT NULL DEFAULT 0,
   PRIMARY KEY  (id),

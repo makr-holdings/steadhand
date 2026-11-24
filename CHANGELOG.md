@@ -6,6 +6,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). The
 
 ## [Unreleased]
 
+### Added
+- The change log records the state a write leaves, in a new column `after_snapshot_id`. For an update that changes the post, it is the ID of the core revision that holds the post's title, content and excerpt after the write, as stored. It is preparation for undo (M3): undo will use it to check that the post has not changed since the write. The table gets a new layout version (2). An existing table gains the column on the first request after the update, and its rows are kept. Rows written before this version have 0 there.
+
+### Changed
+- A write is recorded as undoable only when the state after it was also saved (`after_snapshot_id`). Before, an update was undoable when its before-state was saved. Nothing else about the undoable flag changes.
+
 ## [0.2.1] - 2026-11-23
 
 ### Security

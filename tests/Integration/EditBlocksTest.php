@@ -987,6 +987,7 @@ final class EditBlocksTest extends PostWriteTestCase {
 		$this->assertFalse( $out['changed'] );
 		$this->assertSame( $before, $this->revision_ids( $post ) );
 		$this->assertSame( 0, (int) $this->latest_row( $agent )['snapshot_id'] );
+		$this->assertSame( 0, (int) $this->latest_row( $agent )['after_snapshot_id'] );
 		$this->assertSame( 'ok', $this->latest_row( $agent )['result'] );
 	}
 
@@ -1004,6 +1005,28 @@ final class EditBlocksTest extends PostWriteTestCase {
 		$revision = (int) $row['snapshot_id'];
 		$this->assertGreaterThan( 0, $revision );
 		$this->assertSame( self::CONTENT, get_post( $revision )->post_content );
+	}
+
+	public function test_a_change_records_the_state_after_as_a_newer_revision_holding_the_stored_content(): void {
+		$post  = $this->fixture();
+		$agent = $this->act_as_agent();
+
+		$this->output_of( self::TOOL_NAME, $this->replace_two( $post ) );
+
+		$row = $this->latest_row( $agent );
+		$this->assertSame( 1, (int) $row['undoable'] );
+
+		$before = (int) $row['snapshot_id'];
+		$after  = (int) $row['after_snapshot_id'];
+		$this->assertGreaterThan( $before, $after, 'The after-state is a newer revision than the before-state.' );
+		$this->assertSame( self::CONTENT, get_post( $before )->post_content );
+
+		$stored   = get_post( $post );
+		$revision = get_post( $after );
+		$this->assertSame( $stored->post_content, $revision->post_content );
+		$this->assertSame( $stored->post_title, $revision->post_title );
+		$this->assertSame( $stored->post_excerpt, $revision->post_excerpt );
+		$this->assertStringContainsString( 'Changed', $revision->post_content );
 	}
 
 	public function test_the_log_keeps_a_digest_of_the_markup_and_never_its_text(): void {

@@ -221,6 +221,8 @@ final class UploadMediaTest extends PostWriteTestCase {
 			$this->assertSame( 'inherit', $post->post_status, $name );
 			$this->assertSame( 0, (int) $post->post_parent, $name );
 		}
+
+		$this->assertSame( 0, (int) $this->latest_row( $agent )['after_snapshot_id'], 'An upload has no after-state snapshot.' );
 	}
 
 	/**

@@ -203,6 +203,23 @@ abstract class Ability {
 	}
 
 	/**
+	 * Names the snapshot that holds the object's state after the call. Runs after execute() returned a non-error result,
+	 * still inside the write, so the state it reads is the state the call left.
+	 *
+	 * Only called when snapshot() reported the call as undoable. Returns the ID of the snapshot that holds the object's
+	 * state after the call (for posts, a core revision), or 0 for none. A throw is treated as 0. The result is stored with
+	 * the change log entry, and the entry is undoable only when this returns an ID other than the snapshot's.
+	 *
+	 * @param array<string, mixed> $input  Validated, sanitized input, as execute() received it.
+	 * @param mixed                $output What execute() returned.
+	 * @return int The snapshot ID, or 0.
+	 */
+	public function snapshot_after( array $input, mixed $output ): int {
+		unset( $input, $output );
+		return 0;
+	}
+
+	/**
 	 * Performs the ability. Called only after validation and authorization have passed.
 	 *
 	 * @param array<string, mixed> $input Validated input.

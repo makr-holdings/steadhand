@@ -845,6 +845,7 @@ final class SetPostTermsTest extends PostWriteTestCase {
 		$this->assertSame( self::ABILITY, $row['ability'] );
 		$this->assertSame( 'post', $row['object_type'] );
 		$this->assertSame( $post, (int) $row['object_id'] );
+		$this->assertSame( 0, (int) $row['after_snapshot_id'] );
 		$this->assertStringContainsString( (string) $tag, (string) $row['input'] );
 		$this->assertStringNotContainsString( 'Secret Name', (string) $row['input'] );
 	}

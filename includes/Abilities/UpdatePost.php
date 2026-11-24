@@ -328,6 +328,26 @@ final class UpdatePost extends Ability {
 	}
 
 	/**
+	 * Names the revision that holds the post's state after the write. Called by the pipeline only when snapshot() found
+	 * an undoable revision, and inside the write.
+	 *
+	 * The revision is taken only when the call changed the post, which the output says in 'changed'. A call that changed
+	 * nothing has no after-state to save, and returns 0. execute() has already removed the state snapshot() kept, so
+	 * this reads only the output and the post ID.
+	 *
+	 * @param array<string, mixed> $input  Validated, sanitized input.
+	 * @param mixed                $output What execute() returned.
+	 * @return int The revision ID, or 0.
+	 */
+	public function snapshot_after( array $input, mixed $output ): int {
+		if ( ! is_array( $output ) || true !== ( $output['changed'] ?? null ) ) {
+			return 0;
+		}
+
+		return Snapshots::post_revision( (int) $input['id'] );
+	}
+
+	/**
 	 * Updates the post with the fields that differ from what is stored. Checks the object again first, because the post
 	 * may have changed since the caller was checked.
 	 *

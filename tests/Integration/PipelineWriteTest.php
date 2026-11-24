@@ -457,12 +457,15 @@ final class PipelineWriteTest extends LogTestCase {
 			'id'       => 55,
 			'undoable' => true,
 		);
+		// A write is undoable only when the state after it was saved too, so the probe reports one.
+		$probe->after_result = 56;
 
 		$this->write( $probe, array( 'title' => 'x' ), new DbLogger() );
 
 		$row = $this->latest_row( $agent );
 		$this->assertSame( Entry::RESULT_OK, $row['result'] );
 		$this->assertSame( 55, (int) $row['snapshot_id'] );
+		$this->assertSame( 56, (int) $row['after_snapshot_id'] );
 		$this->assertSame( 1, (int) $row['undoable'] );
 	}
 
@@ -591,5 +594,178 @@ final class PipelineWriteTest extends LogTestCase {
 				)
 			);
 		}
+	}
+
+
+	/**
+	 * A write that is undoable before the change has an after-state snapshot, and the row names it.
+	 */
+	public function test_a_write_records_the_after_snapshot_and_is_undoable_when_both_snapshots_exist(): void {
+		$agent = $this->make_agent();
+		wp_set_current_user( $agent );
+		$probe = new WriteProbeAbility();
+
+		$probe->snapshot_result = array(
+			'id'       => 55,
+			'undoable' => true,
+		);
+
+		$probe->after_result = 56;
+
+		$this->write( $probe, array( 'title' => 'x' ), new DbLogger() );
+
+		$row = $this->latest_row( $agent );
+		$this->assertSame( Entry::RESULT_OK, $row['result'] );
+		$this->assertSame( 55, (int) $row['snapshot_id'] );
+		$this->assertSame( 56, (int) $row['after_snapshot_id'] );
+		$this->assertSame( 1, (int) $row['undoable'] );
+	}
+
+	/**
+	 * Runs snapshot_after() only inside the write bracket, and only for an undoable call.
+	 */
+	public function test_snapshot_after_runs_inside_the_write_only_when_the_snapshot_was_undoable(): void {
+		$agent = $this->make_agent();
+		wp_set_current_user( $agent );
+
+		$probe = new WriteProbeAbility();
+
+		$probe->snapshot_result = array(
+			'id'       => 55,
+			'undoable' => true,
+		);
+
+		$probe->after_result = 56;
+		$this->write( $probe, array( 'title' => 'x' ), new DbLogger() );
+		$this->assertTrue( $probe->writing_in_snapshot_after, 'snapshot_after() must run inside the write.' );
+
+		$not_undoable = new WriteProbeAbility();
+
+		$not_undoable->snapshot_result = array(
+			'id'       => 55,
+			'undoable' => false,
+		);
+
+		$not_undoable->after_result = 56;
+		$this->write( $not_undoable, array( 'title' => 'x' ), new DbLogger() );
+
+		$this->assertNull( $not_undoable->writing_in_snapshot_after, 'snapshot_after() must not run when the snapshot was not undoable.' );
+		$this->assertSame( 0, (int) $this->latest_row( $agent )['after_snapshot_id'] );
+	}
+
+	/**
+	 * A snapshot_after() that throws leaves the write done: the output is returned, the row is ok, and the call is not
+	 * undoable.
+	 */
+	public function test_a_throwing_snapshot_after_keeps_the_write_and_stores_no_after_snapshot(): void {
+		$agent = $this->make_agent();
+		wp_set_current_user( $agent );
+		$probe = new WriteProbeAbility();
+
+		$probe->snapshot_result = array(
+			'id'       => 55,
+			'undoable' => true,
+		);
+
+		$probe->throw_in_snapshot_after = true;
+
+		$out = $this->write( $probe, array( 'title' => 'x' ), new DbLogger() );
+
+		$this->assertIsArray( $out, 'The write must still succeed.' );
+		$this->assertTrue( $probe->executed );
+		$row = $this->latest_row( $agent );
+		$this->assertSame( Entry::RESULT_OK, $row['result'] );
+		$this->assertSame( 0, (int) $row['after_snapshot_id'] );
+		$this->assertSame( 0, (int) $row['undoable'] );
+	}
+
+	/**
+	 * A snapshot_after() that returns something other than a positive integer stores 0 and is not undoable. A value of
+	 * the wrong type fails the parent's int return type, and that is a throw too.
+	 *
+	 * @return array<string, array{0: mixed}>
+	 */
+	public static function bad_after_results(): array {
+		return array(
+			'a string'   => array( '56' ),
+			'a null'     => array( null ),
+			'a negative' => array( -1 ),
+			'zero'       => array( 0 ),
+		);
+	}
+
+	/**
+	 * A snapshot_after() result that is not a positive integer stores 0 and is not undoable.
+	 *
+	 * @dataProvider bad_after_results
+	 *
+	 * @param mixed $bad What snapshot_after() returns.
+	 */
+	public function test_a_snapshot_after_that_is_not_a_positive_integer_stores_no_after_snapshot( mixed $bad ): void {
+		$agent = $this->make_agent();
+		wp_set_current_user( $agent );
+		$probe = new WriteProbeAbility();
+
+		$probe->snapshot_result = array(
+			'id'       => 55,
+			'undoable' => true,
+		);
+
+		$probe->after_result = $bad;
+
+		$out = $this->write( $probe, array( 'title' => 'x' ), new DbLogger() );
+
+		$this->assertIsArray( $out );
+		$row = $this->latest_row( $agent );
+		$this->assertSame( 0, (int) $row['after_snapshot_id'] );
+		$this->assertSame( 0, (int) $row['undoable'] );
+	}
+
+	/**
+	 * An after-snapshot equal to the before-snapshot proves nothing about the change, so it is stored as 0.
+	 */
+	public function test_a_snapshot_after_equal_to_the_before_snapshot_is_stored_as_zero(): void {
+		$agent = $this->make_agent();
+		wp_set_current_user( $agent );
+		$probe = new WriteProbeAbility();
+
+		$probe->snapshot_result = array(
+			'id'       => 55,
+			'undoable' => true,
+		);
+
+		$probe->after_result = 55;
+
+		$this->write( $probe, array( 'title' => 'x' ), new DbLogger() );
+
+		$row = $this->latest_row( $agent );
+		$this->assertSame( 55, (int) $row['snapshot_id'] );
+		$this->assertSame( 0, (int) $row['after_snapshot_id'] );
+		$this->assertSame( 0, (int) $row['undoable'] );
+	}
+
+	/**
+	 * A write whose execute() fails never has an after-state, even when its snapshot_after() would return one.
+	 */
+	public function test_a_failed_write_stores_no_after_snapshot_and_never_asks_for_one(): void {
+		$agent = $this->make_agent();
+		wp_set_current_user( $agent );
+		$probe = new WriteProbeAbility();
+
+		$probe->snapshot_result = array(
+			'id'       => 55,
+			'undoable' => true,
+		);
+
+		$probe->after_result = 56;
+
+		$probe->throw_in_execute = true;
+
+		$this->write( $probe, array( 'title' => 'x' ), new DbLogger() );
+
+		$this->assertNull( $probe->writing_in_snapshot_after, 'snapshot_after() must not run after a failed execute().' );
+		$row = $this->latest_row( $agent );
+		$this->assertSame( Entry::RESULT_ERROR, $row['result'] );
+		$this->assertSame( 0, (int) $row['after_snapshot_id'] );
 	}
 }
