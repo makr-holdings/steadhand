@@ -208,7 +208,7 @@ final class AgentsScreen {
 	 */
 	private function notice_for_request(): void {
 		if ( null !== $this->outcome ) {
-			$this->notice_for_code( $this->outcome['code'] );
+			$this->notice_for_code( $this->outcome['code'], (string) ( $this->outcome['login'] ?? '' ) );
 			return;
 		}
 
@@ -221,17 +221,20 @@ final class AgentsScreen {
 	/**
 	 * Prints the notice of a result code. An unknown code prints nothing.
 	 *
-	 * @param string $code The result code.
+	 * @param string $code  The result code.
+	 * @param string $login The login to check, for create_failed_cleanup only.
 	 * @return void
 	 */
-	private function notice_for_code( string $code ): void {
+	private function notice_for_code( string $code, string $login = '' ): void {
 		$messages = self::messages();
 
 		if ( ! in_array( $code, AgentsHandler::CODES, true ) || ! isset( $messages[ $code ] ) ) {
 			return;
 		}
 
-		$this->notice( $messages[ $code ][0], $messages[ $code ][1] );
+		$text = 'create_failed_cleanup' === $code ? sprintf( $messages[ $code ][1], $login ) : $messages[ $code ][1];
+
+		$this->notice( $messages[ $code ][0], $text );
 	}
 
 	/**
@@ -247,6 +250,7 @@ final class AgentsScreen {
 			'passwords_revoked'         => array( 'success', __( 'All of the agent\'s passwords were revoked.', 'steadhand' ) ),
 			'capabilities_saved'        => array( 'success', __( 'The capabilities were saved.', 'steadhand' ) ),
 			'capabilities_mismatch'     => array( 'error', __( 'The capabilities could not be confirmed after saving. Check them before the agent is used.', 'steadhand' ) ),
+			'capabilities_unverified'   => array( 'error', __( 'The capabilities were saved, but this user is no longer a dedicated agent, so they grant nothing. Check the user\'s roles on the Users screen.', 'steadhand' ) ),
 			'invalid_username'          => array( 'error', __( 'The username is not valid. Use 1 to 60 lower-case letters, digits, underscores or hyphens, starting with a letter or digit.', 'steadhand' ) ),
 			'username_taken'            => array( 'error', __( 'That username already exists.', 'steadhand' ) ),
 			'invalid_label'             => array( 'error', __( 'The label is not valid. Use 1 to 60 characters on one line, with no markup, no invisible or control characters, and no leading or trailing spaces.', 'steadhand' ) ),
@@ -256,8 +260,13 @@ final class AgentsScreen {
 			'not_agent'                 => array( 'error', __( 'That user is not a dedicated agent, so nothing was changed.', 'steadhand' ) ),
 			'password_not_found'        => array( 'error', __( 'That password was not found for this agent.', 'steadhand' ) ),
 			'create_failed'             => array( 'error', __( 'The agent could not be created.', 'steadhand' ) ),
+			'create_failed_user_kept'   => array( 'error', __( 'The agent could not be created. A user with no role and no password access was left behind because content on this site is attributed to its ID. Remove it on the Users screen and choose what to do with that content.', 'steadhand' ) ),
+			/* translators: %s: the login name the administrator entered. */
+			'create_failed_cleanup'     => array( 'error', __( 'The agent could not be created, and removing the user it made did not finish. Check the Users screen for the login %s. The user may still have a role or a password, so remove it there.', 'steadhand' ) ),
+			'extra_role'                => array( 'error', __( 'The agent could not be created, because another plugin gave the new user an extra role or capability. Steadhand only creates users whose single role is the agent role.', 'steadhand' ) ),
 			'password_failed'           => array( 'error', __( 'The password could not be saved. Nothing was left behind.', 'steadhand' ) ),
-			'capabilities_failed'       => array( 'error', __( 'The capabilities could not be saved.', 'steadhand' ) ),
+			'revoke_failed'             => array( 'error', __( 'The password could not be revoked. It may still work. Try again, or remove it on the user\'s profile.', 'steadhand' ) ),
+			'capabilities_failed'       => array( 'error', __( 'The capabilities could not be confirmed. Check them on the Users screen before the agent is used.', 'steadhand' ) ),
 			'role_missing'              => array( 'error', __( 'The Steadhand agent role is missing. Deactivate and reactivate Steadhand to restore it.', 'steadhand' ) ),
 			'multisite'                 => array( 'warning', __( 'Agent management is not available on multisite networks.', 'steadhand' ) ),
 		);

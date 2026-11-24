@@ -1,7 +1,8 @@
 <?php
 /**
  * The Agents screen's checks after each write. A new user must hold nothing but the agent role, under the posted login, and a password
- * or capability change that leaves the target no longer an agent is undone. Also the races on login and label.
+ * or capability change that leaves the target no longer an agent is undone. Also the races on login and label, the rollback that keeps
+ * content, and the listeners that throw.
  *
  * @package Steadhand
  */
@@ -126,6 +127,62 @@ final class AgentsVerificationTest extends TestCase {
 		$this->assertCount( $count, get_users( array( 'fields' => 'ID' ) ) );
 	}
 
+	/**
+	 * A user that is kept after a refused create: no role, no capability of any kind, and no Application Password.
+	 *
+	 * @param int $id The user ID.
+	 */
+	private function assert_kept_without_access( int $id ): void {
+		$user = get_userdata( $id );
+
+		$this->assertInstanceOf( \WP_User::class, $user, 'The user is kept.' );
+		$this->assertEmpty( $user->roles, 'The kept user has no role.' );
+		$this->assertEmpty( $user->caps, 'The kept user stores no capability.' );
+		$this->assertEmpty( $user->allcaps, 'The kept user has no capability.' );
+		$this->assertSame( array(), \WP_Application_Passwords::get_user_application_passwords( $id ), 'The kept user has no password.' );
+	}
+
+	/**
+	 * Runs a create while $hook gives the new user an extra grant, then checks the refusal: the code, no secret, no user, and, for a
+	 * password that was made, no password. The grant is made once, on the first call of the hook.
+	 *
+	 * The hook is user_register, which runs before the first check, or wp_create_application_password, which runs after the password is
+	 * saved and so is caught only by the second check.
+	 *
+	 * @param string   $login The login to create.
+	 * @param string   $hook  The hook that gives the grant.
+	 * @param callable $grant Makes the grant. It receives the new user's ID.
+	 * @param string   $code  The refusal code the create must return.
+	 */
+	private function assert_grant_refused( string $login, string $hook, callable $grant, string $code ): void {
+		$count   = count( get_users( array( 'fields' => 'ID' ) ) );
+		$granted = array();
+		$this->on(
+			$hook,
+			static function ( $user_id, $item = null ) use ( $grant, &$granted ): void {
+				if ( array() !== $granted ) {
+					return;
+				}
+				$uuid    = is_array( $item ) ? (string) ( $item['uuid'] ?? '' ) : '';
+				$granted = array( (int) $user_id, $uuid );
+				$grant( (int) $user_id );
+			}
+		);
+
+		$result = $this->handler->create( $this->nonce( AgentsHandler::ACTION_CREATE ), $login, 'Desk' );
+
+		$this->assertNotSame( array(), $granted, 'The grant was made.' );
+		list( $id, $uuid ) = $granted;
+		$this->assertSame( $code, $result['code'] );
+		$this->assertFalse( $result['ok'] );
+		$this->assertNull( $result['secret'], 'No secret is returned.' );
+		$this->assertFalse( get_userdata( $id ), 'The user was removed.' );
+		if ( '' !== $uuid ) {
+			$this->assertNull( \WP_Application_Passwords::get_user_application_password( $id, $uuid ), 'The password was revoked.' );
+		}
+		$this->assert_no_user_and_count( $login, $count );
+	}
+
 	public function test_a_role_that_is_not_registered_refuses_before_anything_is_created(): void {
 		$count = count( get_users( array( 'fields' => 'ID' ) ) );
 
@@ -153,7 +210,7 @@ final class AgentsVerificationTest extends TestCase {
 
 		$result = $this->handler->create( $this->nonce( AgentsHandler::ACTION_CREATE ), 'added-role', 'Desk' );
 
-		$this->assertSame( 'create_failed', $result['code'] );
+		$this->assertSame( 'extra_role', $result['code'] );
 		$this->assertNull( $result['secret'] );
 		$this->assert_no_user_and_count( 'added-role', $count );
 	}
@@ -169,7 +226,7 @@ final class AgentsVerificationTest extends TestCase {
 
 		$result = $this->handler->create( $this->nonce( AgentsHandler::ACTION_CREATE ), 'set-role', 'Desk' );
 
-		$this->assertSame( 'create_failed', $result['code'] );
+		$this->assertSame( 'extra_role', $result['code'] );
 		$this->assertNull( $result['secret'] );
 		$this->assert_no_user_and_count( 'set-role', $count );
 	}
@@ -190,7 +247,7 @@ final class AgentsVerificationTest extends TestCase {
 		$result = $this->handler->create( $this->nonce( AgentsHandler::ACTION_CREATE ), 'set-hook', 'Desk' );
 
 		$this->assertTrue( $done, 'The set_user_role listener ran.' );
-		$this->assertSame( 'create_failed', $result['code'] );
+		$this->assertSame( 'extra_role', $result['code'] );
 		$this->assert_no_user_and_count( 'set-hook', $count );
 	}
 
@@ -225,50 +282,315 @@ final class AgentsVerificationTest extends TestCase {
 		$result = $this->handler->create( $this->nonce( AgentsHandler::ACTION_CREATE ), 'role-later', 'Desk' );
 
 		$this->assertIsArray( $made, 'The password was made before the check.' );
-		$this->assertSame( 'create_failed', $result['code'] );
+		$this->assertSame( 'extra_role', $result['code'] );
 		$this->assertNull( $result['secret'], 'No plaintext is returned.' );
 		$this->assertNull( \WP_Application_Passwords::get_user_application_password( $made[0], $made[1] ), 'The password was revoked.' );
 		$this->assert_no_user_and_count( 'role-later', $count );
 	}
 
-	public function test_a_login_written_twice_by_a_racing_request_refuses_and_removes_only_its_own_user(): void {
-		global $wpdb;
-		$inserted = 0;
+	/**
+	 * M2. The stored-capabilities comparison. Every test above changes a role, and Agents::is_agent() alone catches that. The tests below
+	 * change only the stored capabilities, and roles stay exactly [steadhand_agent]: add_cap() adds a key to the caps and not to the roles,
+	 * and add_role() of a name that is not registered stores the key but puts no entry in $user->roles, because WP_User only lists the
+	 * keys that are registered roles. So each of these passes Agents::is_agent(), and only the caps comparison in holds_only_agent_role()
+	 * refuses it. Without that comparison, the create would return 'created' and these tests would fail.
+	 */
+	public function test_an_extra_capability_granted_at_registration_is_refused(): void {
+		$this->assert_grant_refused(
+			'grant-cap-reg',
+			'user_register',
+			static fn( int $id ) => get_userdata( $id )->add_cap( 'manage_options' ),
+			'extra_role'
+		);
+	}
+
+	public function test_a_capability_stored_as_false_at_registration_is_refused(): void {
+		$this->assert_grant_refused(
+			'grant-false-reg',
+			'user_register',
+			static fn( int $id ) => get_userdata( $id )->add_cap( 'some_cap', false ),
+			'extra_role'
+		);
+	}
+
+	public function test_an_unregistered_role_name_granted_at_registration_is_refused(): void {
+		$this->assert_grant_refused(
+			'grant-role-reg',
+			'user_register',
+			static fn( int $id ) => get_userdata( $id )->add_role( 'not_registered_yet' ),
+			'extra_role'
+		);
+	}
+
+	public function test_an_extra_capability_granted_after_the_password_is_made_is_refused_by_the_second_check(): void {
+		$this->assert_grant_refused(
+			'grant-cap-late',
+			'wp_create_application_password',
+			static fn( int $id ) => get_userdata( $id )->add_cap( 'manage_options' ),
+			'extra_role'
+		);
+	}
+
+	public function test_a_capability_stored_as_false_after_the_password_is_made_is_refused_by_the_second_check(): void {
+		$this->assert_grant_refused(
+			'grant-false-late',
+			'wp_create_application_password',
+			static fn( int $id ) => get_userdata( $id )->add_cap( 'some_cap', false ),
+			'extra_role'
+		);
+	}
+
+	public function test_an_unregistered_role_name_granted_after_the_password_is_made_is_refused_by_the_second_check(): void {
+		$this->assert_grant_refused(
+			'grant-role-late',
+			'wp_create_application_password',
+			static fn( int $id ) => get_userdata( $id )->add_role( 'not_registered_yet' ),
+			'extra_role'
+		);
+	}
+
+	/**
+	 * M1. A rollback never deletes content. Core's wp_delete_user() deletes every post, attachment and link whose author is the user,
+	 * so a refused create keeps the user when any of them exists.
+	 */
+	public function test_a_post_attributed_to_the_new_user_is_kept_when_creation_fails(): void {
+		$post = 0;
 		$this->on(
 			'user_register',
-			static function ( $user_id ) use ( &$inserted ): void {
-				if ( 0 !== $inserted ) {
-					return;
-				}
-				$inserted = (int) $user_id;
-				// Another request's row with the same login, as a race between two requests could leave.
-				global $wpdb;
-				$wpdb->insert( // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching -- The race is simulated by a second row, which the API would not allow.
-					$wpdb->users,
+			static function ( $user_id ) use ( &$post ): void {
+				// Content that someone else made, under an ID that the new user has just taken.
+				$post = (int) wp_insert_post(
 					array(
-						'user_login'      => 'race-login',
-						'user_pass'       => 'not-used',
-						'user_nicename'   => 'race-login',
-						'user_email'      => '',
-						'user_registered' => gmdate( 'Y-m-d H:i:s' ),
-						'display_name'    => 'race-login',
+						'post_author' => $user_id,
+						'post_title'  => 'Written before the agent',
+						'post_status' => 'publish',
 					)
 				);
+				get_userdata( $user_id )->add_role( 'editor' );
+			}
+		);
+
+		$result = $this->handler->create( $this->nonce( AgentsHandler::ACTION_CREATE ), 'owns-post', 'Desk' );
+
+		$this->assertGreaterThan( 0, $post, 'The post was made during the request.' );
+		$this->assertSame( 'create_failed_user_kept', $result['code'] );
+		$this->assertNull( $result['secret'], 'No secret is returned.' );
+		$stored = get_post( $post );
+		$this->assertInstanceOf( \WP_Post::class, $stored, 'The post still exists.' );
+		$this->assertSame( 'publish', $stored->post_status, 'The post was not trashed.' );
+		$this->assert_kept_without_access( $result['user_id'] );
+	}
+
+	public function test_an_attachment_attributed_to_the_new_user_is_kept_when_creation_fails(): void {
+		$attachment = 0;
+		$this->on(
+			'user_register',
+			static function ( $user_id ) use ( &$attachment ): void {
+				$attachment = (int) wp_insert_attachment(
+					array(
+						'post_author'    => $user_id,
+						'post_title'     => 'Photo made before the agent',
+						'post_status'    => 'inherit',
+						'post_mime_type' => 'image/jpeg',
+					),
+					false
+				);
+				get_userdata( $user_id )->add_role( 'editor' );
+			}
+		);
+
+		$result = $this->handler->create( $this->nonce( AgentsHandler::ACTION_CREATE ), 'owns-media', 'Desk' );
+
+		$this->assertGreaterThan( 0, $attachment, 'The attachment was made during the request.' );
+		$this->assertSame( 'create_failed_user_kept', $result['code'] );
+		$this->assertNull( $result['secret'] );
+		$stored = get_post( $attachment );
+		$this->assertInstanceOf( \WP_Post::class, $stored, 'The attachment still exists.' );
+		$this->assertSame( 'inherit', $stored->post_status, 'The attachment was not trashed.' );
+		$this->assert_kept_without_access( $result['user_id'] );
+	}
+
+	public function test_a_link_attributed_to_the_new_user_is_kept_when_creation_fails(): void {
+		global $wpdb;
+		$link = 0;
+		$this->on(
+			'user_register',
+			static function ( $user_id ) use ( &$link ): void {
+				global $wpdb;
+				$wpdb->insert( // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching -- Test: a link attributed to the new user, which the link API does not offer.
+					$wpdb->links,
+					array(
+						'link_url'   => 'https://example.com/',
+						'link_name'  => 'Made before the agent',
+						'link_owner' => $user_id,
+					)
+				);
+				$link = (int) $wpdb->insert_id;
+				get_userdata( $user_id )->add_role( 'editor' );
+			}
+		);
+
+		$result = $this->handler->create( $this->nonce( AgentsHandler::ACTION_CREATE ), 'owns-link', 'Desk' );
+
+		$this->assertGreaterThan( 0, $link, 'The link was made during the request.' );
+		$this->assertSame( 'create_failed_user_kept', $result['code'] );
+		$rows = (int) $wpdb->get_var( $wpdb->prepare( "SELECT COUNT(*) FROM {$wpdb->links} WHERE link_id = %d", $link ) ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- Test: counts one link row; the table name is core's.
+		$this->assertSame( 1, $rows, 'The link still exists.' );
+		$this->assert_kept_without_access( $result['user_id'] );
+	}
+
+	public function test_a_refused_create_with_no_content_still_deletes_the_user(): void {
+		$this->on(
+			'user_register',
+			static function ( $user_id ): void {
+				get_userdata( $user_id )->add_role( 'editor' );
 			}
 		);
 		$count = count( get_users( array( 'fields' => 'ID' ) ) );
 
-		$result = $this->handler->create( $this->nonce( AgentsHandler::ACTION_CREATE ), 'race-login', 'Desk' );
+		$result = $this->handler->create( $this->nonce( AgentsHandler::ACTION_CREATE ), 'no-content', 'Desk' );
 
-		$this->assertGreaterThan( 0, $inserted, 'The second row was inserted during the request.' );
-		$this->assertSame( 'username_taken', $result['code'] );
+		$this->assertSame( 'extra_role', $result['code'] );
+		$this->assertFalse( get_userdata( $result['user_id'] ), 'The user with no content is deleted.' );
+		$this->assert_no_user_and_count( 'no-content', $count );
+	}
+
+	public function test_a_role_change_after_the_password_is_made_keeps_a_user_with_content_and_no_password(): void {
+		$post = 0;
+		$this->on(
+			'wp_create_application_password',
+			static function ( $user_id ) use ( &$post ): void {
+				$post = (int) wp_insert_post(
+					array(
+						'post_author' => $user_id,
+						'post_title'  => 'Written before the agent',
+						'post_status' => 'draft',
+					)
+				);
+				get_userdata( $user_id )->set_role( 'subscriber' );
+			},
+			10
+		);
+
+		$result = $this->handler->create( $this->nonce( AgentsHandler::ACTION_CREATE ), 'role-content', 'Desk' );
+
+		$this->assertGreaterThan( 0, $post );
+		$this->assertSame( 'create_failed_user_kept', $result['code'] );
 		$this->assertNull( $result['secret'] );
-		$this->assertFalse( get_userdata( $inserted ), 'The request removed its own user.' );
-		$this->assertSame( array(), \WP_Application_Passwords::get_user_application_passwords( $inserted ) );
-		// The other row stays, and is the only one with this login.
-		$rows = (int) $wpdb->get_var( $wpdb->prepare( "SELECT COUNT(*) FROM {$wpdb->users} WHERE user_login = %s", 'race-login' ) ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- Test: counts the rows of one login; the table name is core's.
-		$this->assertSame( 1, $rows );
-		$this->assertCount( $count + 1, get_users( array( 'fields' => 'ID' ) ), 'Only the other row was added.' );
+		$this->assertInstanceOf( \WP_Post::class, get_post( $post ) );
+		$this->assert_kept_without_access( $result['user_id'] );
+	}
+
+	/**
+	 * L1. The created action fires before the final check. A listener that changes the user there is caught by the final check.
+	 */
+	public function test_a_role_added_by_the_created_action_refuses_the_agent_and_shows_no_secret(): void {
+		$seen = 0;
+		$this->on(
+			'steadhand_agent_created',
+			static function ( $user_id ) use ( &$seen ): void {
+				$seen = (int) $user_id;
+				get_userdata( $user_id )->add_role( 'editor' );
+			}
+		);
+		$count = count( get_users( array( 'fields' => 'ID' ) ) );
+
+		$result = $this->handler->create( $this->nonce( AgentsHandler::ACTION_CREATE ), 'created-late', 'Desk' );
+
+		$this->assertGreaterThan( 0, $seen, 'The created action fired before the final check.' );
+		$this->assertSame( 'extra_role', $result['code'] );
+		$this->assertNull( $result['secret'], 'No secret is returned.' );
+		$this->assertFalse( get_userdata( $seen ), 'The agent is rolled back.' );
+		$this->assert_no_user_and_count( 'created-late', $count );
+	}
+
+	/**
+	 * L2. A listener that throws is caught. No exception reaches the screen, and the write it interrupted is rolled back.
+	 */
+	public function test_a_listener_that_throws_on_registration_leaves_no_user_and_no_exception(): void {
+		$this->on(
+			'user_register',
+			static function (): void {
+				throw new \RuntimeException( 'user_register failure' );
+			}
+		);
+		$count = count( get_users( array( 'fields' => 'ID' ) ) );
+
+		$result = $this->handler->create( $this->nonce( AgentsHandler::ACTION_CREATE ), 'throws-register', 'Desk' );
+
+		$this->assertSame( 'create_failed', $result['code'] );
+		$this->assertNull( $result['secret'] );
+		$this->assert_no_user_and_count( 'throws-register', $count );
+	}
+
+	public function test_a_listener_that_throws_on_the_application_password_leaves_no_user_and_no_password(): void {
+		$made = array();
+		$this->on(
+			'wp_create_application_password',
+			static function ( $user_id, $item ) use ( &$made ): void {
+				$made = array( (int) $user_id, (string) $item['uuid'] );
+				throw new \RuntimeException( 'password failure' );
+			}
+		);
+		$count = count( get_users( array( 'fields' => 'ID' ) ) );
+
+		$result = $this->handler->create( $this->nonce( AgentsHandler::ACTION_CREATE ), 'throws-password', 'Desk' );
+
+		$this->assertSame( 'create_failed', $result['code'] );
+		$this->assertNull( $result['secret'] );
+		$this->assertNotSame( array(), $made, 'The password was saved before the listener threw.' );
+		$this->assertNull( \WP_Application_Passwords::get_user_application_password( $made[0], $made[1] ), 'The password was revoked.' );
+		$this->assertFalse( get_userdata( $made[0] ), 'The user was removed.' );
+		$this->assert_no_user_and_count( 'throws-password', $count );
+	}
+
+	public function test_a_delete_that_throws_keeps_the_login_for_the_administrator_to_check(): void {
+		$this->on(
+			'user_register',
+			static function ( $user_id ): void {
+				get_userdata( $user_id )->add_role( 'editor' );
+			}
+		);
+		$this->on(
+			'delete_user',
+			static function (): void {
+				throw new \RuntimeException( 'delete failure' );
+			}
+		);
+
+		$result = $this->handler->create( $this->nonce( AgentsHandler::ACTION_CREATE ), 'stuck-login', 'Desk' );
+
+		$this->assertSame( 'create_failed_cleanup', $result['code'] );
+		$this->assertSame( 'stuck-login', $result['login'] );
+		$this->assertNull( $result['secret'] );
+		$user = get_userdata( $result['user_id'] );
+		$this->assertInstanceOf( \WP_User::class, $user, 'The user is still there, so it is named for the administrator.' );
+		$this->assertEmpty( $user->roles, 'The rollback still removed the roles.' );
+		$this->assertSame( array(), \WP_Application_Passwords::get_user_application_passwords( $result['user_id'] ) );
+	}
+
+	/**
+	 * L3. A login count that cannot be read is a refusal.
+	 */
+	public function test_a_login_count_that_cannot_be_read_refuses_and_removes_the_user(): void {
+		$this->on(
+			'query',
+			static function ( $query ) {
+				global $wpdb;
+
+				// Replaces the duplicate-login count with a SELECT that returns no value, so the count reads as null.
+				return str_contains( $query, "SELECT COUNT(*) FROM {$wpdb->users} WHERE user_login" )
+					? "SELECT NULL FROM {$wpdb->users} WHERE 1 = 0"
+					: $query;
+			}
+		);
+		$count = count( get_users( array( 'fields' => 'ID' ) ) );
+
+		$result = $this->handler->create( $this->nonce( AgentsHandler::ACTION_CREATE ), 'no-count', 'Desk' );
+
+		$this->assertSame( 'create_failed', $result['code'] );
+		$this->assertNull( $result['secret'] );
+		$this->assert_no_user_and_count( 'no-count', $count );
 	}
 
 	public function test_a_username_rewritten_by_a_filter_is_refused_and_the_user_removed(): void {
@@ -369,27 +691,40 @@ final class AgentsVerificationTest extends TestCase {
 		$this->assertNotContains( 'Mine', $names );
 	}
 
-	public function test_set_capabilities_refuses_when_the_target_stops_being_an_agent_before_the_writes(): void {
+	/**
+	 * L4. A revoke that fails says so, and never reports success or "nothing was left behind".
+	 */
+	public function test_a_revoke_that_fails_says_so_and_keeps_the_password(): void {
 		$agent = $this->agent( '', 1 );
-		$calls = 0;
-		// clean_user_cache() runs first when set_capabilities re-reads the user for its writes.
+		$uuid  = \WP_Application_Passwords::get_user_application_passwords( $agent )[0]['uuid'];
 		$this->on(
-			'clean_user_cache',
-			static function ( $user_id ) use ( $agent, &$calls ): void {
-				if ( $agent === $user_id && 0 === $calls++ ) {
-					get_userdata( $user_id )->set_role( 'subscriber' );
-				}
-			},
+			'update_user_metadata',
+			static fn( $check, $object_id, $meta_key ) => \WP_Application_Passwords::USERMETA_KEY_APPLICATION_PASSWORDS === $meta_key ? false : $check,
 			10
 		);
 
-		$result = $this->handler->set_capabilities( $this->nonce( AgentsHandler::ACTION_CAPABILITIES, $agent ), $agent, array( Capabilities::PUBLISH ) );
+		$result = $this->handler->revoke( $this->nonce( AgentsHandler::ACTION_REVOKE, $agent ), $agent, $uuid );
 
-		$this->assertSame( 'not_agent', $result['code'] );
-		$this->assertFalse( Capabilities::user_has( get_userdata( $agent ), Capabilities::PUBLISH ), 'Nothing was written.' );
+		$this->assertSame( 'revoke_failed', $result['code'] );
+		$this->assertFalse( $result['ok'] );
+		$this->assertCount( 1, \WP_Application_Passwords::get_user_application_passwords( $agent ), 'The password is still there.' );
 	}
 
-	public function test_set_capabilities_read_back_refuses_when_the_target_stops_being_an_agent_after_the_writes(): void {
+	public function test_a_revoke_all_that_fails_says_so_and_keeps_the_passwords(): void {
+		$agent = $this->agent( '', 2 );
+		$this->on(
+			'update_user_metadata',
+			static fn( $check, $object_id, $meta_key ) => \WP_Application_Passwords::USERMETA_KEY_APPLICATION_PASSWORDS === $meta_key ? false : $check,
+			10
+		);
+
+		$result = $this->handler->revoke_all( $this->nonce( AgentsHandler::ACTION_REVOKE_ALL, $agent ), $agent );
+
+		$this->assertSame( 'revoke_failed', $result['code'] );
+		$this->assertCount( 2, \WP_Application_Passwords::get_user_application_passwords( $agent ), 'The passwords are still there.' );
+	}
+
+	public function test_set_capabilities_read_back_reports_unverified_when_the_target_stops_being_an_agent_after_the_writes(): void {
 		$agent = $this->agent( '', 1 );
 		$calls = 0;
 		// The second re-read is the one after the writes, which is the read-back.
@@ -416,7 +751,27 @@ final class AgentsVerificationTest extends TestCase {
 		$result = $this->handler->set_capabilities( $this->nonce( AgentsHandler::ACTION_CAPABILITIES, $agent ), $agent, array( Capabilities::READ ) );
 
 		$this->assertSame( 2, $calls, 'The user was re-read before the writes and after them.' );
-		$this->assertSame( 'not_agent', $result['code'] );
+		$this->assertSame( 'capabilities_unverified', $result['code'] );
 		$this->assertSame( 0, $saved, 'The changed action did not fire.' );
+	}
+
+	public function test_set_capabilities_refuses_when_the_target_stops_being_an_agent_before_the_writes(): void {
+		$agent = $this->agent( '', 1 );
+		$calls = 0;
+		// clean_user_cache() runs first when set_capabilities re-reads the user for its writes.
+		$this->on(
+			'clean_user_cache',
+			static function ( $user_id ) use ( $agent, &$calls ): void {
+				if ( $agent === $user_id && 0 === $calls++ ) {
+					get_userdata( $user_id )->set_role( 'subscriber' );
+				}
+			},
+			10
+		);
+
+		$result = $this->handler->set_capabilities( $this->nonce( AgentsHandler::ACTION_CAPABILITIES, $agent ), $agent, array( Capabilities::PUBLISH ) );
+
+		$this->assertSame( 'not_agent', $result['code'] );
+		$this->assertFalse( Capabilities::user_has( get_userdata( $agent ), Capabilities::PUBLISH ), 'Nothing was written.' );
 	}
 }

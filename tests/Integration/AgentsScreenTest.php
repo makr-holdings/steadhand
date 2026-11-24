@@ -1172,6 +1172,23 @@ final class AgentsScreenTest extends TestCase {
 		$this->assertStringContainsString( 'The password was revoked.', $this->render() );
 	}
 
+	public function test_the_url_shows_revoke_failed_and_capabilities_unverified_and_no_one_time_panel_notice(): void {
+		$this->as_user( $this->admin() );
+
+		$_GET = array( 'agents' => 'revoke_failed' );
+		$this->assertStringContainsString( 'The password could not be revoked. It may still work.', $this->render() );
+
+		$_GET = array( 'agents' => 'capabilities_unverified' );
+		$this->assertStringContainsString( 'this user is no longer a dedicated agent, so they grant nothing', $this->render() );
+
+		// The one-time panel's codes are never shown from a URL, even though the screen knows their text.
+		$_GET = array( 'agents' => 'create_failed_cleanup' );
+		$this->assertStringNotContainsString( 'removing the user it made did not finish', $this->render() );
+
+		$_GET = array( 'agents' => 'extra_role' );
+		$this->assertStringNotContainsString( 'another plugin gave the new user an extra role', $this->render() );
+	}
+
 	public function test_label_rules_refuse_invisible_control_separator_and_bad_utf8_characters(): void {
 		$refused = array(
 			"\u{202E}Desk",

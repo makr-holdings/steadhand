@@ -284,11 +284,11 @@ Runs after the Agents screen (SPEC section 4.1) creates an agent and its first A
 - **Since:** unreleased (see [CHANGELOG.md](../CHANGELOG.md)).
 - **Type:** action.
 - **Parameters:** `$user_id` (`int`), the new agent's user ID; `$label` (`string`), the label of its first Application Password, which is the agent label in the change log.
-- **When it runs:** once for each agent created, after the agent and its password are saved, after the new user has been checked again (it holds only the agent role, under the posted login), and before the screen shows the password. It does not run when the creation is refused or fails. A failed check deletes the user, so there is no agent to report.
+- **When it runs:** once for each create that has saved the agent's first Application Password, after the password is made and before the final check. The final check then runs on the user as it is now (it must hold only the agent role, under the posted login). **The action can fire for an agent that the final check then refuses.** In that case the agent is rolled back (its password is revoked, and the user is deleted or, when content is attributed to it, kept with no role and no password), and the screen shows no password and reports the refusal. A listener therefore cannot assume that a call of this action means the agent exists: a listener that records "created" must allow for the refusal that may follow. The screen shows a password only when the final check passes, so a call of this action without a password on the screen is possible. It does not run when the create is refused earlier.
 - **Who gets it:** any code on the site. The action is reached only from the Agents screen, by an administrator who holds no agent role.
 - **The password is not passed.** Listeners get the user ID and the label, and nothing else of the secret.
-- **If a listener throws:** the exception is caught and ignored. The agent exists either way.
-- **What it does not do:** it cannot change the result or stop the creation. It has no return value.
+- **If a listener throws:** the exception is caught and ignored, and the final check still runs. The agent exists until that check refuses it.
+- **What it does not do:** it cannot change the result or stop the creation, except by changing the user, which the final check then sees. It has no return value.
 
 ```php
 add_action(

@@ -22,8 +22,12 @@ defined( 'ABSPATH' ) || exit;
  * edit_user for the target). A target must then be a dedicated agent (Agents::is_agent()). Nothing is changed before every check passes.
  * An authorisation failure ends the request with wp_die(); a validation failure or a refusal returns a result whose code names it.
  *
- * The result is an array: 'code' (one of CODES), 'ok' (true for the success codes), 'user_id' and 'secret' (for create and add-password
- * only: the new password, shown once by the screen; it is never stored, logged, passed to a hook or put in a redirect).
+ * The result is an array: 'code' (one of CODES), 'ok' (true for the success codes), 'user_id', 'secret' (for create and add-password
+ * only: the new password, shown once by the screen; it is never stored, logged, passed to a hook or put in a redirect) and 'login'
+ * (only for create_failed_cleanup: the login the administrator must check on the Users screen).
+ *
+ * No action lets an exception escape. A listener that throws is caught where Steadhand calls it, and the write it interrupted is either
+ * completed and verified or undone. Where Steadhand cannot undo a write, the result says so with a code of its own.
  */
 final class AgentsHandler {
 
@@ -62,6 +66,7 @@ final class AgentsHandler {
 		'passwords_revoked',
 		'capabilities_saved',
 		'capabilities_mismatch',
+		'capabilities_unverified',
 		'invalid_username',
 		'username_taken',
 		'invalid_label',
@@ -71,7 +76,11 @@ final class AgentsHandler {
 		'not_agent',
 		'password_not_found',
 		'create_failed',
+		'create_failed_user_kept',
+		'create_failed_cleanup',
+		'extra_role',
 		'password_failed',
+		'revoke_failed',
 		'capabilities_failed',
 		'role_missing',
 		'multisite',
@@ -86,13 +95,23 @@ final class AgentsHandler {
 		'password_revoked',
 		'passwords_revoked',
 		'password_not_found',
-		'password_failed',
+		'revoke_failed',
 		'not_agent',
 		'capabilities_saved',
 		'capabilities_mismatch',
+		'capabilities_unverified',
 		'capabilities_failed',
 		'multisite',
 	);
+
+	/** How a rollback ended: the user was deleted. */
+	private const ROLLED_BACK = 'rolled_back';
+
+	/** How a rollback ended: the user was kept, with no role, no capability and no password, because content is attributed to it. */
+	private const KEPT = 'kept';
+
+	/** How a rollback ended: a step failed, so the user may still hold a role or a password. The administrator must check it. */
+	private const CLEANUP = 'cleanup';
 
 	/**
 	 * Constructor.
@@ -139,7 +158,8 @@ final class AgentsHandler {
 	 * Creates a dedicated agent with its first Application Password. The agent has the role's default capabilities only.
 	 *
 	 * The new user is checked after each write. It must hold the agent role and nothing else, and the login must be the one posted.
-	 * A failed check deletes the user (and revokes the password, if one was made) and refuses. No password is returned then.
+	 * The steadhand_agent_created action fires once the password is made, and then the final check runs. A failed check, or a listener
+	 * that throws, rolls the request back (see roll_back()) and refuses. No password is returned then.
 	 *
 	 * @param string $nonce    The nonce from the form.
 	 * @param string $username The requested login name, after wp_unslash().
@@ -173,78 +193,130 @@ final class AgentsHandler {
 			return $this->result( 'app_passwords_unavailable' );
 		}
 
-		$inserted = wp_insert_user(
-			array(
-				'user_login'           => $username,
-				// Random and never shown or stored elsewhere. The agent cannot sign in with it, because Lockdown refuses password sign-in.
-				'user_pass'            => wp_generate_password( 64, true, true ),
-				'role'                 => Roles::ROLE,
-				'show_admin_bar_front' => 'false',
-			)
-		);
+		// The ID of the new user is taken from the first action core fires after the user's row is written, which runs before any
+		// listener of user_register or set_user_role. So a listener that throws later cannot hide the user from the rollback.
+		$new_id  = 0;
+		$capture = static function ( $password, $user_id ) use ( &$new_id ): void {
+			if ( 0 === $new_id ) {
+				$new_id = (int) $user_id;
+			}
+		};
+		add_action( 'wp_set_password', $capture, PHP_INT_MIN, 2 );
 
-		if ( is_wp_error( $inserted ) || $inserted < 1 ) {
-			return $this->result( 'create_failed' );
+		try {
+			$inserted = wp_insert_user(
+				array(
+					'user_login'           => $username,
+					// Random and never shown or stored elsewhere. The agent cannot sign in with it, because Lockdown refuses password sign-in.
+					'user_pass'            => wp_generate_password( 64, true, true ),
+					'role'                 => Roles::ROLE,
+					'show_admin_bar_front' => 'false',
+				)
+			);
+
+			if ( is_wp_error( $inserted ) || $inserted < 1 ) {
+				return $this->after_failed_insert( $new_id, $username );
+			}
+
+			return $this->verify_new_agent( (int) $inserted, $username, $label );
+		} catch ( \Throwable ) {
+			return $this->after_failed_insert( $new_id, $username );
+		} finally {
+			remove_action( 'wp_set_password', $capture, PHP_INT_MIN );
+		}
+	}
+
+	/**
+	 * The checks and writes after the user row exists: the login count, the new user's state, the first Application Password, the
+	 * steadhand_agent_created action, and the final check. Every refusal rolls the user back through refuse().
+	 *
+	 * @param int    $user_id  The new user.
+	 * @param string $username The posted login.
+	 * @param string $label    The label of the first Application Password.
+	 * @return array{code: string, ok: bool, user_id: int, secret: ?array{username: string, password: string}}
+	 */
+	private function verify_new_agent( int $user_id, string $username, string $label ): array {
+		// Two requests can pass username_exists() together, and user_login has no unique index. Count the login again. A count that
+		// cannot be read is a refusal.
+		$count = $this->login_count( $username );
+		if ( null === $count ) {
+			return $this->refuse( $user_id, 'create_failed', $username );
 		}
 
-		$user_id = (int) $inserted;
-
-		// Two requests can pass username_exists() together, and user_login has no unique index. Count the exact login again.
-		if ( $this->login_count( $username ) > 1 ) {
-			$this->remove_user( $user_id );
-			return $this->result( 'username_taken' );
+		if ( $count > 1 ) {
+			return $this->refuse( $user_id, 'username_taken', $username );
 		}
 
-		$user = $this->fresh_user( $user_id );
-		if ( null === $user || $user->user_login !== $username || ! $this->holds_only_agent_role( $user ) ) {
-			$this->remove_user( $user_id );
-			return $this->result( 'create_failed' );
+		$user    = $this->fresh_user( $user_id );
+		$problem = $this->new_user_problem( $user, $username );
+		if ( null !== $problem ) {
+			return $this->refuse( $user_id, $problem, $username );
 		}
 
-		if ( ! wp_is_application_passwords_available_for_user( $user ) ) {
-			$this->remove_user( $user_id );
-			return $this->result( 'app_passwords_unavailable' );
+		if ( null === $user || ! wp_is_application_passwords_available_for_user( $user ) ) {
+			return $this->refuse( $user_id, 'app_passwords_unavailable', $username );
 		}
 
 		$created = \WP_Application_Passwords::create_new_application_password( $user_id, array( 'name' => $label ) );
 		if ( is_wp_error( $created ) ) {
-			$this->remove_user( $user_id );
-			return $this->result( 'password_failed' );
+			return $this->refuse( $user_id, 'password_failed', $username );
 		}
 
-		list( $password, $item ) = $created;
-
-		// A listener of the password action, or of anything before it, may have changed the user. Check once more, and if the check
-		// fails, revoke the password this request made, delete the user and show nothing.
-		$verified = $this->fresh_user( $user_id );
-		if ( null === $verified || $verified->user_login !== $username || ! $this->holds_only_agent_role( $verified ) ) {
-			\WP_Application_Passwords::delete_application_password( $user_id, (string) $item['uuid'] );
-			$this->remove_user( $user_id );
-			return $this->result( 'create_failed' );
-		}
+		list( $password ) = $created;
 
 		try {
 			/**
-			 * Fires after a Steadhand agent was created with its first Application Password.
+			 * Fires after a Steadhand agent was created with its first Application Password, before the final check.
 			 *
-			 * The password is not passed. Listeners can read the user and the label, and nothing else of the secret.
+			 * The password is not passed. Listeners can read the user and the label, and nothing else of the secret. A listener can
+			 * change the user, and the final check then refuses it. So the action may fire for an agent that is then rolled back.
 			 *
 			 * @param int    $user_id The new agent's user ID.
 			 * @param string $label   The label of its first Application Password (the agent label in the change log).
 			 */
 			do_action( 'steadhand_agent_created', $user_id, $label );
 		} catch ( \Throwable ) { // phpcs:ignore Generic.CodeAnalysis.EmptyStatement.DetectedCatch -- The comment below says why the catch is empty.
-			// A listener must not break the action. The agent exists and its password is returned to the screen either way.
+			// A listener must not break the action. The final check below decides, whatever the listener did.
+		}
+
+		// The final check is the same strict check as the first, on the user as it is now.
+		$problem = $this->new_user_problem( $this->fresh_user( $user_id ), $username );
+		if ( null !== $problem ) {
+			return $this->refuse( $user_id, $problem, $username );
 		}
 
 		return $this->result(
 			'created',
 			$user_id,
 			array(
-				'username' => $verified->user_login,
+				'username' => $username,
 				'password' => $password,
 			)
 		);
+	}
+
+	/**
+	 * The result of a create whose insert failed or threw. When the user's ID was seen, the user is rolled back like any other refusal.
+	 * When it was not seen, nothing is deleted: this request cannot show which user, if any, it made, so a login that exists is
+	 * reported for the administrator to check.
+	 *
+	 * @param int    $user_id  The ID seen after the insert, or 0.
+	 * @param string $username The posted login.
+	 * @return array{code: string, ok: bool, user_id: int, secret: null}
+	 */
+	private function after_failed_insert( int $user_id, string $username ): array {
+		if ( $user_id > 0 ) {
+			return $this->refuse( $user_id, 'create_failed', $username );
+		}
+
+		$left_behind = self::quietly(
+			static fn(): bool => false !== username_exists( $username ),
+			true
+		);
+
+		return $left_behind
+			? $this->result( 'create_failed_cleanup', 0, null, $username )
+			: $this->result( 'create_failed' );
 	}
 
 	/**
@@ -282,7 +354,26 @@ final class AgentsHandler {
 			return $this->result( 'label_taken' );
 		}
 
-		$created = \WP_Application_Passwords::create_new_application_password( $user_id, array( 'name' => $label ) );
+		// The UUID of the password is taken from core's action, which fires once the password is saved. If a listener throws after that,
+		// the password is revoked by its UUID.
+		$saved_uuid = '';
+		$capture    = static function ( $target, $item ) use ( &$saved_uuid, $user_id ): void {
+			if ( '' === $saved_uuid && (int) $target === $user_id && is_array( $item ) ) {
+				$saved_uuid = (string) ( $item['uuid'] ?? '' );
+			}
+		};
+		add_action( 'wp_create_application_password', $capture, PHP_INT_MIN, 2 );
+
+		try {
+			$created = \WP_Application_Passwords::create_new_application_password( $user_id, array( 'name' => $label ) );
+		} catch ( \Throwable ) {
+			return '' === $saved_uuid
+				? $this->result( 'password_failed', $user_id )
+				: ( $this->revoke_one( $user_id, $saved_uuid ) ? $this->result( 'password_failed', $user_id ) : $this->result( 'revoke_failed', $user_id ) );
+		} finally {
+			remove_action( 'wp_create_application_password', $capture, PHP_INT_MIN );
+		}
+
 		if ( is_wp_error( $created ) ) {
 			return $this->result( 'password_failed', $user_id );
 		}
@@ -291,17 +382,15 @@ final class AgentsHandler {
 		$uuid                    = (string) $item['uuid'];
 
 		// Re-check after the write. Two requests can pass the limits together, and the target may have changed. A failed check revokes
-		// the password this request made and shows nothing.
+		// the password this request made and shows nothing. If that revoke fails, the password may still work, and the screen says so.
 		$fresh = $this->fresh_user( $user_id );
 		if ( null === $fresh || ! Agents::is_agent( $fresh ) ) {
-			\WP_Application_Passwords::delete_application_password( $user_id, $uuid );
-			return $this->result( 'not_agent', $user_id );
+			return $this->undo_add( $user_id, $uuid, 'not_agent' );
 		}
 
 		$passwords = \WP_Application_Passwords::get_user_application_passwords( $user_id );
 		if ( count( $passwords ) > self::MAX_PASSWORDS ) {
-			\WP_Application_Passwords::delete_application_password( $user_id, $uuid );
-			return $this->result( 'too_many_passwords', $user_id );
+			return $this->undo_add( $user_id, $uuid, 'too_many_passwords' );
 		}
 
 		$same_label = count(
@@ -311,8 +400,7 @@ final class AgentsHandler {
 			)
 		);
 		if ( $same_label > 1 ) {
-			\WP_Application_Passwords::delete_application_password( $user_id, $uuid );
-			return $this->result( 'label_taken', $user_id );
+			return $this->undo_add( $user_id, $uuid, 'label_taken' );
 		}
 
 		return $this->result(
@@ -347,12 +435,9 @@ final class AgentsHandler {
 			return $this->result( 'password_not_found', $user_id );
 		}
 
-		$deleted = \WP_Application_Passwords::delete_application_password( $user_id, $uuid );
-		if ( is_wp_error( $deleted ) ) {
-			return $this->result( 'password_failed', $user_id );
-		}
-
-		return $this->result( 'password_revoked', $user_id );
+		return $this->revoke_one( $user_id, $uuid )
+			? $this->result( 'password_revoked', $user_id )
+			: $this->result( 'revoke_failed', $user_id );
 	}
 
 	/**
@@ -372,9 +457,9 @@ final class AgentsHandler {
 			return $this->result( 'not_agent' );
 		}
 
-		\WP_Application_Passwords::delete_all_application_passwords( $user_id );
-
-		return $this->result( 'passwords_revoked', $user_id );
+		return self::quietly( fn(): bool => $this->revoke_every_password( $user_id ) )
+			? $this->result( 'passwords_revoked', $user_id )
+			: $this->result( 'revoke_failed', $user_id );
 	}
 
 	/**
@@ -408,17 +493,24 @@ final class AgentsHandler {
 			return $this->result( 'not_agent', $user_id );
 		}
 
-		foreach ( $values as $capability => $grant ) {
-			$current->add_cap( $capability, $grant );
+		try {
+			foreach ( $values as $capability => $grant ) {
+				$current->add_cap( $capability, $grant );
+			}
+
+			$fresh = $this->fresh_user( $user_id );
+		} catch ( \Throwable ) {
+			// A listener threw while the writes were made. Whether they all landed is not known, so nothing is claimed.
+			return $this->result( 'capabilities_failed', $user_id );
 		}
 
-		$fresh = $this->fresh_user( $user_id );
 		if ( null === $fresh ) {
 			return $this->result( 'capabilities_failed', $user_id );
 		}
 
+		// The writes are made. A user who is no longer a dedicated agent now grants nothing, and the screen says so.
 		if ( ! Agents::is_agent( $fresh ) ) {
-			return $this->result( 'not_agent', $user_id );
+			return $this->result( 'capabilities_unverified', $user_id );
 		}
 
 		foreach ( $values as $capability => $grant ) {
@@ -462,11 +554,12 @@ final class AgentsHandler {
 			return false;
 		}
 
-		if ( 1 === preg_match( '/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u', $label ) ) {
+		// Any result other than 0 refuses: 1 is a match, and false is a pattern error. Neither may pass.
+		if ( 0 !== preg_match( '/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u', $label ) ) {
 			return false;
 		}
 
-		if ( 1 === preg_match( '/^\p{Z}|\p{Z}\z/u', $label ) ) {
+		if ( 0 !== preg_match( '/^\p{Z}|\p{Z}\z/u', $label ) ) {
 			return false;
 		}
 
@@ -532,44 +625,228 @@ final class AgentsHandler {
 	}
 
 	/**
+	 * Why a freshly created user fails the strict check, or null when it passes. The login must be the posted one, and the user must hold
+	 * nothing but the agent role (holds_only_agent_role()). A user that holds any other role or capability gets 'extra_role'. Any other
+	 * failure (a missing user, a wrong login, a missing role) gets 'create_failed'.
+	 *
+	 * @param \WP_User|null $user     The user as it is now.
+	 * @param string        $username The posted login.
+	 * @return string|null
+	 */
+	private function new_user_problem( ?\WP_User $user, string $username ): ?string {
+		if ( null === $user || $user->user_login !== $username ) {
+			return 'create_failed';
+		}
+
+		if ( self::holds_only_agent_role( $user ) ) {
+			return null;
+		}
+
+		return self::holds_anything_else( $user ) ? 'extra_role' : 'create_failed';
+	}
+
+	/**
 	 * Whether a freshly created user holds nothing but the agent role. That means two things, both checked against the stored data:
 	 * the user's roles are exactly [steadhand_agent] (Agents::is_agent()), and the stored capability map ($user->caps, the
 	 * wp_capabilities meta) has exactly one key, steadhand_agent, set to true. Nothing else may be stored, not even a capability set to
 	 * false. Used only right after creation, when no Steadhand capability has been granted yet.
 	 *
+	 * The caps comparison is what catches a capability or role name that is not a registered role: such a name is stored in the caps
+	 * but is not in the roles, so Agents::is_agent() alone would pass it.
+	 *
 	 * @param \WP_User $user The user.
 	 * @return bool
 	 */
-	private function holds_only_agent_role( \WP_User $user ): bool {
+	private static function holds_only_agent_role( \WP_User $user ): bool {
 		$caps = is_array( $user->caps ) ? $user->caps : array();
 
 		return Agents::is_agent( $user ) && array( Roles::ROLE ) === array_keys( $caps ) && true === ( $caps[ Roles::ROLE ] ?? null );
 	}
 
 	/**
-	 * How many users have exactly this login. The comparison is binary, so it is case-sensitive.
+	 * Whether a user stores any role or capability other than the agent role, whatever its value.
 	 *
-	 * @param string $username The login name.
-	 * @return int
+	 * @param \WP_User $user The user.
+	 * @return bool
 	 */
-	private function login_count( string $username ): int {
-		global $wpdb;
+	private static function holds_anything_else( \WP_User $user ): bool {
+		$caps  = is_array( $user->caps ) ? array_map( 'strval', array_keys( $user->caps ) ) : array();
+		$roles = is_array( $user->roles ) ? $user->roles : array();
 
-		return (int) $wpdb->get_var( $wpdb->prepare( "SELECT COUNT(*) FROM {$wpdb->users} WHERE BINARY user_login = %s", $username ) ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- An exact count of one login, which the user cache cannot give; the table name is core's.
+		return array() !== array_diff( $caps, array( Roles::ROLE ) ) || array() !== array_diff( $roles, array( Roles::ROLE ) );
 	}
 
 	/**
-	 * Deletes a user this request just created, after a failed step, so no half-made agent stays.
+	 * How many users have exactly this login, or null when the count cannot be read. The comparison is the same as username_exists(),
+	 * which is case-insensitive under the database's collation.
+	 *
+	 * @param string $username The login name.
+	 * @return int|null
+	 */
+	private function login_count( string $username ): ?int {
+		global $wpdb;
+
+		$count = $wpdb->get_var( $wpdb->prepare( "SELECT COUNT(*) FROM {$wpdb->users} WHERE user_login = %s", $username ) ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- An exact count of one login, which the user cache cannot give; the table name is core's.
+
+		return is_numeric( $count ) ? (int) $count : null;
+	}
+
+	/**
+	 * Whether any post or link is attributed to the user. A count that cannot be read counts as attributed, so the user is kept.
 	 *
 	 * @param int $user_id The user ID.
-	 * @return void
+	 * @return bool
 	 */
-	private function remove_user( int $user_id ): void {
+	private function holds_attributed_content( int $user_id ): bool {
+		global $wpdb;
+
+		$posts = $wpdb->get_var( $wpdb->prepare( "SELECT COUNT(*) FROM {$wpdb->posts} WHERE post_author = %d", $user_id ) ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- Counts the rows attributed to one user; the table name is core's.
+		$links = $wpdb->get_var( $wpdb->prepare( "SELECT COUNT(*) FROM {$wpdb->links} WHERE link_owner = %d", $user_id ) ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- Counts the links attributed to one user; the table name is core's.
+
+		if ( ! is_numeric( $posts ) || ! is_numeric( $links ) ) {
+			return true;
+		}
+
+		return (int) $posts > 0 || (int) $links > 0;
+	}
+
+	/**
+	 * Undoes a create that was refused after its user was written. The steps run in this order:
+	 *
+	 * 1. Every Application Password of the user is revoked. If that fails, the user may still hold a live password.
+	 * 2. Posts and links attributed to the user are counted, after the revoke. Core's wp_delete_user() deletes them, so the user is
+	 *    deleted only when nothing is attributed to it.
+	 * 3. If nothing is attributed, the user is deleted. Its password meta goes with it.
+	 * 4. Otherwise (or when the delete fails) the user is kept with no role and no capability, and the result says which way it ended:
+	 *    kept, when the password is revoked and the capabilities are gone; cleanup, when any step failed and the administrator must check.
+	 *
+	 * Each step is guarded: a listener that throws makes that step count as failed, and the rollback goes on.
+	 *
+	 * @param int $user_id The user the request made.
+	 * @return string One of ROLLED_BACK, KEPT or CLEANUP.
+	 */
+	private function roll_back( int $user_id ): string {
+		$revoked = self::quietly( fn(): bool => $this->revoke_every_password( $user_id ) );
+		$content = self::quietly( fn(): bool => $this->holds_attributed_content( $user_id ), true );
+
+		if ( ! $content && self::quietly( fn(): bool => $this->delete_user( $user_id ) ) ) {
+			return self::ROLLED_BACK;
+		}
+
+		$stripped = self::quietly( fn(): bool => $this->strip_user( $user_id ) );
+
+		return $content && $revoked && $stripped ? self::KEPT : self::CLEANUP;
+	}
+
+	/**
+	 * Refuses a create after its user was written: rolls the user back, then returns the refusal. The code is the one given when the
+	 * user was deleted. A kept user gets create_failed_user_kept, and a user that could not be checked gets create_failed_cleanup with
+	 * its login.
+	 *
+	 * @param int    $user_id  The user the request made.
+	 * @param string $code     The refusal code.
+	 * @param string $username The posted login.
+	 * @return array{code: string, ok: bool, user_id: int, secret: null}
+	 */
+	private function refuse( int $user_id, string $code, string $username ): array {
+		$ended = $this->roll_back( $user_id );
+
+		if ( self::ROLLED_BACK === $ended ) {
+			return $this->result( $code );
+		}
+
+		if ( self::KEPT === $ended ) {
+			return $this->result( 'create_failed_user_kept', $user_id );
+		}
+
+		return $this->result( 'create_failed_cleanup', $user_id, null, $username );
+	}
+
+	/**
+	 * Revokes every Application Password of a user, and checks that none is left. A throw counts as a failure.
+	 *
+	 * @param int $user_id The user ID.
+	 * @return bool True when the user holds no Application Password afterwards.
+	 */
+	private function revoke_every_password( int $user_id ): bool {
+		$deleted = \WP_Application_Passwords::delete_all_application_passwords( $user_id );
+
+		return ! is_wp_error( $deleted ) && array() === \WP_Application_Passwords::get_user_application_passwords( $user_id );
+	}
+
+	/**
+	 * Revokes one Application Password by its UUID. A throw counts as a failure.
+	 *
+	 * @param int    $user_id The user ID.
+	 * @param string $uuid    The password's UUID.
+	 * @return bool True when core reports the password deleted.
+	 */
+	private function revoke_one( int $user_id, string $uuid ): bool {
+		return self::quietly( static fn(): bool => true === \WP_Application_Passwords::delete_application_password( $user_id, $uuid ) );
+	}
+
+	/**
+	 * Deletes a user this request made, and checks that it is gone. A throw counts as a failure.
+	 *
+	 * @param int $user_id The user ID.
+	 * @return bool
+	 */
+	private function delete_user( int $user_id ): bool {
 		if ( ! function_exists( 'wp_delete_user' ) ) {
 			require_once ABSPATH . 'wp-admin/includes/user.php';
 		}
 
-		wp_delete_user( $user_id );
+		$deleted = wp_delete_user( $user_id );
+
+		return true === $deleted && null === $this->fresh_user( $user_id );
+	}
+
+	/**
+	 * Removes every role and capability from a user this request made, and checks that none is left.
+	 *
+	 * @param int $user_id The user ID.
+	 * @return bool
+	 */
+	private function strip_user( int $user_id ): bool {
+		$user = $this->fresh_user( $user_id );
+		if ( null === $user ) {
+			return false;
+		}
+
+		$user->remove_all_caps();
+		$after = $this->fresh_user( $user_id );
+
+		return null !== $after && empty( $after->roles ) && empty( $after->caps );
+	}
+
+	/**
+	 * Undoes the password of an add-password request that failed its re-check. If the revoke fails, the result says so, since the
+	 * password may still work.
+	 *
+	 * @param int    $user_id The agent.
+	 * @param string $uuid    The password the request made.
+	 * @param string $code    The refusal code for the failed check.
+	 * @return array{code: string, ok: bool, user_id: int, secret: null}
+	 */
+	private function undo_add( int $user_id, string $uuid, string $code ): array {
+		return $this->revoke_one( $user_id, $uuid )
+			? $this->result( $code, $user_id )
+			: $this->result( 'revoke_failed', $user_id );
+	}
+
+	/**
+	 * Runs a step and returns its boolean result. A throw returns $on_failure, so a listener that throws cannot escape a rollback.
+	 *
+	 * @param callable $step       The step.
+	 * @param bool     $on_failure The value to return when the step throws.
+	 * @return bool
+	 */
+	private static function quietly( callable $step, bool $on_failure = false ): bool {
+		try {
+			return (bool) $step();
+		} catch ( \Throwable ) {
+			return $on_failure;
+		}
 	}
 
 	/**
@@ -578,14 +855,21 @@ final class AgentsHandler {
 	 * @param string                                         $code    One of CODES.
 	 * @param int                                            $user_id The target user ID, or 0.
 	 * @param array{username: string, password: string}|null $secret  The new password, for create and add-password only.
-	 * @return array{code: string, ok: bool, user_id: int, secret: ?array{username: string, password: string}}
+	 * @param string                                         $login   The login to check, for create_failed_cleanup only.
+	 * @return array{code: string, ok: bool, user_id: int, secret: ?array{username: string, password: string}, login?: string}
 	 */
-	private function result( string $code, int $user_id = 0, ?array $secret = null ): array {
-		return array(
+	private function result( string $code, int $user_id = 0, ?array $secret = null, string $login = '' ): array {
+		$result = array(
 			'code'    => $code,
 			'ok'      => in_array( $code, self::SUCCESS_CODES, true ),
 			'user_id' => $user_id,
 			'secret'  => $secret,
 		);
+
+		if ( '' !== $login ) {
+			$result['login'] = $login;
+		}
+
+		return $result;
 	}
 }
