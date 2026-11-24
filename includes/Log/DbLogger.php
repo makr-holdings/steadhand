@@ -752,14 +752,129 @@ final class DbLogger implements Logger {
 	 * @return array{items: array<int, array<string, mixed>>, total: int}|\WP_Error
 	 */
 	public function query( int $user_id, array $filters, int $page, int $per_page ): array|\WP_Error {
+		return $this->page_of( max( 0, $user_id ), $filters, $page, $per_page, false );
+	}
+
+	/**
+	 * Reads one page of the change log across all users, newest first, for the admin log screen. Never returns the stored
+	 * input.
+	 *
+	 * For the admin screen only. The CALLER must have checked manage_options: this method does not check it, and it returns
+	 * every user's rows. The filters are those of query(), and a user_id filter (an integer above 0) narrows to one user. The
+	 * same rule applies: a malformed filter, including a user_id that is not above 0, returns the empty result, never a wider
+	 * one. Each item also carries user_id and agent_label. If the table is not ready, or cannot be read, returns
+	 * steadhand_log_unavailable.
+	 *
+	 * @param array<string, mixed> $filters  Optional: result, ability, after, before (UTC 'Y-m-d H:i:s', inclusive) and user_id.
+	 * @param int                  $page     Page number, from 1.
+	 * @param int                  $per_page Entries per page, 1 to 50.
+	 * @return array{items: array<int, array<string, mixed>>, total: int}|\WP_Error
+	 */
+	public function query_all( array $filters, int $page, int $per_page ): array|\WP_Error {
+		if ( ! Schema::ready() ) {
+			return $this->unavailable();
+		}
+
+		return $this->page_of( null, $filters, $page, $per_page, true );
+	}
+
+	/**
+	 * Reads one change-log row by ID, for any user, with the stored input. For the admin log screen only: the CALLER must have
+	 * checked manage_options. Returns null for a missing row, when the table is not ready, and on any failure. The row has the
+	 * same PHP types typed() gives a new entry. Never throws.
+	 *
+	 * @param int $id Row ID.
+	 * @return array<string, mixed>|null
+	 */
+	public function find_any( int $id ): ?array {
 		global $wpdb;
 
-		$none  = array(
+		try {
+			if ( $id <= 0 || ! Schema::ready() ) {
+				return null;
+			}
+
+			$table = Schema::table();
+			$row   = $this->quietly(
+				static function () use ( $wpdb, $table, $id ): mixed {
+					// The table name is fixed (see Schema::table()); every value is bound by prepare().
+					return $wpdb->get_row( // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching -- A live read of one row, for the admin log screen.
+						$wpdb->prepare( "SELECT * FROM {$table} WHERE id = %d", $id ), // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- See the comment above.
+						ARRAY_A
+					);
+				}
+			);
+
+			return is_array( $row ) ? $this->typed( $id, $row ) : null;
+		} catch ( \Throwable ) {
+			return null;
+		}
+	}
+
+	/**
+	 * The distinct user IDs that appear in the change log, ascending, at most 200, as integers. User 0 (no user) is not
+	 * listed. For the admin log screen only: the CALLER must have checked manage_options. Returns an empty array on any
+	 * failure, including a table that is not ready.
+	 *
+	 * @return int[]
+	 */
+	public function users(): array {
+		global $wpdb;
+
+		try {
+			if ( ! Schema::ready() ) {
+				return array();
+			}
+
+			$table = Schema::table();
+			$ids   = $this->quietly(
+				static function () use ( $wpdb, $table ): mixed {
+					// The table name is fixed (see Schema::table()); every value is bound by prepare().
+					return $wpdb->get_col( // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching -- A live list for the admin log screen's agent filter.
+						$wpdb->prepare( "SELECT DISTINCT user_id FROM {$table} WHERE user_id > %d ORDER BY user_id ASC LIMIT %d", 0, 200 ) // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- See the comment above.
+					);
+				}
+			);
+
+			return is_array( $ids ) ? array_map( 'intval', $ids ) : array();
+		} catch ( \Throwable ) {
+			return array();
+		}
+	}
+
+	/**
+	 * Runs the filtered, paged read behind query() and query_all(). Filters are checked before any query runs.
+	 *
+	 * @param int|null             $user_id   The user whose rows to read, or null for every user.
+	 * @param array<string, mixed> $filters   Filters, as query() describes them. user_id is read only when $all_users is true.
+	 * @param int                  $page      Page number, from 1.
+	 * @param int                  $per_page  Entries per page, 1 to 50.
+	 * @param bool                 $all_users True for query_all(): adds user_id and agent_label to each item.
+	 * @return array{items: array<int, array<string, mixed>>, total: int}|\WP_Error
+	 */
+	private function page_of( ?int $user_id, array $filters, int $page, int $per_page, bool $all_users ): array|\WP_Error {
+		global $wpdb;
+
+		$none = array(
 			'items' => array(),
 			'total' => 0,
 		);
-		$where = array( 'user_id = %d' );
-		$args  = array( max( 0, $user_id ) );
+
+		// The first clause is always bound (1 = 1), so prepare() has a placeholder to bind whatever the filters are.
+		$where = array( '1 = %d' );
+		$args  = array( 1 );
+		if ( null !== $user_id ) {
+			$where[] = 'user_id = %d';
+			$args[]  = $user_id;
+		}
+
+		if ( $all_users && isset( $filters['user_id'] ) ) {
+			if ( ! is_int( $filters['user_id'] ) || $filters['user_id'] < 1 ) {
+				return $none;
+			}
+			$where[] = 'user_id = %d';
+			$args[]  = $filters['user_id'];
+		}
 
 		if ( isset( $filters['result'] ) ) {
 			if ( ! in_array( $filters['result'], self::RESULTS, true ) ) {
@@ -797,9 +912,13 @@ final class DbLogger implements Logger {
 		$page      = max( 1, $page );
 		$offset    = ( $page - 1 ) * $per_page;
 		$condition = implode( ' AND ', $where );
+		$columns   = 'id, created_at, ability, object_type, object_id, result, message, guardrail_notes, undoable, undone_by';
+		if ( $all_users ) {
+			$columns .= ', user_id, agent_label';
+		}
 
 		return $this->quietly(
-			function () use ( $wpdb, $table, $condition, $args, $per_page, $offset ): array|\WP_Error {
+			function () use ( $wpdb, $table, $condition, $args, $per_page, $offset, $columns, $all_users ): array|\WP_Error {
 				// The table name and the clause text are fixed strings built only from the fragments above. Every value is
 				// bound by prepare() through $args, so the placeholders are in $condition, not in these literals.
 				$count_sql        = "SELECT COUNT(*) FROM {$table} WHERE {$condition}"; // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- See the comment above.
@@ -818,7 +937,7 @@ final class DbLogger implements Logger {
 					);
 				}
 
-				$page_sql         = "SELECT id, created_at, ability, object_type, object_id, result, message, guardrail_notes, undoable, undone_by FROM {$table} WHERE {$condition} ORDER BY id DESC LIMIT %d OFFSET %d"; // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- See the comment above.
+				$page_sql         = "SELECT {$columns} FROM {$table} WHERE {$condition} ORDER BY id DESC LIMIT %d OFFSET %d"; // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- See the comment above.
 				$wpdb->last_error = '';
 				$rows             = $wpdb->get_results( // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching -- A page of the change log.
 					$wpdb->prepare( $page_sql, ...array_merge( $args, array( $per_page, $offset ) ) ), // phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared -- See the comment above.
@@ -830,7 +949,7 @@ final class DbLogger implements Logger {
 
 				$items = array();
 				foreach ( (array) $rows as $row ) {
-					$items[] = array(
+					$item = array(
 						'id'              => (int) $row['id'],
 						'created_at'      => (string) $row['created_at'],
 						'ability'         => (string) $row['ability'],
@@ -842,6 +961,11 @@ final class DbLogger implements Logger {
 						'undoable'        => (bool) (int) $row['undoable'],
 						'undone_by'       => (int) $row['undone_by'],
 					);
+					if ( $all_users ) {
+						$item['user_id']     = (int) $row['user_id'];
+						$item['agent_label'] = (string) $row['agent_label'];
+					}
+					$items[] = $item;
 				}
 
 				return array(

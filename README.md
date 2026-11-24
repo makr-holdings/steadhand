@@ -79,13 +79,17 @@ Steadhand writes its change log to one table, `{prefix}steadhand_log` (`wp_stead
 
 **Limits.** At most 60 refused calls per agent are stored in any rolling minute. Then one marker row is stored, and nothing more until the minute has passed. Errors are never dropped. Entries are kept 30 days, and the saved states that undo needs are kept as long as their entries. Old entries are pruned when a new entry is written, at most once a day, in batches of 1,000 rows, up to 20 batches per pass. If old entries remain after that, the next write continues the pruning. Nothing runs on a schedule, so old entries remain while nothing is written. The period can be changed with the `steadhand_log_retention_days` filter.
 
-**Who can see it.** An agent can read only its own entries, with `steadhand-get-change-log`. There is no admin screen yet; it comes in milestone M3. Until then, an administrator can read the table directly, for example:
+**Who can see it.** An agent can read only its own entries, with `steadhand-get-change-log`. An administrator sees every agent's entries on the screen described in [Change log screen](#change-log-screen). An administrator can also read the table directly, for example:
 
 ```
 wp db query "SELECT id, created_at, agent_label, ability, result, message FROM wp_steadhand_log ORDER BY id DESC LIMIT 20"
 ```
 
 Use the table prefix from `wp-config.php`. The table holds every agent's entries and the stored input, so treat it as sensitive. On the local development site, run it with `npx wp-env run cli wp db query "..."`.
+
+## Change log screen
+
+Administrators find the change log under **Steadhand** in the admin menu. The list filters by agent, tool, result and date (days are read in the site's timezone), and shows 50 entries a page. Open an entry to see its stored fields, its input and a diff of the change: the title, content and excerpt for a post edit, the terms added and removed, or the featured image before and after. The diff needs the right to edit that post; without it, the diff is not shown. The message, the guardrail notes and the input of an entry about a post are hidden from a viewer who may not edit that post, and the screen shows a short note in their place. Entries about no post are always shown. Agents cannot open the screen. The screen only reads. The undo button is not built yet.
 
 ## Guardrails
 
