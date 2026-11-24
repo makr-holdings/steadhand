@@ -216,4 +216,69 @@ final class SnapshotStoreTest extends PostWriteTestCase {
 		$this->assertNull( SnapshotStore::find( $old ), 'A row past the log retention is pruned with the log.' );
 		$this->assertIsArray( SnapshotStore::find( $young ), 'A row younger than the retention is kept.' );
 	}
+
+	public function test_snapshot_rows_are_pruned_even_when_the_log_prune_budget_runs_out(): void {
+		$user = self::factory()->user->create();
+		for ( $i = 0; $i < 100; $i++ ) {
+			$this->insert_row(
+				array(
+					'user_id'    => $user,
+					'created_at' => gmdate( 'Y-m-d H:i:s', time() - 31 * DAY_IN_SECONDS ),
+				)
+			);
+		}
+		$old = array();
+		for ( $i = 0; $i < 3; $i++ ) {
+			$old[] = $this->insert_raw(
+				array(
+					'created_at' => gmdate( 'Y-m-d H:i:s', time() - 31 * DAY_IN_SECONDS ),
+					'object_id'  => 5151,
+				)
+			);
+		}
+		delete_option( 'steadhand_log_last_prune' );
+
+		// A batch of 10 and a budget of 3 batches: 30 log rows at most, so 70 old log rows remain and the pass is not finished.
+		$this->assertTrue( ( new DbLogger( 10, 3 ) )->log( $this->entry( $user ) ) );
+
+		$this->assertSame( 70, $this->old_log_rows( $user ), 'The log prune budget ran out.' );
+		foreach ( $old as $id ) {
+			$this->assertNull( SnapshotStore::find( $id ), 'Old snapshot rows are pruned in the same pass, whatever the log has left.' );
+		}
+		$this->assertFalse( get_option( 'steadhand_log_last_prune' ), 'A pass that did not finish the log does not record the day.' );
+	}
+
+	public function test_a_missing_snapshots_table_does_not_stop_the_prune_day_being_recorded(): void {
+		$user = self::factory()->user->create();
+		delete_option( 'steadhand_log_last_prune' );
+		// The snapshot delete is pointed at a table that does not exist. A delete that fails counts as finished, as it does for the log.
+		add_filter(
+			'query',
+			static function ( string $query ): string {
+				return str_starts_with( $query, 'DELETE FROM' ) && str_contains( $query, 'steadhand_snapshots' )
+					? str_replace( 'steadhand_snapshots', 'steadhand_no_such_table', $query )
+					: $query;
+			}
+		);
+
+		$this->assertTrue( ( new DbLogger() )->log( $this->entry( $user ) ) );
+		remove_all_filters( 'query' );
+
+		$this->assertGreaterThan( time() - 60, (int) get_option( 'steadhand_log_last_prune', 0 ), 'The day is recorded when the log pass finished and the snapshot delete failed.' );
+	}
+
+	/**
+	 * The number of log rows of a user that are past retention.
+	 *
+	 * @param int $user_id User ID.
+	 */
+	private function old_log_rows( int $user_id ): int {
+		global $wpdb;
+
+		$table = Schema::table();
+
+		return (int) $wpdb->get_var( // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching -- Test counts the log rows directly.
+			$wpdb->prepare( "SELECT COUNT(*) FROM {$table} WHERE user_id = %d AND created_at < %s", $user_id, gmdate( 'Y-m-d H:i:s', time() - 30 * DAY_IN_SECONDS ) ) // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- The table name is fixed.
+		);
+	}
 }

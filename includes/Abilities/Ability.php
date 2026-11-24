@@ -224,6 +224,24 @@ abstract class Ability {
 	}
 
 	/**
+	 * Names the direct call that this call amounts to, for the guardrails. Runs inside the write, after the guardrails have
+	 * evaluated the call as itself and passed it. When it returns an array, the guardrails evaluate that direct call too, with
+	 * its ability name, capability, input and content, on the same user and object, and the call is refused when any rule blocks
+	 * that call or rewrites it.
+	 *
+	 * The default returns null: the call is evaluated once, as itself. Only an ability that does something else with the same
+	 * effect (undo-change, which puts back what a set-post-terms call did) overrides it. A throw or a malformed value refuses the
+	 * call, because the guardrails cannot see it.
+	 *
+	 * @param array<string, mixed> $input Validated, sanitized input.
+	 * @return array{ability: string, capability: string, input: array<string, mixed>, content: array<string, string>}|null
+	 */
+	public function equivalent_call( array $input ): ?array {
+		unset( $input );
+		return null;
+	}
+
+	/**
 	 * Performs the ability. Called only after validation and authorization have passed.
 	 *
 	 * @param array<string, mixed> $input Validated input.

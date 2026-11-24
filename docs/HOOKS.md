@@ -248,7 +248,7 @@ An interface with two methods.
 
 The call as the rules see it. Every property is public and read-only.
 
-- `ability` (`string`): the ability name: one of the seven write tools, `steadhand/create-post`, `steadhand/update-post`, `steadhand/edit-blocks`, `steadhand/set-post-terms`, `steadhand/upload-media`, `steadhand/set-featured-image` or `steadhand/undo-change`.
+- `ability` (`string`): the ability name: one of the seven write tools, `steadhand/create-post`, `steadhand/update-post`, `steadhand/edit-blocks`, `steadhand/set-post-terms`, `steadhand/upload-media`, `steadhand/set-featured-image` or `steadhand/undo-change`. An undo is also seen as the direct call it amounts to, see [An undo is evaluated twice](#an-undo-is-evaluated-twice).
 - `capability` (`string`): the Steadhand capability the ability names. The four post write tools name `steadhand_write_drafts`. A call that edits a live post or sets a live status also needs `steadhand_publish`. The object check decides that, not this property. `upload-media` and `set-featured-image` name `steadhand_media`, and both also need `steadhand_read`.
 - `user_id` (`int`): the agent user making the call.
 - `input` (`array<string, mixed>`): the validated and sanitized input, as the rules before this one left it. Defaults are filled in, so `create-post` always has `status` and `post_type`. After a fix, it is the rewritten input, already checked again.
@@ -303,6 +303,20 @@ These rules apply to every write. The order is fixed:
 - A rule that throws, or that returns anything other than a `Result`, blocks the call with "A guardrail could not check this call, so it was refused."
 - The block note is always recorded, even when the list of notes is full.
 - Rules run only on the write path. Reads and calls refused before the guardrail step never reach them.
+
+### An undo is evaluated twice
+
+A `steadhand/undo-change` call that reverses a change is evaluated twice, and only the rules that pass both evaluations let it run.
+
+1. The rules see the undo itself: `ability` `steadhand/undo-change`, with input `{ id }`, the change-log entry, and no content.
+2. When every rule has passed the undo, the rules see the direct call the undo amounts to, with the same user and the same object:
+   - a terms change: `steadhand/set-post-terms`, its capability, and the input the undo writes with: `{ id, taxonomy, terms, mode }`, where `terms` are the term IDs the post had before the change and `mode` is `replace`; no content;
+   - a featured-image change: `steadhand/set-featured-image`, and the input `{ id, media_id }`, where `media_id` is the image the post had before the change, or 0 when it had none; no content;
+   - a post-text change (`update-post` or `edit-blocks`): `steadhand/update-post`, with the input `{ id }` only, and no content. The undo restores the post's own earlier stored text, which is not run through the content rules (`steadhand/content-limits`, `steadhand/block-markup`), so a rule that reads `content` does not see the restored text.
+
+A block on either evaluation refuses the undo, and the refusal is logged as `blocked` with the message of the rule that blocked it. A rule that would rewrite the direct call refuses the undo too, because a rewrite cannot be applied to a restore. A rule that throws refuses the undo as it refuses any call.
+
+Every other ability is evaluated once, as before. The rate limit counts stored change-log rows, not evaluations, and the undo's own row is written after both evaluations, so the two evaluations count the same calls, once.
 
 These classes are public API. A change to one of them is a breaking change, and needs a deprecation under the stability policy first.
 

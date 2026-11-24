@@ -37,7 +37,7 @@ final class UndoTermsAndImageTest extends PostWriteTestCase {
 
 	private const NO_SAVED_STATE = 'This change has no saved state that Steadhand can restore, so it cannot be undone. Nothing was changed.';
 
-	private const RESTORE_BLOCKED = 'Steadhand cannot undo this change, because what it would restore is no longer valid: a term or image it names was deleted, or is no longer allowed. Nothing was changed.';
+	private const RESTORE_BLOCKED = 'Steadhand cannot undo this change, because the state it would restore is no longer valid: a term or image it names is missing or not usable, or the post can no longer hold it. Nothing was changed.';
 
 	private const TERMS_CHANGED = "The post's terms were changed after that change, so it cannot be undone. Nothing was changed.";
 
@@ -390,13 +390,14 @@ final class UndoTermsAndImageTest extends PostWriteTestCase {
 		$this->assert_unmarked( $change['entry'] );
 	}
 
-	public function test_an_image_of_the_saved_state_deleted_since_is_refused_as_not_undoable(): void {
+	public function test_an_image_of_the_saved_state_deleted_since_is_refused_with_the_generic_text(): void {
 		$old    = $this->image();
 		$new    = $this->image();
 		$change = $this->image_change( $old, $new );
 		wp_delete_attachment( $old, true );
 
-		$this->assert_refused( $this->undo( $change['entry'] ), 'steadhand_refused_not_undoable', self::RESTORE_BLOCKED );
+		// No existence pre-check: the object check refuses it as it refuses any image the caller cannot read.
+		$this->assert_refused( $this->undo( $change['entry'] ), 'steadhand_forbidden', self::NOT_FOUND );
 
 		$this->assertSame( $new, MediaWriter::stored_thumbnail( $change['post'] ) );
 		$this->assert_unmarked( $change['entry'] );
@@ -534,7 +535,9 @@ final class UndoTermsAndImageTest extends PostWriteTestCase {
 	}
 
 	public function test_an_agent_that_no_longer_holds_the_capability_the_entry_needed_is_refused_with_the_generic_text(): void {
-		// Terms: the change needed steadhand_write_drafts; the agent keeps steadhand_media, which the union also accepts.
+		// Terms: this half does not isolate capability_held(). set-post-terms' object check needs steadhand_write_drafts for a draft
+		// (through MetaCaps' edit_post mapping) and steadhand_publish for a published post, so with neither held the object check
+		// refuses on its own. No post state gives a call that passes the object check without one of those two capabilities.
 		$first  = $this->tag( 'One' );
 		$second = $this->tag( 'Two' );
 		$terms  = $this->terms_change( array( $first ), array( $second ) );
@@ -544,7 +547,9 @@ final class UndoTermsAndImageTest extends PostWriteTestCase {
 		$this->assert_unmarked( $terms['entry'] );
 		$this->assertSame( array( $second ), $this->tag_ids( $terms['post'] ) );
 
-		// Image: the change needed steadhand_media; the agent keeps steadhand_write_drafts.
+		// Image: the only half that isolates capability_held(). set-featured-image's object check does not look at steadhand_media
+		// (the pipeline checks it only for the call itself), so without capability_held() this undo would be allowed. The agent keeps
+		// steadhand_write_drafts, which the pipeline's union accepts.
 		$image = $this->image_change( $this->image(), $this->image() );
 		$this->revoke_and_reload( $image['agent'], Capabilities::MEDIA, '' );
 
@@ -598,5 +603,179 @@ final class UndoTermsAndImageTest extends PostWriteTestCase {
 		$this->assertSame( 'steadhand_guardrail_blocked', $result->get_error_code() );
 		$this->assertSame( array( $second ), $this->tag_ids( $change['post'] ) );
 		$this->assert_unmarked( $change['entry'] );
+	}
+
+	/** The warning a moved permalink gives, as set-post-terms gives it. */
+	private const MOVED = 'This change moved the post to a new address. WordPress does not redirect the old one.';
+
+	/** The warning a post left with no category gives, as set-post-terms gives it. */
+	private const DEFAULT_CATEGORY = 'WordPress gives a post with no category the default category the next time the post is saved.';
+
+	private const SHELF     = 'undo_shelf';
+	private const SHELF_CAP = 'steadhand_undo_shelf_assign';
+
+	private function category( string $name ): int {
+		return (int) self::factory()->term->create(
+			array(
+				'taxonomy' => 'category',
+				'name'     => $name,
+			)
+		);
+	}
+
+	public function test_a_taxonomy_removed_from_the_allowlist_since_is_refused_as_not_undoable(): void {
+		$first  = $this->tag( 'One' );
+		$second = $this->tag( 'Two' );
+		$change = $this->terms_change( array( $first ), array( $second ) );
+
+		unregister_taxonomy_for_object_type( 'post_tag', 'post' );
+		try {
+			$this->assert_refused( $this->undo( $change['entry'] ), 'steadhand_refused_not_undoable', self::RESTORE_BLOCKED );
+		} finally {
+			register_taxonomy_for_object_type( 'post_tag', 'post' );
+		}
+
+		$this->assertSame( array( $second ), $this->tag_ids( $change['post'] ) );
+		$this->assert_unmarked( $change['entry'] );
+	}
+
+	public function test_a_custom_assign_capability_revoked_since_is_refused_with_the_generic_text(): void {
+		register_taxonomy(
+			self::SHELF,
+			'post',
+			array(
+				'public'       => true,
+				'capabilities' => array( 'assign_terms' => self::SHELF_CAP ),
+			)
+		);
+		try {
+			$agent  = $this->act_as_agent( array( self::SHELF_CAP => true ) );
+			$post   = $this->admin_post( array( 'post_status' => 'draft' ) );
+			$first  = (int) self::factory()->term->create(
+				array(
+					'taxonomy' => self::SHELF,
+					'name'     => 'First',
+				)
+			);
+			$second = (int) self::factory()->term->create(
+				array(
+					'taxonomy' => self::SHELF,
+					'name'     => 'Second',
+				)
+			);
+			wp_set_object_terms( $post, array( $first ), self::SHELF, false );
+			$this->execute_ability(
+				self::TERMS,
+				array(
+					'id'       => $post,
+					'taxonomy' => self::SHELF,
+					'terms'    => array( $second ),
+					'mode'     => 'replace',
+				)
+			);
+			$entry = (int) $this->latest_row( $agent )['id'];
+
+			$this->revoke_and_reload( $agent, self::SHELF_CAP, '' );
+
+			$this->assert_refused( $this->undo( $entry ), 'steadhand_forbidden', self::NOT_FOUND );
+			$this->assertSame( array( $second ), array_map( 'intval', (array) wp_get_object_terms( $post, self::SHELF, array( 'fields' => 'ids' ) ) ) );
+			$this->assert_unmarked( $entry );
+		} finally {
+			unregister_taxonomy( self::SHELF );
+		}
+	}
+
+	public function test_an_image_the_caller_can_no_longer_read_since_is_refused_with_the_generic_text(): void {
+		global $wpdb;
+
+		$this->act_as_agent( array( Capabilities::MEDIA => true ) );
+		$post = $this->admin_post( array( 'post_status' => 'draft' ) );
+		$old  = $this->image();
+		$new  = $this->image();
+		set_post_thumbnail( $post, $old );
+		$this->set_image( $post, $new );
+		$entry = (int) $this->latest_row( get_current_user_id() )['id'];
+
+		// The media rule needs an attachment whose own status is inherit. A draft attachment is not readable under it.
+		$wpdb->update( $wpdb->posts, array( 'post_status' => 'draft' ), array( 'ID' => $old ) ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching -- Test fixture: the attachment is no longer within the media rule.
+		clean_post_cache( $old );
+
+		$this->assert_refused( $this->undo( $entry ), 'steadhand_forbidden', self::NOT_FOUND );
+		$this->assertSame( $new, MediaWriter::stored_thumbnail( $post ) );
+		$this->assert_unmarked( $entry );
+	}
+
+	public function test_a_post_type_no_longer_allowed_since_is_refused_with_the_generic_text(): void {
+		$first  = $this->tag( 'One' );
+		$second = $this->tag( 'Two' );
+		$change = $this->terms_change( array( $first ), array( $second ) );
+
+		add_filter( 'steadhand_allowed_post_types', static fn( array $types ): array => array_values( array_diff( $types, array( 'post' ) ) ) );
+
+		$this->assert_refused( $this->undo( $change['entry'] ), 'steadhand_forbidden', self::NOT_FOUND );
+		$this->assertSame( array( $second ), $this->tag_ids( $change['post'] ) );
+		$this->assert_unmarked( $change['entry'] );
+	}
+
+	public function test_a_terms_undo_gives_the_moved_permalink_warning_the_direct_call_gives(): void {
+		global $wp_rewrite;
+		$wp_rewrite->set_permalink_structure( '/%category%/%postname%/' );
+		$wp_rewrite->flush_rules();
+
+		try {
+			$agent = $this->act_as_agent( array( Capabilities::PUBLISH => true ) );
+			$post  = $this->admin_post(
+				array(
+					'post_status' => 'publish',
+					'post_title'  => 'Moved',
+				)
+			);
+			$alpha = $this->category( 'Alpha' );
+			$beta  = $this->category( 'Beta' );
+			wp_set_object_terms( $post, array( $alpha ), 'category', false );
+
+			$direct = $this->execute_ability(
+				self::TERMS,
+				array(
+					'id'       => $post,
+					'taxonomy' => 'category',
+					'terms'    => array( $beta ),
+					'mode'     => 'replace',
+				)
+			);
+			$this->assertContains( self::MOVED, $direct['warnings'] );
+
+			$entry = (int) $this->latest_row( $agent )['id'];
+			$undo  = $this->undo( $entry );
+
+			$this->assertSame( array( $alpha ), array_map( 'intval', (array) wp_get_object_terms( $post, 'category', array( 'fields' => 'ids' ) ) ) );
+			$this->assertContains( self::MOVED, $undo['warnings'], 'The undo gives the warning the equivalent direct call gives.' );
+		} finally {
+			$wp_rewrite->set_permalink_structure( '' );
+			$wp_rewrite->flush_rules();
+		}
+	}
+
+	public function test_a_terms_undo_that_leaves_no_category_gives_the_default_category_warning_the_direct_call_gives(): void {
+		$agent = $this->act_as_agent();
+		$post  = $this->admin_post( array( 'post_status' => 'draft' ) );
+		$alpha = $this->category( 'Alpha' );
+		wp_set_object_terms( $post, array(), 'category', false );
+
+		$direct = $this->execute_ability(
+			self::TERMS,
+			array(
+				'id'       => $post,
+				'taxonomy' => 'category',
+				'terms'    => array( $alpha ),
+				'mode'     => 'replace',
+			)
+		);
+		$this->assertNotContains( self::DEFAULT_CATEGORY, $direct['warnings'] );
+
+		$entry = (int) $this->latest_row( $agent )['id'];
+		$undo  = $this->undo( $entry );
+
+		$this->assertContains( self::DEFAULT_CATEGORY, $undo['warnings'] );
 	}
 }

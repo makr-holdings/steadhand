@@ -316,4 +316,32 @@ final class SetTermsAndImageRecordingTest extends PostWriteTestCase {
 		$this->assertSame( 0, (int) $row['after_snapshot_id'] );
 		$this->assertContains( self::AFTER_UNSAVED, $result['warnings'] );
 	}
+
+	/** The warning for a change to a post with more terms in the taxonomy than one undo can put back. */
+	private const TOO_MANY = 'Steadhand cannot undo this change: the post had more than 100 terms in this taxonomy before it, and an undo can put back at most 100.';
+
+	public function test_a_change_of_a_post_with_more_than_100_terms_before_is_not_undoable_and_says_so(): void {
+		$agent = $this->act_as_agent();
+		$post  = $this->admin_post( array( 'post_status' => 'draft' ) );
+		$ids   = array();
+		for ( $i = 0; $i < 101; $i++ ) {
+			$ids[] = (int) self::factory()->term->create(
+				array(
+					'taxonomy' => 'post_tag',
+					'name'     => "Bulk $i",
+				)
+			);
+		}
+		wp_set_object_terms( $post, $ids, 'post_tag', false );
+
+		// A remove leaves 100 terms, which a direct call may send. The state before, 101 terms, could not be restored by an undo.
+		$result = $this->set_terms( $post, array( $ids[0] ), 'remove' );
+
+		$this->assertTrue( $result['changed'] );
+		$this->assertContains( self::TOO_MANY, $result['warnings'] );
+		$row = $this->latest_row( $agent );
+		$this->assertSame( 0, (int) $row['undoable'] );
+		$this->assertSame( 0, (int) $row['snapshot_id'] );
+		$this->assertSame( 0, (int) $row['after_snapshot_id'] );
+	}
 }

@@ -519,6 +519,52 @@ final class Pipeline {
 		$notes       = $verdict->notes;
 		$outcome     = $verdict->fixed ? Entry::RESULT_FIXED : Entry::RESULT_OK;
 
+		// (1b) The direct call this call amounts to (Ability::equivalent_call()), for an ability such as undo-change that does
+		// something else with the same effect. The rules see that call too, on the same user and object. Only a verdict that
+		// passes is applied; a block, a rewrite, or a failure to ask refuses the write. Abilities that return null are
+		// evaluated once, as before.
+		$equivalent = $this->equivalent_for( $ability, $final_input );
+		if ( $equivalent instanceof \WP_Error ) {
+			return $this->refuse_write( $ability, $input, $this->target_for( $ability, $input ), $equivalent->get_error_message(), $notes );
+		}
+
+		if ( null !== $equivalent ) {
+			$as_direct = new Context(
+				$equivalent['ability'],
+				$equivalent['capability'],
+				get_current_user_id(),
+				$equivalent['input'],
+				$latest->object_type,
+				$latest->object_id,
+				$equivalent['content']
+			);
+
+			// A rule that would rewrite the direct call is answered with a block: a rewrite cannot be applied to this change.
+			$direct = $this->engine->evaluate(
+				$as_direct,
+				static function ( array $fixed ): \WP_Error {
+					unset( $fixed );
+
+					return new \WP_Error( 'steadhand_guardrail_blocked', __( 'A guardrail changed this call into one that is not allowed, so it was refused.', 'steadhand' ) );
+				}
+			);
+			$notes  = array_slice( array_merge( $notes, $direct->notes ), 0, Engine::MAX_NOTES );
+
+			if ( $direct->blocked ) {
+				return $this->refuse_write( $ability, $input, $this->target_for( $ability, $input ), $direct->message, $notes );
+			}
+
+			if ( $direct->fixed ) {
+				return $this->refuse_write(
+					$ability,
+					$input,
+					$this->target_for( $ability, $input ),
+					__( 'A guardrail would rewrite the direct call that this change amounts to. A change cannot apply a rewrite made to that call, so it was refused. Nothing was changed.', 'steadhand' ),
+					$notes
+				);
+			}
+		}
+
 		// (2) Reserve the log row. No row, no write.
 		$logged = $this->loggable( $ability, $final_input );
 		$id     = $this->reserve( fn(): Entry => $this->entry_for( $ability, Entry::RESULT_ERROR, '', $logged, $target, $this->join_notes( $notes ) ) );
@@ -662,6 +708,63 @@ final class Pipeline {
 			$target['id'],
 			$content
 		);
+	}
+
+	/**
+	 * Asks the ability for the direct call that this call amounts to, and checks its shape. Null when the ability has none. A throw,
+	 * or a value that is not the documented array, gives a guardrail refusal, so the call fails closed.
+	 *
+	 * @param Ability              $ability Ability being called.
+	 * @param array<string, mixed> $input   Final input.
+	 * @return array{ability: string, capability: string, input: array<string, mixed>, content: array<string, string>}|\WP_Error|null
+	 */
+	private function equivalent_for( Ability $ability, array $input ): array|\WP_Error|null {
+		try {
+			$equivalent = $ability->equivalent_call( $input );
+		} catch ( \Throwable ) {
+			return $this->guard_unavailable();
+		}
+
+		if ( null === $equivalent ) {
+			return null;
+		}
+
+		return $this->is_equivalent_call( $equivalent ) ? $equivalent : $this->guard_unavailable();
+	}
+
+	/**
+	 * Whether a value has the shape Ability::equivalent_call() documents: exactly the keys ability, capability, input and content;
+	 * strings for the first two, and arrays for input, and for content of strings.
+	 *
+	 * @param mixed $value The value to check.
+	 * @return bool
+	 */
+	private function is_equivalent_call( mixed $value ): bool {
+		if ( ! is_array( $value ) ) {
+			return false;
+		}
+
+		$keys = array_keys( $value );
+		sort( $keys );
+		if ( array( 'ability', 'capability', 'content', 'input' ) !== $keys ) {
+			return false;
+		}
+
+		if ( ! is_string( $value['ability'] ) || '' === $value['ability'] || ! is_string( $value['capability'] ) || '' === $value['capability'] ) {
+			return false;
+		}
+
+		if ( ! is_array( $value['input'] ) || ! is_array( $value['content'] ) ) {
+			return false;
+		}
+
+		foreach ( $value['content'] as $markup ) {
+			if ( ! is_string( $markup ) ) {
+				return false;
+			}
+		}
+
+		return true;
 	}
 
 	/**

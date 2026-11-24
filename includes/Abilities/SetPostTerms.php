@@ -51,12 +51,18 @@ final class SetPostTerms extends Ability {
 	private UpdatePost $object_rules;
 
 	/**
-	 * Whether the state before the current call could not be saved, so the call cannot be undone. Set by snapshot() for each call,
-	 * and read by execute() to add the warning that says so.
+	 * Why the state before the current call was not saved, as the warning text, or '' when it was saved. Set by snapshot() for
+	 * each call, and read by execute() to warn that the change cannot be undone.
 	 *
-	 * @var bool
+	 * @var string
 	 */
-	private bool $before_unsaved = false;
+	private string $before_warning = '';
+
+	/** The warning for a change whose before state could not be saved. */
+	private const BEFORE_UNSAVED_WARNING = 'Steadhand could not save the state before this change, so it cannot be undone.';
+
+	/** The warning for a change to a post that had more terms in the taxonomy than one undo can put back. */
+	private const BEFORE_TOO_MANY_WARNING = 'Steadhand cannot undo this change: the post had more than 100 terms in this taxonomy before it, and an undo can put back at most 100.';
 
 	/**
 	 * Constructor.
@@ -372,7 +378,7 @@ final class SetPostTerms extends Ability {
 	 * @return array{id: int, undoable: bool}
 	 */
 	public function snapshot( array $input ): array {
-		$this->before_unsaved = false;
+		$this->before_warning = '';
 
 		$post_id  = (int) $input['id'];
 		$taxonomy = (string) $input['taxonomy'];
@@ -392,6 +398,17 @@ final class SetPostTerms extends Ability {
 			);
 		}
 
+		// An undo puts the before set back with a replace call, which takes at most MAX_RESULT_TERMS IDs. A larger set could never
+		// be restored, so it is not saved, and the change is not undoable.
+		if ( count( $ids ) > self::MAX_RESULT_TERMS ) {
+			$this->before_warning = self::BEFORE_TOO_MANY_WARNING;
+
+			return array(
+				'id'       => 0,
+				'undoable' => false,
+			);
+		}
+
 		$id = SnapshotStore::save(
 			SnapshotStore::KIND_POST_TERMS,
 			'post',
@@ -402,7 +419,7 @@ final class SetPostTerms extends Ability {
 			)
 		);
 
-		$this->before_unsaved = 0 === $id;
+		$this->before_warning = 0 === $id ? self::BEFORE_UNSAVED_WARNING : '';
 
 		return array(
 			'id'       => $id,
@@ -622,19 +639,7 @@ final class SetPostTerms extends Ability {
 		}
 		$link = self::link_of( $post );
 
-		// The state before the call could not be saved, so this change cannot be undone. The write itself is not refused.
-		if ( $changed && $this->before_unsaved ) {
-			$warnings[] = __( 'Steadhand could not save the state before this change, so it cannot be undone.', 'steadhand' );
-		}
-
-		// A published post's address follows its categories, and WordPress keeps no redirect from the old one.
-		if ( $changed && 'publish' === $post->post_status && '' !== $link && '' !== $link_before && $link !== $link_before ) {
-			$warnings[] = __( 'This change moved the post to a new address. WordPress does not redirect the old one.', 'steadhand' );
-		}
-
-		if ( 'category' === $taxonomy && 'post' === $post->post_type && array() === $stored ) {
-			$warnings[] = __( 'WordPress gives a post with no category the default category the next time the post is saved.', 'steadhand' );
-		}
+		$warnings = self::result_warnings( $post, $taxonomy, $stored, $changed, $link_before, $link, $this->before_warning );
 
 		return array(
 			'id'                => $post_id,
@@ -647,7 +652,7 @@ final class SetPostTerms extends Ability {
 			'previous_term_ids' => $previous,
 			'changed'           => $changed,
 			'link'              => $link,
-			'warnings'          => array_slice( $warnings, 0, PostFields::MAX_WARNINGS ),
+			'warnings'          => $warnings,
 			'guardrail_notes'   => array(),
 		);
 	}
@@ -701,6 +706,39 @@ final class SetPostTerms extends Ability {
 	 * The refusals TermWriter makes before it writes. Only these are passed on as they are.
 	 */
 	private const PRE_WRITE_REFUSALS = array( 'steadhand_forbidden', 'steadhand_invalid_input', 'steadhand_refused_content_changed' );
+
+	/**
+	 * The warnings a change of a post's terms gives. The one code for both the call and the undo, so the undo says what the direct
+	 * call with the same set says (SPEC §5).
+	 *
+	 * @param \WP_Post $post           The post, read after the write.
+	 * @param string   $taxonomy       Taxonomy name.
+	 * @param int[]    $stored         The term IDs the post has now, ascending.
+	 * @param bool     $changed        Whether the call changed the terms.
+	 * @param string   $link_before    The permalink before the write, or ''.
+	 * @param string   $link           The permalink after the write, or ''.
+	 * @param string   $before_warning The warning that the state before the change was not saved, or ''. Only a call gives one;
+	 *                                 an undo passes ''.
+	 * @return string[] At most PostFields::MAX_WARNINGS.
+	 */
+	public static function result_warnings( \WP_Post $post, string $taxonomy, array $stored, bool $changed, string $link_before, string $link, string $before_warning ): array {
+		$warnings = array();
+
+		if ( $changed && '' !== $before_warning ) {
+			$warnings[] = $before_warning;
+		}
+
+		// A published post's address follows its categories, and WordPress keeps no redirect from the old one.
+		if ( $changed && 'publish' === $post->post_status && '' !== $link && '' !== $link_before && $link !== $link_before ) {
+			$warnings[] = __( 'This change moved the post to a new address. WordPress does not redirect the old one.', 'steadhand' );
+		}
+
+		if ( 'category' === $taxonomy && 'post' === $post->post_type && array() === $stored ) {
+			$warnings[] = __( 'WordPress gives a post with no category the default category the next time the post is saved.', 'steadhand' );
+		}
+
+		return array_slice( $warnings, 0, PostFields::MAX_WARNINGS );
+	}
 
 	/**
 	 * The permalink of a post, or '' when WordPress cannot give one.
