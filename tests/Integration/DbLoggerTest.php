@@ -810,4 +810,94 @@ final class DbLoggerTest extends LogTestCase {
 	private function days_ago( int $days ): string {
 		return gmdate( 'Y-m-d H:i:s', time() - $days * DAY_IN_SECONDS );
 	}
+
+	public function test_find_returns_the_row_only_for_the_user_who_owns_it_and_typed(): void {
+		$user  = self::factory()->user->create();
+		$other = self::factory()->user->create();
+		$id    = $this->insert_row(
+			array(
+				'user_id'           => $user,
+				'ability'           => 'steadhand/update-post',
+				'object_type'       => 'post',
+				'object_id'         => 5,
+				'result'            => Entry::RESULT_OK,
+				'undoable'          => 1,
+				'snapshot_id'       => 7,
+				'after_snapshot_id' => 8,
+			)
+		);
+
+		$row = ( new DbLogger() )->find( $id, $user );
+
+		$this->assertIsArray( $row );
+		$this->assertSame( $id, $row['id'] );
+		$this->assertSame( 7, $row['snapshot_id'] );
+		$this->assertSame( 8, $row['after_snapshot_id'] );
+		$this->assertSame( 1, $row['undoable'] );
+		$this->assertSame( 0, $row['undone_by'] );
+		$this->assertSame( 5, $row['object_id'] );
+		$this->assertNull( ( new DbLogger() )->find( $id, $other ), 'Another user\'s row is not found.' );
+		$this->assertNull( ( new DbLogger() )->find( 987654321, $user ), 'A missing row is not found.' );
+		$this->assertNull( ( new DbLogger() )->find( 0, $user ) );
+		$this->assertNull( ( new DbLogger() )->find( $id, 0 ) );
+	}
+
+	public function test_find_returns_null_when_the_table_is_not_ready(): void {
+		$user = self::factory()->user->create();
+		$id   = $this->insert_row( array( 'user_id' => $user ) );
+
+		$this->make_table_look_missing();
+
+		$this->assertNull( ( new DbLogger() )->find( $id, $user ) );
+		$this->assertFalse( ( new DbLogger() )->mark_undone( $id, $user, 99 ) );
+	}
+
+	public function test_mark_undone_sets_undone_by_once_for_an_undoable_row_of_its_user(): void {
+		$user   = self::factory()->user->create();
+		$id     = $this->insert_row(
+			array(
+				'user_id'  => $user,
+				'ability'  => 'steadhand/update-post',
+				'result'   => Entry::RESULT_OK,
+				'undoable' => 1,
+			)
+		);
+		$logger = new DbLogger();
+
+		$this->assertTrue( $logger->mark_undone( $id, $user, 99 ) );
+		$this->assertSame( 99, $logger->find( $id, $user )['undone_by'] );
+
+		$this->assertFalse( $logger->mark_undone( $id, $user, 100 ), 'An undone row is not marked again.' );
+		$this->assertSame( 99, $logger->find( $id, $user )['undone_by'] );
+	}
+
+	public function test_mark_undone_refuses_another_users_row_an_undoable_zero_row_and_an_invalid_undo_id(): void {
+		$user         = self::factory()->user->create();
+		$other        = self::factory()->user->create();
+		$mine         = $this->insert_row(
+			array(
+				'user_id'  => $user,
+				'ability'  => 'steadhand/update-post',
+				'result'   => Entry::RESULT_OK,
+				'undoable' => 1,
+			)
+		);
+		$not_undoable = $this->insert_row(
+			array(
+				'user_id'  => $user,
+				'ability'  => 'steadhand/update-post',
+				'result'   => Entry::RESULT_OK,
+				'undoable' => 0,
+			)
+		);
+		$logger       = new DbLogger();
+
+		$this->assertFalse( $logger->mark_undone( $mine, $other, 99 ), 'Another user\'s row is not marked.' );
+		$this->assertFalse( $logger->mark_undone( $not_undoable, $user, 99 ), 'A row that is not undoable is not marked.' );
+		$this->assertFalse( $logger->mark_undone( $mine, $user, 0 ), 'An undo that names no row marks nothing.' );
+		$this->assertFalse( $logger->mark_undone( 987654321, $user, 99 ) );
+
+		$this->assertSame( 0, $logger->find( $mine, $user )['undone_by'] );
+		$this->assertSame( 0, $logger->find( $not_undoable, $user )['undone_by'] );
+	}
 }

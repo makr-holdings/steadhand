@@ -358,6 +358,72 @@ final class DbLogger implements Logger {
 	}
 
 	/**
+	 * Reads one change-log row, but only when it belongs to the given user. Returns null for a row of another user, for a
+	 * missing row, and when the table is not ready. The row has the same PHP types typed() gives a new entry. Never throws.
+	 *
+	 * @param int $id      Row ID.
+	 * @param int $user_id The agent whose row it must be.
+	 * @return array<string, mixed>|null
+	 */
+	public function find( int $id, int $user_id ): ?array {
+		global $wpdb;
+
+		try {
+			if ( $id <= 0 || $user_id <= 0 || ! Schema::ready() ) {
+				return null;
+			}
+
+			$table = Schema::table();
+			$row   = $this->quietly(
+				static function () use ( $wpdb, $table, $id, $user_id ): mixed {
+					// The table name is fixed (see Schema::table()); every value is bound by prepare().
+					return $wpdb->get_row( // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching -- A live read of one row, for the agent that owns it.
+						$wpdb->prepare( "SELECT * FROM {$table} WHERE id = %d AND user_id = %d", $id, $user_id ), // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- See the comment above.
+						ARRAY_A
+					);
+				}
+			);
+
+			return is_array( $row ) ? $this->typed( $id, $row ) : null;
+		} catch ( \Throwable ) {
+			return null;
+		}
+	}
+
+	/**
+	 * Marks a change as undone by the given change-log row: sets undone_by, when the row is the given user's, is not yet
+	 * undone and is undoable. One conditional statement, so two undo calls for the same row cannot both succeed.
+	 *
+	 * @param int $id         Row ID of the change that was undone.
+	 * @param int $user_id    The agent whose row it must be.
+	 * @param int $undone_by  The change-log row ID of the undo call. Must be above 0.
+	 * @return bool True only when exactly one row changed.
+	 */
+	public function mark_undone( int $id, int $user_id, int $undone_by ): bool {
+		global $wpdb;
+
+		try {
+			if ( $id <= 0 || $user_id <= 0 || $undone_by <= 0 || ! Schema::ready() ) {
+				return false;
+			}
+
+			$table   = Schema::table();
+			$changed = $this->quietly(
+				static function () use ( $wpdb, $table, $id, $user_id, $undone_by ): mixed {
+					// The table name is fixed (see Schema::table()); every value is bound by prepare().
+					return $wpdb->query( // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching -- One conditional update of one change-log row.
+						$wpdb->prepare( "UPDATE {$table} SET undone_by = %d WHERE id = %d AND user_id = %d AND undone_by = 0 AND undoable = 1", $undone_by, $id, $user_id ) // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- See the comment above.
+					);
+				}
+			);
+
+			return 1 === (int) $changed;
+		} catch ( \Throwable ) {
+			return false;
+		}
+	}
+
+	/**
 	 * Counts the calls this user made to the listed abilities in the last N seconds, that were stored as ok, fixed or
 	 * error. Refusals are not counted.
 	 *

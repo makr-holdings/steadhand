@@ -86,6 +86,15 @@ final class Pipeline {
 	private static int $writing = 0;
 
 	/**
+	 * The change-log row IDs of the write calls that are running now, outermost first. run_write() pushes the ID of the row
+	 * it reserved, and pops it on every path once the write's outcome is decided. A nested write pushes and pops its own
+	 * ID, so the outer write's ID is current again when the nested write returns.
+	 *
+	 * @var int[]
+	 */
+	private static array $log_ids = array();
+
+	/**
 	 * Whether a Steadhand call is authorizing or executing an ability right now.
 	 *
 	 * The metacap mapping (MetaCaps) applies only while this is true (SPEC §14.1, D6). It is true only between
@@ -110,6 +119,21 @@ final class Pipeline {
 	 */
 	public static function is_write_call(): bool {
 		return array() !== self::$calls && true === end( self::$calls ) && ! self::shutting_down();
+	}
+
+	/**
+	 * The change-log row ID of the innermost write that is running, or 0 outside a write.
+	 *
+	 * An ability that must name its own change in another entry (steadhand/undo-change records the entry it undoes) reads
+	 * it here while it executes. The ID is set once the row is reserved, and cleared on every path when the write's
+	 * outcome is decided, so a nested write restores the outer write's ID.
+	 *
+	 * @return int The row ID, or 0.
+	 */
+	public static function current_log_id(): int {
+		$last = array_key_last( self::$log_ids );
+
+		return null === $last ? 0 : self::$log_ids[ $last ];
 	}
 
 	/**
@@ -505,7 +529,9 @@ final class Pipeline {
 		// (3) to (5a) run in one try, so the text a save recorded (PostWriter::written_text()) is cleared once the outcome is decided,
 		// on every path: success, WP_Error, a throw, and a write that was not undoable. The after-state is asked for before the
 		// clear, and only then. A nested write clears every post's entry, including the outer write's, so the outer call is
-		// recorded as not undoable. That is the safe direction.
+		// recorded as not undoable. That is the safe direction. The reserved row ID is current (current_log_id()) for the same
+		// span, and is popped in the same finally.
+		self::$log_ids[] = $id;
 		try {
 			// (3) Snapshot, immediately before execute(). A throw means nothing was changed, so the row is completed as an
 			// error and execute() does not run.
@@ -547,6 +573,7 @@ final class Pipeline {
 			}
 		} finally {
 			PostWriter::forget_written_text();
+			array_pop( self::$log_ids );
 		}
 		$undoable = $snapshot['undoable'] && $after > 0;
 

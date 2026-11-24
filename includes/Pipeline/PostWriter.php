@@ -40,6 +40,9 @@ final class PostWriter {
 	/** The zero GMT date WordPress stores for "no date". */
 	private const ZERO_DATE = '0000-00-00 00:00:00';
 
+	/** The post fields that restore() sets and checks: the title, content and excerpt. */
+	private const TEXT_FIELDS = array( 'post_title', 'post_content', 'post_excerpt' );
+
 	/**
 	 * The title, content and excerpt that each post's last Steadhand save stored, by post ID, as the row holds them (unslashed,
 	 * after the save filters). Recorded by save(). An entry is cleared when a capture for the post opens and when it closes
@@ -184,6 +187,251 @@ final class PostWriter {
 				'post_content'          => $content,
 			)
 		);
+	}
+
+	/**
+	 * Puts a post's title, content and excerpt back to the text of an earlier revision, and changes nothing else. Used by
+	 * steadhand/undo-change only.
+	 *
+	 * The post must still hold $expected, the text the change left, or nothing is written and the refusal is
+	 * steadhand_refused_changed_since (409). That is checked in two places:
+	 * 1. before the save, with an uncached read of the row (holds_text());
+	 * 2. at the last point this code can reach before core writes the row. wp_insert_post() fires pre_post_update for an
+	 *    update immediately before its $wpdb->update() of the posts table (wp-includes/post.php:4993, after the
+	 *    wp_insert_post_data filter at 4978). Before that point, this post's row and its revisions are not written. Core can
+	 *    rename a trashed post that has the same slug earlier in the save (add_trashed_suffix_to_trashed_posts, post.php:4883
+	 *    to 4898), as it does for update-post; that is another post's row, and this check does not concern it.
+	 *    An action for this post runs on every pre_post_update for it during the restore, and reads the row again, uncached.
+	 *    When the row no longer holds $expected, the action arms a query filter for the very next query. The filter blanks that
+	 *    query only when it is the UPDATE of this post's row, which wpdb::update() builds as "UPDATE `posts` SET ... WHERE
+	 *    `ID` = <post>" (class-wpdb.php:2719). A blank query makes wpdb::query() return false (class-wpdb.php:2232), so
+	 *    wpdb::update() returns false and wp_insert_post() returns a db_update_error before the row is written. No revision
+	 *    is made. If the next query is anything else, nothing is blanked, and the call returns steadhand_update_partial.
+	 * Nothing is thrown through a hook, and the callbacks take mixed arguments, so a value core passes cannot make them throw.
+	 * The action and the filter are removed in finally, on every path.
+	 *
+	 * The action runs at PHP_INT_MAX. Whether it ran for this post, and whether it found a mismatch, is recorded. When the
+	 * save reports success and the action never ran (a listener removed it, for example), the call returns
+	 * steadhand_update_partial, never a success. When a mismatch was found and the abort could not be applied, the overwrite
+	 * may land; the call returns steadhand_update_partial with the text that says the restore could not be stopped. Two causes
+	 * are known: a posts table whose charset is not utf8, utf8mb3, utf8mb4 or latin1 makes wpdb issue a conversion query before
+	 * its UPDATE (strip_invalid_text() in process_fields(), class-wpdb.php:2812 to 2828 and 3722 to 3753), and a query filter
+	 * from another plugin that rewrites the statement. When a mismatch was found and the save was refused, steadhand_refused_
+	 * changed_since is returned only when the row, read again uncached, does not hold $restore. Any other outcome after a
+	 * mismatch is steadhand_update_partial.
+	 *
+	 * The guard runs on every pre_post_update for the post, so a nested update of the same post from an earlier hook is
+	 * checked as well. The check is applied to each run, not only the first. A run that matches is not a reason to skip a
+	 * later one, and a mismatch found on any run is reported. The after-save read in UndoChange stays.
+	 *
+	 * The restored bytes are kept as $restore holds them, after the save filters have run (the keep filter in save()), so the
+	 * KSES filters never change the text an administrator stored. The stored post_content_filtered is kept as it is. Only the
+	 * three text fields are sent. The save itself is WordPress's, as it is for update-post.
+	 *
+	 * The window that remains: between the action's read of the row and core's UPDATE statement, a concurrent request can
+	 * change the row, and this save then overwrites that change. Nothing in this process can close that gap. UndoChange reads
+	 * the row again after a successful save and reports steadhand_update_partial when it does not hold $restore.
+	 *
+	 * A WP_Error from wp_update_post() is returned as it is, unless a mismatch was found, as described above.
+	 *
+	 * @param int                                                                   $post_id  Post ID.
+	 * @param array{post_title: string, post_content: string, post_excerpt: string} $expected The text the post must hold now.
+	 * @param array{post_title: string, post_content: string, post_excerpt: string} $restore  The text to store.
+	 * @return int|\WP_Error The post ID, or the refusal or error.
+	 */
+	public static function restore( int $post_id, array $expected, array $restore ): int|\WP_Error {
+		self::assert_writing();
+		self::assert_text( $expected );
+		self::assert_text( $restore );
+
+		$post = self::fresh_post( $post_id );
+		if ( $post instanceof \WP_Error ) {
+			return $post;
+		}
+
+		if ( ! self::holds_text( $post_id, $expected ) ) {
+			return self::changed_since();
+		}
+
+		$checked   = false; // The guard ran at least once for this post.
+		$mismatch  = false; // A run of the guard found the row changed.
+		$armed     = false; // The next query is stopped, if it is this post's UPDATE.
+		$unstopped = false; // After a mismatch, the next query was not this post's UPDATE, so nothing was stopped.
+
+		$guard = static function ( mixed $id ) use ( $post_id, $expected, &$checked, &$mismatch, &$armed ): void {
+			if ( (int) $id !== $post_id ) {
+				return;
+			}
+
+			$checked = true;
+			if ( ! self::holds_text( $post_id, $expected ) ) {
+				$mismatch = true;
+				$armed    = true;
+			}
+		};
+
+		$stop = static function ( mixed $sql ) use ( $post_id, &$armed, &$unstopped ): mixed {
+			if ( ! $armed ) {
+				return $sql;
+			}
+
+			// One query only: the next query after the guard. Nothing else is blanked.
+			$armed = false;
+			if ( is_string( $sql ) && self::is_post_update( $sql, $post_id ) ) {
+				return '';
+			}
+
+			$unstopped = true;
+
+			return $sql;
+		};
+
+		$keep = $restore + array( 'post_content_filtered' => (string) $post->post_content_filtered );
+
+		add_action( 'pre_post_update', $guard, PHP_INT_MAX, 1 );
+		add_filter( 'query', $stop, PHP_INT_MAX, 1 );
+		try {
+			$saved = self::save( $post, $restore, $keep );
+		} finally {
+			remove_action( 'pre_post_update', $guard, PHP_INT_MAX );
+			remove_filter( 'query', $stop, PHP_INT_MAX );
+		}
+
+		if ( $mismatch ) {
+			if ( $unstopped ) {
+				return self::abort_failed();
+			}
+
+			if ( is_wp_error( $saved ) && ! self::holds_text( $post_id, $restore ) ) {
+				return self::changed_since();
+			}
+
+			return self::changed_during_save();
+		}
+
+		if ( ! $checked && is_int( $saved ) ) {
+			return self::unchecked_save();
+		}
+
+		return $saved;
+	}
+
+	/**
+	 * Whether a query is the UPDATE of one post's row, as wpdb::update() builds it for array( 'ID' => $post_id ): it starts
+	 * with the UPDATE of the posts table and ends with the WHERE clause for that ID (class-wpdb.php:2719).
+	 *
+	 * @param string $sql     The query.
+	 * @param int    $post_id The post.
+	 * @return bool
+	 */
+	private static function is_post_update( string $sql, int $post_id ): bool {
+		global $wpdb;
+
+		return str_starts_with( ltrim( $sql ), 'UPDATE `' . $wpdb->posts . '`' )
+			&& str_ends_with( rtrim( $sql ), 'WHERE `ID` = ' . $post_id );
+	}
+
+	/**
+	 * The refusal for a restore whose abort could not be applied: the overwrite may have landed. The one text for it.
+	 *
+	 * @return \WP_Error
+	 */
+	private static function abort_failed(): \WP_Error {
+		return new \WP_Error(
+			'steadhand_update_partial',
+			__( 'The post changed while the restore was being saved, and the restore could not be stopped. Check the post before you continue.', 'steadhand' ),
+			array( 'status' => 500 )
+		);
+	}
+
+	/**
+	 * The error for a restore in which the post was found changed, and the outcome cannot be confirmed as a clean refusal.
+	 *
+	 * @return \WP_Error
+	 */
+	private static function changed_during_save(): \WP_Error {
+		return new \WP_Error(
+			'steadhand_update_partial',
+			__( 'The post changed while the restore was being saved, so the result cannot be trusted. Check the post before you continue.', 'steadhand' ),
+			array( 'status' => 500 )
+		);
+	}
+
+	/**
+	 * The error for a restore that reported success although the check before the save never ran. Nothing is trusted then.
+	 *
+	 * @return \WP_Error
+	 */
+	private static function unchecked_save(): \WP_Error {
+		return new \WP_Error(
+			'steadhand_update_partial',
+			__( 'The post was saved, but the check made just before the save did not run, so the restore cannot be confirmed. Check the post before you continue.', 'steadhand' ),
+			array( 'status' => 500 )
+		);
+	}
+
+	/**
+	 * Whether the post's title, content and excerpt, read from the row now without the object cache, are exactly the given
+	 * text. A missing row is not. The comparison is byte for byte.
+	 *
+	 * @param int                                                                   $post_id Post ID.
+	 * @param array{post_title: string, post_content: string, post_excerpt: string} $text    The text.
+	 * @return bool
+	 */
+	public static function holds_text( int $post_id, array $text ): bool {
+		global $wpdb;
+
+		// A direct read of the row. The object cache is not used, so a row changed by another request is seen.
+		$row = $wpdb->get_row( // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching -- An uncached read of the row, on purpose.
+			$wpdb->prepare( "SELECT post_title, post_content, post_excerpt FROM {$wpdb->posts} WHERE ID = %d", $post_id ), // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- The table name is core's; every value is bound by prepare().
+			ARRAY_A
+		);
+		if ( ! is_array( $row ) ) {
+			return false;
+		}
+
+		foreach ( self::TEXT_FIELDS as $field ) {
+			if ( (string) ( $row[ $field ] ?? '' ) !== $text[ $field ] ) {
+				return false;
+			}
+		}
+
+		return true;
+	}
+
+	/**
+	 * The refusal for a post that changed after the change being undone. The one text for it.
+	 *
+	 * @return \WP_Error
+	 */
+	public static function changed_since(): \WP_Error {
+		return new \WP_Error(
+			'steadhand_refused_changed_since',
+			__( 'The post was edited after that change, so it cannot be undone. Nothing was changed.', 'steadhand' ),
+			array( 'status' => 409 )
+		);
+	}
+
+	/**
+	 * Checks that a text array holds exactly the three text fields, each a string.
+	 *
+	 * @param array<mixed, mixed> $text Text.
+	 * @throws \InvalidArgumentException When the keys differ or a value is not a string.
+	 */
+	private static function assert_text( array $text ): void {
+		$keys = array_keys( $text );
+		sort( $keys );
+		$want = self::TEXT_FIELDS;
+		sort( $want );
+		if ( $keys !== $want ) {
+			throw new \InvalidArgumentException( 'PostWriter needs exactly the title, content and excerpt.' );
+		}
+
+		foreach ( $text as $value ) {
+			if ( ! is_string( $value ) ) {
+				throw new \InvalidArgumentException( 'PostWriter needs the title, content and excerpt to be strings.' );
+			}
+		}
 	}
 
 	/**

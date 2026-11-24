@@ -165,7 +165,7 @@ Runs after Steadhand has stored a change-log entry. It is applied in `Steadhand\
     - `guardrail_notes` (`string`): the notes the guardrails recorded for a write, joined by newlines, or `''`.
     - `snapshot_id` (`int`): the ID of the snapshot revision for an update (the newest non-autosave revision matching the post's title, content and excerpt, see SPEC section 7), or 0.
     - `undoable` (`int`): 0 or 1. It is an integer, not a boolean.
-    - `undone_by` (`int`): always 0 until undo is built.
+    - `undone_by` (`int`): 0 until the change is undone; then the change-log ID of the `steadhand/undo-change` call that undid it (SPEC section 7).
     - `after_snapshot_id` (`int`): the ID of the snapshot revision that holds the post's state after the write, or 0. Only an undoable update has one (SPEC section 7). The row has this key. The order of the keys is not part of the contract, even though the list above follows the order the code builds them.
 - **Values:** every string value and every key of the input is already redacted, and every string is size-capped, before it is stored. The listener receives exactly what was stored. The agent label is cut at 191 bytes. The message and guardrail note are cut at 2000 bytes. The input is capped as described above. Redaction is best-effort, so a listener must not assume that a value has no secret in it. For a write, the row is read back from the table once its outcome is recorded, and the integer columns (`id`, `user_id`, `object_id`, `snapshot_id`, `after_snapshot_id`, `undoable` and `undone_by`) are cast to `int` the same way, so the types listed above apply to both. Text columns are strings.
 - **When it runs:** once for each row that is stored in one step, after the insert succeeds. That includes the refusal-throttle marker row, and for a stored row it runs before the pruning step of the same call. A write is stored in two steps: its row is reserved before the change, and the listener runs once, when the outcome is recorded and the row changes. The reservation itself does not run it. It does not run for an entry that the throttle drops, or for an entry whose insert fails.
@@ -248,7 +248,7 @@ An interface with two methods.
 
 The call as the rules see it. Every property is public and read-only.
 
-- `ability` (`string`): the ability name: one of the six write tools, `steadhand/create-post`, `steadhand/update-post`, `steadhand/edit-blocks`, `steadhand/set-post-terms`, `steadhand/upload-media` or `steadhand/set-featured-image`.
+- `ability` (`string`): the ability name: one of the seven write tools, `steadhand/create-post`, `steadhand/update-post`, `steadhand/edit-blocks`, `steadhand/set-post-terms`, `steadhand/upload-media`, `steadhand/set-featured-image` or `steadhand/undo-change`.
 - `capability` (`string`): the Steadhand capability the ability names. The four post write tools name `steadhand_write_drafts`. A call that edits a live post or sets a live status also needs `steadhand_publish`. The object check decides that, not this property. `upload-media` and `set-featured-image` name `steadhand_media`, and both also need `steadhand_read`.
 - `user_id` (`int`): the agent user making the call.
 - `input` (`array<string, mixed>`): the validated and sanitized input, as the rules before this one left it. Defaults are filled in, so `create-post` always has `status` and `post_type`. After a fix, it is the rewritten input, already checked again.

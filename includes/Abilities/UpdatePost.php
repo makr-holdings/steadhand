@@ -297,7 +297,7 @@ final class UpdatePost extends Ability {
 			);
 		}
 
-		$refusal = $this->refuse_before_write( $post_id );
+		$refusal = self::refuse_before_write( $post_id );
 		if ( null !== $refusal ) {
 			$this->state[ $post_id ] = $this->state_for( 0, false, $metadata, $refusal, false );
 
@@ -307,7 +307,7 @@ final class UpdatePost extends Ability {
 			);
 		}
 
-		if ( ! $this->keeps_enough_revisions( $post_id ) ) {
+		if ( ! self::keeps_enough_revisions( $post_id ) ) {
 			$this->state[ $post_id ] = $this->state_for( 0, false, $metadata, null, true );
 
 			return array(
@@ -588,9 +588,9 @@ final class UpdatePost extends Ability {
 	 * @param int $post_id Post ID.
 	 * @return \WP_Error|null
 	 */
-	private function refuse_before_write( int $post_id ): ?\WP_Error {
+	public static function refuse_before_write( int $post_id ): ?\WP_Error {
 		$post = get_post( $post_id );
-		if ( $post instanceof \WP_Post && $this->template_unavailable( $post ) ) {
+		if ( $post instanceof \WP_Post && self::template_unavailable( $post ) ) {
 			return new \WP_Error(
 				'steadhand_refused_invalid_template',
 				__( 'This post uses a page template that the active theme does not have. WordPress would save the change and then report an error. Nothing was changed. An administrator must set a valid template for this post.', 'steadhand' ),
@@ -609,7 +609,7 @@ final class UpdatePost extends Ability {
 	 * @param \WP_Post $post The post.
 	 * @return bool
 	 */
-	private function template_unavailable( \WP_Post $post ): bool {
+	private static function template_unavailable( \WP_Post $post ): bool {
 		$template = get_page_template_slug( $post );
 		if ( ! is_string( $template ) || '' === $template || '0' === $template || 'default' === $template ) {
 			return false;
@@ -627,7 +627,7 @@ final class UpdatePost extends Ability {
 	 * @param int $post_id Post ID.
 	 * @return bool
 	 */
-	private function keeps_enough_revisions( int $post_id ): bool {
+	public static function keeps_enough_revisions( int $post_id ): bool {
 		$post = get_post( $post_id );
 		if ( ! $post instanceof \WP_Post ) {
 			return false;
@@ -691,7 +691,7 @@ final class UpdatePost extends Ability {
 			0,
 			false,
 			$this->sets_metadata( $input ),
-			array() === $changes ? null : $this->refuse_before_write( $post_id ),
+			array() === $changes ? null : self::refuse_before_write( $post_id ),
 			false
 		);
 	}
