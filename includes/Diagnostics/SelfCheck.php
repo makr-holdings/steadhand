@@ -50,6 +50,7 @@ final class SelfCheck {
 			'server_registered'           => self::server_registered(),
 			'lockdown_active'             => self::lockdown_active(),
 			'change_log_ready'            => Schema::ready(),
+			'snapshots_ready'             => Schema::snapshots_ready(),
 		);
 	}
 

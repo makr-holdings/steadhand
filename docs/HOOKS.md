@@ -100,7 +100,7 @@ Sets how many days change-log entries are kept. It is applied in `Steadhand\Log\
   - A value that is not an integer, or is less than 1, is replaced by 30. This covers zero, negative numbers, floats, booleans, `null` and arrays. A filter therefore cannot make entries expire at once, and it cannot turn pruning off by returning 0.
   - A value above 3650 is reduced to 3650, which is ten years. Entries cannot be kept longer than that through this filter.
   - If a callback throws, 30 is used.
-- **When it applies:** pruning runs at most once a day, and only as part of storing an entry. It deletes entries older than the number of days returned, in batches of 1,000 rows, up to 20 batches per pass. A pass that runs out of batches is continued by the next write. The batch size and the batch count cannot be changed by a filter. A new value takes effect at the next prune run, so entries older than the new value are not removed until then. While no entry is being stored, no pruning happens at all.
+- **When it applies:** pruning runs at most once a day, and only as part of storing an entry. It deletes entries older than the number of days returned (and, in the same pass, the saved states in `{prefix}steadhand_snapshots` that are that old), in batches of 1,000 rows, up to 20 batches per pass. A pass that runs out of batches is continued by the next write. The batch size and the batch count cannot be changed by a filter. A new value takes effect at the next prune run, so entries older than the new value are not removed until then. While no entry is being stored, no pruning happens at all.
 - **What it does not do:** it does not schedule anything with WP-Cron, and it does not change which calls are logged. It does not delete entries on any other event.
 
 This example keeps entries for at least 90 days:
@@ -163,10 +163,10 @@ Runs after Steadhand has stored a change-log entry. It is applied in `Steadhand\
     - `result` (`string`): `ok`, `blocked`, `fixed` or `error`. `fixed` means a guardrail rewrote the input. No built-in rule does that yet.
     - `message` (`string`): the message for a refused or failed call, or `''`.
     - `guardrail_notes` (`string`): the notes the guardrails recorded for a write, joined by newlines, or `''`.
-    - `snapshot_id` (`int`): the ID of the snapshot revision for an update (the newest non-autosave revision matching the post's title, content and excerpt, see SPEC section 7), or 0.
+    - `snapshot_id` (`int`): the ID of the snapshot for the call's before state, or 0. For an update it is the newest non-autosave revision matching the post's title, content and excerpt (SPEC section 7). For `set-post-terms` and `set-featured-image` it is a row of `{prefix}steadhand_snapshots`.
     - `undoable` (`int`): 0 or 1. It is an integer, not a boolean.
     - `undone_by` (`int`): 0 until the change is undone; then the change-log ID of the `steadhand/undo-change` call that undid it (SPEC section 7).
-    - `after_snapshot_id` (`int`): the ID of the snapshot revision that holds the post's state after the write, or 0. Only an undoable update has one (SPEC section 7). The row has this key. The order of the keys is not part of the contract, even though the list above follows the order the code builds them.
+    - `after_snapshot_id` (`int`): the ID of the snapshot that holds the post's state after the write, of the same kind as `snapshot_id`, or 0. Only an undoable write has one (SPEC section 7). The row has this key. The order of the keys is not part of the contract, even though the list above follows the order the code builds them.
 - **Values:** every string value and every key of the input is already redacted, and every string is size-capped, before it is stored. The listener receives exactly what was stored. The agent label is cut at 191 bytes. The message and guardrail note are cut at 2000 bytes. The input is capped as described above. Redaction is best-effort, so a listener must not assume that a value has no secret in it. For a write, the row is read back from the table once its outcome is recorded, and the integer columns (`id`, `user_id`, `object_id`, `snapshot_id`, `after_snapshot_id`, `undoable` and `undone_by`) are cast to `int` the same way, so the types listed above apply to both. Text columns are strings.
 - **When it runs:** once for each row that is stored in one step, after the insert succeeds. That includes the refusal-throttle marker row, and for a stored row it runs before the pruning step of the same call. A write is stored in two steps: its row is reserved before the change, and the listener runs once, when the outcome is recorded and the row changes. The reservation itself does not run it. It does not run for an entry that the throttle drops, or for an entry whose insert fails.
 - **If a listener throws:** the exception is caught and ignored. The entry stays stored, and the call's result is not changed. An exception also stops the listeners on this action that come after the one that threw, so they do not run for that entry.
@@ -248,10 +248,10 @@ An interface with two methods.
 
 The call as the rules see it. Every property is public and read-only.
 
-- `ability` (`string`): the ability name: one of the seven write tools, `steadhand/create-post`, `steadhand/update-post`, `steadhand/edit-blocks`, `steadhand/set-post-terms`, `steadhand/upload-media`, `steadhand/set-featured-image` or `steadhand/undo-change`.
+- `ability` (`string`): the ability name: one of the seven write tools, `steadhand/create-post`, `steadhand/update-post`, `steadhand/edit-blocks`, `steadhand/set-post-terms`, `steadhand/upload-media`, `steadhand/set-featured-image` or `steadhand/undo-change`. An undo is also seen as the direct call it amounts to, see [An undo is evaluated twice](#an-undo-is-evaluated-twice).
 - `capability` (`string`): the Steadhand capability the ability names. The four post write tools name `steadhand_write_drafts`. A call that edits a live post or sets a live status also needs `steadhand_publish`. The object check decides that, not this property. `upload-media` and `set-featured-image` name `steadhand_media`, and both also need `steadhand_read`.
 - `user_id` (`int`): the agent user making the call.
-- `input` (`array<string, mixed>`): the validated and sanitized input, as the rules before this one left it. Defaults are filled in, so `create-post` always has `status` and `post_type`. After a fix, it is the rewritten input, already checked again.
+- `input` (`array<string, mixed>`): for the call itself, the validated and sanitized input, as the rules before this one left it. Defaults are filled in, so `create-post` always has `status` and `post_type`. After a fix, it is the rewritten input, already checked again. For the second evaluation of an undo, the input is synthetic and is described under [An undo is evaluated twice](#an-undo-is-evaluated-twice): for post text it holds only `id`, which does not pass the tool's own input rules, so a rule must not assume any other key; for terms and the featured image it is validated against the tool's schema.
   - **Warning, `steadhand/upload-media`:** `input` carries the raw base64 payload, in `data_base64`, as the caller sent it: up to 7,200,000 characters, which decode to at most 5 MB. A rule must not log it, store it, or return it in a message. Log its digest, or nothing. The change log itself stores only the digest of the decoded bytes.
 - `object_type` (`string`): `post` for the four post write tools and for `set-featured-image`; `attachment` for `upload-media`, whose object ID is 0 until the file is stored and the new attachment's ID after.
 - `object_id` (`int`): the ID of the post the call changes. It is 0 for `create-post`, which has no ID until it runs.
@@ -303,6 +303,24 @@ These rules apply to every write. The order is fixed:
 - A rule that throws, or that returns anything other than a `Result`, blocks the call with "A guardrail could not check this call, so it was refused."
 - The block note is always recorded, even when the list of notes is full.
 - Rules run only on the write path. Reads and calls refused before the guardrail step never reach them.
+
+### An undo is evaluated twice
+
+A `steadhand/undo-change` call that reverses a change is evaluated twice, and only the rules that pass both evaluations let it run.
+
+1. The rules see the undo itself: `ability` `steadhand/undo-change`, with input `{ id }`, the change-log entry, and no content.
+2. When every rule has passed the undo, the rules see the direct call the undo amounts to, with the same user and the same object:
+   - a terms change: `steadhand/set-post-terms`, its capability, and the input the undo writes with: `{ id, taxonomy, terms, mode }`, where `terms` are the term IDs the post had before the change and `mode` is `replace`; no content;
+   - a featured-image change: `steadhand/set-featured-image`, and the input `{ id, media_id }`, where `media_id` is the image the post had before the change, or 0 when it had none; no content;
+   - a post-text change (`update-post` or `edit-blocks`): `steadhand/update-post`, with the input `{ id }` only, and no content. The undo restores the post's own earlier stored text, which is not run through the content rules (`steadhand/content-limits`, `steadhand/block-markup`), so a rule that reads `content` does not see the restored text.
+
+The input of the second evaluation is synthetic. For post text it is `{ id }` only, and it would not pass the tool's own input rules, so a rule must not assume any other key. For terms and the featured image it is the input the restore writes with, validated and sanitized against the tool's schema, the way the pipeline validates a call. Its `content` is always empty.
+
+A block on either evaluation refuses the undo, and the refusal is logged as `blocked` with the message of the rule that blocked it. A rule that would rewrite the direct call refuses the undo too, with the message "A guardrail changed this call into one that is not allowed, so it was refused.", because a rewrite cannot be applied to a restore. A rule that throws refuses the undo as it refuses any call. If the direct call cannot be determined (the entry is not usable, or its saved state cannot be read), the undo is refused the same way, and nothing is written.
+
+The rules may rewrite the undo's own input, `{ id }`, to another entry. That rewrite is authorized again like any other: the second evaluation describes the new entry, and a rewrite to another agent's entry, or to an entry of another post, refuses the undo. Between the second evaluation and the write, the undo checks again that the direct call it would make is the one the rules saw; if it changed, nothing is written.
+
+Every other ability is evaluated once, as before. The rate limit counts stored change-log rows, not evaluations, and the undo's own row is written after both evaluations, so the two evaluations count the same calls, once.
 
 These classes are public API. A change to one of them is a breaking change, and needs a deprecation under the stability policy first.
 

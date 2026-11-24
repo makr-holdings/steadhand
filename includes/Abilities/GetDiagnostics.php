@@ -214,6 +214,7 @@ final class GetDiagnostics extends Ability {
 						'server_registered'           => self::flag(),
 						'lockdown_active'             => self::flag(),
 						'change_log_ready'            => self::flag(),
+						'snapshots_ready'             => self::flag(),
 					)
 				),
 			)
