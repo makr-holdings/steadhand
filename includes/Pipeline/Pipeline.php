@@ -502,43 +502,51 @@ final class Pipeline {
 			return $this->log_failed();
 		}
 
-		// (3) Snapshot, immediately before execute(). A throw means nothing was changed, so the row is completed as an
-		// error and execute() does not run.
+		// (3) to (5a) run in one try, so the text a save recorded (PostWriter::written_text()) is cleared once the outcome is decided,
+		// on every path: success, WP_Error, a throw, and a write that was not undoable. The after-state is asked for before the
+		// clear, and only then. A nested write clears every post's entry, including the outer write's, so the outer call is
+		// recorded as not undoable. That is the safe direction.
 		try {
-			$snapshot = $this->within_write(
-				fn(): array => $this->snapshot_for( $ability, $final_input )
-			);
-		} catch ( \Throwable ) {
-			$error = $this->generic_error();
-			return $this->complete_write( $id, $ability, Entry::RESULT_ERROR, $error, $logged, $target, $notes, 0, false )
-				? $error
-				: $this->log_incomplete();
-		}
+			// (3) Snapshot, immediately before execute(). A throw means nothing was changed, so the row is completed as an
+			// error and execute() does not run.
+			try {
+				$snapshot = $this->within_write(
+					fn(): array => $this->snapshot_for( $ability, $final_input )
+				);
+			} catch ( \Throwable ) {
+				$error = $this->generic_error();
+				return $this->complete_write( $id, $ability, Entry::RESULT_ERROR, $error, $logged, $target, $notes, 0, false )
+					? $error
+					: $this->log_incomplete();
+			}
 
-		// (4) Execute with the final input.
-		try {
-			$output = $this->within_write(
-				fn(): mixed => $ability->execute( $final_input )
-			);
-		} catch ( \Throwable ) {
-			$error = self::write_error();
-			return $this->complete_write( $id, $ability, Entry::RESULT_ERROR, $error, $logged, $target, $notes, $snapshot['id'], false )
-				? $error
-				: $this->log_incomplete();
-		}
+			// (4) Execute with the final input.
+			try {
+				$output = $this->within_write(
+					fn(): mixed => $ability->execute( $final_input )
+				);
+			} catch ( \Throwable ) {
+				$error = self::write_error();
+				return $this->complete_write( $id, $ability, Entry::RESULT_ERROR, $error, $logged, $target, $notes, $snapshot['id'], false )
+					? $error
+					: $this->log_incomplete();
+			}
 
-		// (5) Complete the row with the outcome.
-		if ( is_wp_error( $output ) ) {
-			return $this->complete_write( $id, $ability, Entry::RESULT_ERROR, $output, $logged, $target, $notes, $snapshot['id'], false )
-				? $output
-				: $this->log_incomplete();
-		}
+			// (5) Complete the row with the outcome.
+			if ( is_wp_error( $output ) ) {
+				return $this->complete_write( $id, $ability, Entry::RESULT_ERROR, $output, $logged, $target, $notes, $snapshot['id'], false )
+					? $output
+					: $this->log_incomplete();
+			}
 
-		// The state after the write. Asked only for an undoable call, and only when it can be used: an ID that is not
-		// positive, or that is the snapshot taken before the call, is recorded as 0 and the call is not undoable.
-		$after = $snapshot['undoable'] ? $this->snapshot_after_for( $ability, $final_input, $output, $snapshot['id'] ) : 0;
-		if ( $after === $snapshot['id'] ) {
-			$after = 0;
+			// (5a) The state after the write. Asked only for an undoable call, and only when it can be used: an ID that is not
+			// positive, or that is the snapshot taken before the call, is recorded as 0 and the call is not undoable.
+			$after = $snapshot['undoable'] ? $this->snapshot_after_for( $ability, $final_input, $output, $snapshot['id'] ) : 0;
+			if ( $after === $snapshot['id'] ) {
+				$after = 0;
+			}
+		} finally {
+			PostWriter::forget_written_text();
 		}
 		$undoable = $snapshot['undoable'] && $after > 0;
 
@@ -672,8 +680,10 @@ final class Pipeline {
 	/**
 	 * Adds the warning that a change was made but cannot be undone, because the state after it could not be saved.
 	 *
-	 * The warning is added only when the output says the call changed something ('changed' is true). A call that changed
-	 * nothing has nothing to undo, so it gets no warning. An output without a warnings list is returned as it is.
+	 * The warning is added unless the output says the call changed nothing ('changed' is exactly false). A call that changed
+	 * nothing has nothing to undo, so it gets no warning. Any other output, including one without a 'changed' key, gets the
+	 * warning: a missing key must not hide a change. An output without a warnings list gets a new list that holds only this
+	 * warning.
 	 *
 	 * The warnings stay within the cap the abilities keep (PostFields::MAX_WARNINGS). When the list is full, the last
 	 * warning is replaced by this one, not dropped, because this one matters more than most.
@@ -682,11 +692,11 @@ final class Pipeline {
 	 * @return array<string, mixed>
 	 */
 	private function with_unundoable_warning( array $output ): array {
-		if ( true !== ( $output['changed'] ?? null ) || ! isset( $output['warnings'] ) || ! is_array( $output['warnings'] ) ) {
+		if ( false === ( $output['changed'] ?? null ) ) {
 			return $output;
 		}
 
-		$warnings = array_values( $output['warnings'] );
+		$warnings = is_array( $output['warnings'] ?? null ) ? array_values( $output['warnings'] ) : array();
 		if ( count( $warnings ) >= PostFields::MAX_WARNINGS ) {
 			$warnings = array_slice( $warnings, 0, PostFields::MAX_WARNINGS - 1 );
 		}

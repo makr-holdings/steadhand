@@ -73,7 +73,15 @@ final class SnapshotsTest extends PostWriteTestCase {
 		$after  = (int) $row['after_snapshot_id'];
 		$this->assertGreaterThan( 0, $after, 'The write itself named an after-state.' );
 
-		$later = $this->in_write( static fn(): int => Snapshots::post_revision_after( $post, $before ) );
+		// The text is recorded again first, so only an open capture from the earlier write could name a revision here. The forgotten
+		// text alone would make the check return 0.
+		$later = $this->in_write(
+			static function () use ( $post, $before ): int {
+				PostWriter::update( $post, array( 'post_content' => get_post( $post )->post_content ) );
+
+				return Snapshots::post_revision_after( $post, $before );
+			}
+		);
 
 		$this->assertSame( 0, $later, 'The capture must be closed when the write ends.' );
 	}
@@ -94,9 +102,13 @@ final class SnapshotsTest extends PostWriteTestCase {
 			function () use ( $post ): array {
 				$before = Snapshots::post_revision( $post );
 				PostWriter::update( $post, array( 'post_content' => 'After' ) );
+				$first = Snapshots::post_revision_after( $post, $before );
+
+				// The text is recorded again, so only an open capture could name the revision the first check named.
+				PostWriter::update( $post, array( 'post_content' => 'After' ) );
 
 				return array(
-					'first'  => Snapshots::post_revision_after( $post, $before ),
+					'first'  => $first,
 					'second' => Snapshots::post_revision_after( $post, $before ),
 				);
 			}

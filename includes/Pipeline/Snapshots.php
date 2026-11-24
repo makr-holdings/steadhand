@@ -156,10 +156,13 @@ final class Snapshots {
 		}
 
 		// Core saves the post-save revision itself. This saves one only when core did not (a plugin removed its hook). The row
-		// holds the written text here, so a revision saved now can only hold that text too.
+		// was checked to hold the written text just above, but the revision mirror reads the row again when the revision is
+		// inserted. A change by another request between that check and the insert can leave a revision of other text. The checks
+		// below reject it: it is saved, but never named.
 		self::save_current_revision( $post );
 
 		$revision = self::newest_revision( $post );
+		// holds( $revision, $written ) is defence in depth: the row check above and same_text() together already imply it.
 		if ( null === $revision || ! self::same_text( $revision, $post ) || ! self::holds( $revision, $written ) ) {
 			return 0;
 		}

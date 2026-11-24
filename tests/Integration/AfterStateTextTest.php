@@ -11,6 +11,9 @@ declare( strict_types=1 );
 namespace Steadhand\Tests\Integration;
 
 use Closure;
+use Steadhand\Capabilities;
+use Steadhand\Log\DbLogger;
+use Steadhand\Pipeline\Pipeline;
 use Steadhand\Pipeline\PostWriter;
 use Steadhand\Pipeline\Snapshots;
 
@@ -31,11 +34,23 @@ final class AfterStateTextTest extends PostWriteTestCase {
 	 */
 	private array $hooks = array();
 
+	/**
+	 * The wp_insert_post_data filter that writes a foreign row during a revision insert, removed in tearDown.
+	 *
+	 * @var Closure|null
+	 */
+	private ?Closure $race_filter = null;
+
 	protected function tearDown(): void {
 		foreach ( $this->hooks as $hook ) {
 			remove_action( $hook[0], $hook[1], $hook[2] );
 		}
 		$this->hooks = array();
+
+		if ( null !== $this->race_filter ) {
+			remove_filter( 'wp_insert_post_data', $this->race_filter, PHP_INT_MAX - 1 );
+			$this->race_filter = null;
+		}
 
 		if ( ! has_action( 'post_updated', 'wp_save_post_revision' ) ) {
 			add_action( 'post_updated', 'wp_save_post_revision', 10, 1 );
@@ -487,5 +502,137 @@ final class AfterStateTextTest extends PostWriteTestCase {
 		$this->assertSame( $text, $result['recorded']['post_content'] );
 		$this->assertNull( $result['other'] );
 		$this->assertNull( $result['cleared'] );
+	}
+
+	/**
+	 * Arms a row update that lands during the next revision insert of the post. The update runs inside the insert, after the
+	 * row check and before the revision mirror reads the row, so the revision takes the other request's text. It runs once.
+	 *
+	 * @param int $post Post ID.
+	 */
+	private function foreign_row_during_next_revision_insert( int $post ): void {
+		$fired             = false;
+		$this->race_filter = static function ( array $data ) use ( $post, &$fired ): array {
+			if ( $fired || 'revision' !== ( $data['post_type'] ?? null ) || (int) ( $data['post_parent'] ?? 0 ) !== $post ) {
+				return $data;
+			}
+
+			$fired = true;
+			global $wpdb;
+
+			$wpdb->update( $wpdb->posts, array( 'post_content' => 'FOREIGN' ), array( 'ID' => $post ) ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching -- Another request's row write.
+			clean_post_cache( $post );
+
+			return $data;
+		};
+
+		// Below PHP_INT_MAX, so it runs before the revision mirror, which reads the row when the revision is inserted.
+		add_filter( 'wp_insert_post_data', $this->race_filter, PHP_INT_MAX - 1, 4 );
+	}
+
+	/**
+	 * A row change between the after-side row check and the revision insert: the revision saved there holds the other text.
+	 * Snapshots rejects it, because the revision does not hold the written text, so the call is not undoable and names no
+	 * after-state. The revision is saved, and it is never named.
+	 */
+	public function test_a_foreign_row_update_during_the_after_side_revision_insert_is_not_named(): void {
+		$post  = $this->admin_post(
+			array(
+				'post_status'  => 'draft',
+				'post_content' => 'Before',
+			)
+		);
+		$agent = $this->act_as_agent();
+		remove_action( 'post_updated', 'wp_save_post_revision', 10 );
+		$arm = function ( int $post_id ): void {
+			$this->foreign_row_during_next_revision_insert( $post_id );
+		};
+		$this->once_during_save( 'wp_after_insert_post', 1, $post, $arm );
+
+		$output = $this->output_of(
+			self::UPDATE_TOOL,
+			array(
+				'id'      => $post,
+				'content' => 'Written by Steadhand',
+			)
+		);
+
+		$this->assertSame( 'FOREIGN', get_post( $post )->post_content, 'The other request\'s text must stay.' );
+		$this->assert_not_undoable( $output, $agent );
+
+		// The real behaviour: the revision saved by the after-side check holds the other text, and is not named.
+		$holding = array_filter(
+			$this->revision_ids( $post ),
+			static fn( int $id ): bool => 'FOREIGN' === get_post( $id )->post_content
+		);
+		$this->assertNotEmpty( $holding, 'The after-side save must have made a revision that holds the other text.' );
+	}
+
+	/**
+	 * A write that sets status is not undoable, and so no capture is opened for it. The text it recorded is still cleared
+	 * once the write ends.
+	 */
+	public function test_the_written_text_is_cleared_after_a_write_that_sets_status(): void {
+		$post = $this->admin_post(
+			array(
+				'post_status'  => 'publish',
+				'post_content' => 'Before',
+			)
+		);
+		$this->act_as_agent( array( Capabilities::PUBLISH => true ) );
+
+		$out = $this->execute_ability(
+			'steadhand/update-post',
+			array(
+				'id'     => $post,
+				'status' => 'private',
+			)
+		);
+
+		$this->assertIsArray( $out );
+		$this->assertSame( 'private', get_post( $post )->post_status );
+		$this->assertNull( PostWriter::written_text( $post ), 'The text of a finished write must not be kept.' );
+	}
+
+	/**
+	 * A write that returns a WP_Error after it saved the row does not keep the text it recorded.
+	 */
+	public function test_the_written_text_is_cleared_after_a_failed_write(): void {
+		$post = $this->admin_post( array( 'post_status' => 'draft' ) );
+		$this->act_as_agent();
+
+		$probe             = new WriteProbeAbility();
+		$probe->on_execute = static function () use ( $post ): \WP_Error {
+			PostWriter::update( $post, array( 'post_content' => 'Written, then refused' ) );
+
+			return new \WP_Error( 'steadhand_test_failure', 'Failed after the save.' );
+		};
+
+		$out = ( new Pipeline( new DbLogger() ) )->run( $probe, array() );
+
+		$this->assertInstanceOf( \WP_Error::class, $out );
+		$this->assertSame( 'Written, then refused', get_post( $post )->post_content, 'The save did happen.' );
+		$this->assertNull( PostWriter::written_text( $post ) );
+	}
+
+	/**
+	 * A write whose execute() throws after it saved the row does not keep the text it recorded.
+	 */
+	public function test_the_written_text_is_cleared_after_a_write_whose_execute_throws(): void {
+		$post = $this->admin_post( array( 'post_status' => 'draft' ) );
+		$this->act_as_agent();
+
+		$probe             = new WriteProbeAbility();
+		$probe->on_execute = static function () use ( $post ): array {
+			PostWriter::update( $post, array( 'post_content' => 'Written, then thrown' ) );
+
+			throw new \RuntimeException( 'Thrown after the save.' );
+		};
+
+		$out = ( new Pipeline( new DbLogger() ) )->run( $probe, array() );
+
+		$this->assertInstanceOf( \WP_Error::class, $out );
+		$this->assertSame( 'Written, then thrown', get_post( $post )->post_content, 'The save did happen.' );
+		$this->assertNull( PostWriter::written_text( $post ) );
 	}
 }

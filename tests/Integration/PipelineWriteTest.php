@@ -706,9 +706,9 @@ final class PipelineWriteTest extends LogTestCase {
 	}
 
 	/**
-	 * An output without a warnings list gets no warnings key.
+	 * An output with no 'changed' key is treated as a change: the warning is added, so a missing key cannot hide one.
 	 */
-	public function test_an_output_without_a_warnings_list_gets_no_warnings_key(): void {
+	public function test_an_undoable_call_whose_output_has_no_changed_key_adds_the_warning(): void {
 		$agent = $this->make_agent();
 		wp_set_current_user( $agent );
 		$probe = new WriteProbeAbility();
@@ -718,11 +718,41 @@ final class PipelineWriteTest extends LogTestCase {
 			'undoable' => true,
 		);
 		$probe->after_result    = 0;
+		$probe->on_execute      = static fn(): array => array(
+			'warnings' => array( 'An existing warning.' ),
+		);
 
 		$out = $this->write( $probe, array( 'title' => 'x' ), new DbLogger() );
 
-		$this->assertIsArray( $out );
-		$this->assertArrayNotHasKey( 'warnings', $out );
+		$this->assertSame(
+			array( 'An existing warning.', 'Steadhand could not save the state after this change, so it cannot be undone.' ),
+			$out['warnings']
+		);
+		$this->assertSame( 0, (int) $this->latest_row( $agent )['undoable'] );
+	}
+
+	/**
+	 * An output without a warnings list gets a new list that holds only the cannot-be-undone warning.
+	 */
+	public function test_an_undoable_call_whose_output_has_no_warnings_list_gets_a_list_with_the_warning(): void {
+		$agent = $this->make_agent();
+		wp_set_current_user( $agent );
+		$probe = new WriteProbeAbility();
+
+		$probe->snapshot_result = array(
+			'id'       => 55,
+			'undoable' => true,
+		);
+		$probe->after_result    = 0;
+		$probe->on_execute      = static fn(): array => array( 'changed' => true );
+
+		$out = $this->write( $probe, array( 'title' => 'x' ), new DbLogger() );
+
+		$this->assertSame(
+			array( 'Steadhand could not save the state after this change, so it cannot be undone.' ),
+			$out['warnings']
+		);
+		$this->assertSame( 0, (int) $this->latest_row( $agent )['undoable'] );
 	}
 
 	/**
