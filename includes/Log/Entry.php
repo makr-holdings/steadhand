@@ -61,6 +61,7 @@ final class Entry {
 	 * @param string               $guardrail_notes What a guardrail did to the call, or ''.
 	 * @param int                  $snapshot_id     The snapshot taken before a write, or 0.
 	 * @param bool                 $undoable        Whether the change can be undone.
+	 * @param int                  $after_snapshot_id The snapshot that holds the state after the write, or 0.
 	 */
 	public function __construct(
 		public readonly int $user_id,
@@ -73,6 +74,7 @@ final class Entry {
 		public readonly int $object_id = 0,
 		public readonly string $guardrail_notes = '',
 		public readonly int $snapshot_id = 0,
-		public readonly bool $undoable = false
+		public readonly bool $undoable = false,
+		public readonly int $after_snapshot_id = 0
 	) {}
 }

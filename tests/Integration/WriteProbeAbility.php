@@ -73,6 +73,27 @@ final class WriteProbeAbility extends Ability {
 	public bool $throw_in_snapshot = false;
 
 	/**
+	 * What snapshot_after() returns. Typed as int by the parent, so a non-int here makes the call throw a TypeError.
+	 *
+	 * @var mixed
+	 */
+	public mixed $after_result = 0;
+
+	/**
+	 * Whether snapshot_after() throws.
+	 *
+	 * @var bool
+	 */
+	public bool $throw_in_snapshot_after = false;
+
+	/**
+	 * Whether snapshot_after() ran, and the value of Pipeline::is_writing() inside it.
+	 *
+	 * @var ?bool
+	 */
+	public ?bool $writing_in_snapshot_after = null;
+
+	/**
 	 * Whether execute() throws, with a message that must never reach the caller.
 	 *
 	 * @var bool
@@ -286,6 +307,26 @@ final class WriteProbeAbility extends Ability {
 		}
 
 		return $this->snapshot_result;
+	}
+
+	/**
+	 * Records the write bracket, then returns the after-state snapshot, throws, or returns a value the parent's int
+	 * return type refuses.
+	 *
+	 * @param array<string, mixed> $input       Input.
+	 * @param mixed                $output      Output.
+	 * @param int                  $snapshot_id The before-snapshot ID.
+	 * @return int
+	 * @throws \RuntimeException When throw_in_snapshot_after is set.
+	 */
+	public function snapshot_after( array $input, mixed $output, int $snapshot_id ): int {
+		unset( $input, $output, $snapshot_id );
+		$this->writing_in_snapshot_after = Pipeline::is_writing();
+		if ( $this->throw_in_snapshot_after ) {
+			throw new \RuntimeException( 'Probe snapshot_after failed.' );
+		}
+
+		return $this->after_result;
 	}
 
 	/**

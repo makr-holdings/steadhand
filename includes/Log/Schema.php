@@ -17,7 +17,7 @@ defined( 'ABSPATH' ) || exit;
 final class Schema {
 
 	/** Version of the table layout. Bump it with any change to the columns or keys. */
-	public const DB_VERSION = '1';
+	public const DB_VERSION = '2';
 
 	/** Option that stores the installed layout version. */
 	public const OPTION = 'steadhand_db_version';
@@ -27,6 +27,28 @@ final class Schema {
 
 	/** Transient that holds off a retry of a failed table create for an hour. */
 	public const RETRY_TRANSIENT = 'steadhand_schema_retry';
+
+	/**
+	 * Every column of the table, in the order of the CREATE TABLE in install(). Keep the two in step: ready() checks
+	 * these names against the real table, and the schema test compares this list with the columns the table has.
+	 */
+	public const REQUIRED_COLUMNS = array(
+		'id',
+		'created_at',
+		'user_id',
+		'agent_label',
+		'ability',
+		'object_type',
+		'object_id',
+		'input',
+		'result',
+		'message',
+		'guardrail_notes',
+		'snapshot_id',
+		'after_snapshot_id',
+		'undoable',
+		'undone_by',
+	);
 
 	/**
 	 * Returns the full name of the change-log table.
@@ -41,8 +63,14 @@ final class Schema {
 
 	/**
 	 * Creates or updates the table with dbDelta(), then records the layout version. The version is recorded only when
-	 * the table exists afterwards. When it does not, an hour's back-off is set so that maybe_upgrade() does not retry on
-	 * every request. A successful install clears the back-off. Errors from the database are never printed.
+	 * ready() is true afterwards: the table exists and has every column in REQUIRED_COLUMNS. A failed upgrade (for
+	 * example a dbDelta() ALTER that the database refused) therefore leaves the old version recorded, so the next
+	 * request tries again. When the table is not ready, an hour's back-off is set so that maybe_upgrade() does not retry
+	 * on every request. A successful install clears the back-off. Errors from the database are never printed.
+	 *
+	 * Once the table is ready, every row that is marked undoable but has no after-state is set to not undoable. Rows
+	 * written before version 2 have no after-state, so they cannot be undone. The statement is idempotent, so it runs on
+	 * every install. A row written by this version always has an after-state when it is undoable, so it is never changed.
 	 *
 	 * This is the activation path, so it always tries, whatever the back-off says.
 	 *
@@ -70,6 +98,7 @@ final class Schema {
   message TEXT NOT NULL,
   guardrail_notes TEXT NOT NULL,
   snapshot_id BIGINT UNSIGNED NOT NULL DEFAULT 0,
+  after_snapshot_id BIGINT UNSIGNED NOT NULL DEFAULT 0,
   undoable TINYINT(1) NOT NULL DEFAULT 0,
   undone_by BIGINT UNSIGNED NOT NULL DEFAULT 0,
   PRIMARY KEY  (id),
@@ -78,15 +107,26 @@ final class Schema {
   KEY user_id_id (user_id, id)
 ) {$charset};";
 
-		$exists = self::quietly(
+		$ready = self::quietly(
 			static function () use ( $sql ): bool {
 				dbDelta( $sql );
 
-				return self::exists();
+				return self::ready();
 			}
 		);
 
-		if ( $exists ) {
+		if ( $ready ) {
+			// Rows written before version 2 have no after-state, so none of them may claim to be undoable. The statement
+			// touches only rows that are undoable without one, so it is idempotent: it changes nothing once they are clear,
+			// and it runs on every install that succeeds, including activation. A failed statement leaves the version
+			// unrecorded, so the next request runs it again.
+			$cleared = self::quietly(
+				static fn(): mixed => $wpdb->query( $wpdb->prepare( "UPDATE {$table} SET undoable = %d WHERE undoable = %d AND after_snapshot_id = %d", 0, 1, 0 ) ) // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared,WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching -- The table name is fixed (see table()); every value is bound by prepare().
+			);
+			$ready   = false !== $cleared;
+		}
+
+		if ( $ready ) {
 			update_option( self::OPTION, self::DB_VERSION );
 			delete_transient( self::RETRY_TRANSIENT );
 		} else {
@@ -113,7 +153,30 @@ final class Schema {
 	}
 
 	/**
-	 * Whether the change-log table exists. A failed check reports false and prints nothing.
+	 * Whether the change-log table is usable: it exists and has every column in REQUIRED_COLUMNS. A table that exists
+	 * without a column the code writes (an upgrade whose ALTER failed) is not ready, and the inserts into it fail. A failed
+	 * check reports false and prints nothing.
+	 *
+	 * @return bool
+	 */
+	public static function ready(): bool {
+		global $wpdb;
+
+		if ( ! self::exists() ) {
+			return false;
+		}
+
+		$table   = self::table();
+		$columns = self::quietly(
+			static fn(): mixed => $wpdb->get_col( "SHOW COLUMNS FROM {$table}" ) // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- The table name is fixed (see table()); SHOW COLUMNS cannot bind an identifier.
+		);
+
+		return is_array( $columns ) && array() === array_diff( self::REQUIRED_COLUMNS, $columns );
+	}
+
+	/**
+	 * Whether the change-log table exists. A failed check reports false and prints nothing. Use ready() where the code
+	 * needs the table to be usable.
 	 *
 	 * @return bool
 	 */

@@ -756,6 +756,39 @@ final class DbLoggerTest extends LogTestCase {
 		$this->assertStringNotContainsString( 'Hunter2secret', (string) $row['input'] );
 	}
 
+	/**
+	 * The after-state snapshot is stored by log() and by the two-step completion, and the stored-action listener gets it
+	 * as an int, next to snapshot_id.
+	 */
+	public function test_the_after_snapshot_is_stored_on_both_paths_and_given_to_the_listener_as_an_int(): void {
+		$user_id = self::factory()->user->create();
+		$seen    = array();
+		add_action(
+			'steadhand_log_entry_stored',
+			static function ( int $id, array $row ) use ( &$seen ): void {
+				$seen[ $id ] = $row;
+			},
+			10,
+			2
+		);
+
+		$entry = new Entry( $user_id, '', 'steadhand/update-post', Entry::RESULT_OK, '', array(), 'post', 3, '', 11, true, 12 );
+		$this->assertTrue( $this->log( $entry ) );
+		$logged = $this->latest_row( $user_id );
+		$this->assertSame( '12', (string) $logged['after_snapshot_id'] );
+
+		$logger = new DbLogger();
+		$id     = $logger->begin( new Entry( $user_id, '', 'steadhand/update-post', Entry::RESULT_ERROR ) );
+		$this->assertGreaterThan( 0, $id );
+		$this->assertTrue( $logger->complete( $id, $entry ) );
+
+		$completed = $this->stored( $id );
+		$this->assertSame( '12', (string) $completed['after_snapshot_id'] );
+		$this->assertSame( '11', (string) $completed['snapshot_id'] );
+		$this->assertSame( 12, $seen[ $id ]['after_snapshot_id'] ?? null, 'The listener gets an int, as for snapshot_id.' );
+		$this->assertSame( 11, $seen[ $id ]['snapshot_id'] ?? null );
+	}
+
 	public function test_a_listener_that_throws_does_not_change_the_outcome(): void {
 		$user_id = self::factory()->user->create();
 		add_action(

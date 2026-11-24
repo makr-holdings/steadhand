@@ -190,19 +190,20 @@ final class DbLogger implements Logger {
 	 */
 	private function row( Entry $entry, string $input_json, string $result, string $message ): array {
 		return array(
-			'created_at'      => gmdate( 'Y-m-d H:i:s' ),
-			'user_id'         => max( 0, $entry->user_id ),
-			'agent_label'     => PostReader::cut_utf8( Redactor::text( $entry->agent_label ), self::MAX_LABEL_BYTES ),
-			'ability'         => $entry->ability,
-			'object_type'     => PostReader::cut_utf8( sanitize_key( $entry->object_type ), self::MAX_OBJECT_TYPE_BYTES ),
-			'object_id'       => max( 0, $entry->object_id ),
-			'input'           => $input_json,
-			'result'          => $result,
-			'message'         => PostReader::cut_utf8( Redactor::text( $message ), self::MAX_MESSAGE_BYTES ),
-			'guardrail_notes' => PostReader::cut_utf8( Redactor::text( $entry->guardrail_notes ), self::MAX_MESSAGE_BYTES ),
-			'snapshot_id'     => max( 0, $entry->snapshot_id ),
-			'undoable'        => $entry->undoable ? 1 : 0,
-			'undone_by'       => 0,
+			'created_at'        => gmdate( 'Y-m-d H:i:s' ),
+			'user_id'           => max( 0, $entry->user_id ),
+			'agent_label'       => PostReader::cut_utf8( Redactor::text( $entry->agent_label ), self::MAX_LABEL_BYTES ),
+			'ability'           => $entry->ability,
+			'object_type'       => PostReader::cut_utf8( sanitize_key( $entry->object_type ), self::MAX_OBJECT_TYPE_BYTES ),
+			'object_id'         => max( 0, $entry->object_id ),
+			'input'             => $input_json,
+			'result'            => $result,
+			'message'           => PostReader::cut_utf8( Redactor::text( $message ), self::MAX_MESSAGE_BYTES ),
+			'guardrail_notes'   => PostReader::cut_utf8( Redactor::text( $entry->guardrail_notes ), self::MAX_MESSAGE_BYTES ),
+			'snapshot_id'       => max( 0, $entry->snapshot_id ),
+			'undoable'          => $entry->undoable ? 1 : 0,
+			'undone_by'         => 0,
+			'after_snapshot_id' => max( 0, $entry->after_snapshot_id ),
 		);
 	}
 
@@ -219,7 +220,7 @@ final class DbLogger implements Logger {
 			static fn(): mixed => $wpdb->insert( // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery -- Inserts into the change-log table; $wpdb->insert() escapes every value.
 				Schema::table(),
 				$row,
-				array( '%s', '%d', '%s', '%s', '%s', '%d', '%s', '%s', '%s', '%s', '%d', '%d', '%d' )
+				array( '%s', '%d', '%s', '%s', '%s', '%d', '%s', '%s', '%s', '%s', '%d', '%d', '%d', '%d' )
 			)
 		);
 
@@ -299,13 +300,14 @@ final class DbLogger implements Logger {
 
 		// The same values row() would store, so a completed row reads the same as one written by log().
 		$values = array(
-			'result'          => $entry->result,
-			'message'         => PostReader::cut_utf8( Redactor::text( $entry->message ), self::MAX_MESSAGE_BYTES ),
-			'object_type'     => PostReader::cut_utf8( sanitize_key( $entry->object_type ), self::MAX_OBJECT_TYPE_BYTES ),
-			'object_id'       => max( 0, $entry->object_id ),
-			'guardrail_notes' => PostReader::cut_utf8( Redactor::text( $entry->guardrail_notes ), self::MAX_MESSAGE_BYTES ),
-			'snapshot_id'     => max( 0, $entry->snapshot_id ),
-			'undoable'        => $entry->undoable ? 1 : 0,
+			'result'            => $entry->result,
+			'message'           => PostReader::cut_utf8( Redactor::text( $entry->message ), self::MAX_MESSAGE_BYTES ),
+			'object_type'       => PostReader::cut_utf8( sanitize_key( $entry->object_type ), self::MAX_OBJECT_TYPE_BYTES ),
+			'object_id'         => max( 0, $entry->object_id ),
+			'guardrail_notes'   => PostReader::cut_utf8( Redactor::text( $entry->guardrail_notes ), self::MAX_MESSAGE_BYTES ),
+			'snapshot_id'       => max( 0, $entry->snapshot_id ),
+			'undoable'          => $entry->undoable ? 1 : 0,
+			'after_snapshot_id' => max( 0, $entry->after_snapshot_id ),
 		);
 
 		$table   = Schema::table();
@@ -317,7 +319,7 @@ final class DbLogger implements Logger {
 					'id'      => $id,
 					'user_id' => $user_id,
 				),
-				array( '%s', '%s', '%s', '%d', '%s', '%d', '%d' ),
+				array( '%s', '%s', '%s', '%d', '%s', '%d', '%d', '%d' ),
 				array( '%d', '%d' )
 			)
 		);
@@ -444,7 +446,7 @@ final class DbLogger implements Logger {
 	 */
 	private function typed( int $id, array $stored ): array {
 		$row = array( 'id' => $id ) + $stored;
-		foreach ( array( 'user_id', 'object_id', 'snapshot_id', 'undoable', 'undone_by' ) as $column ) {
+		foreach ( array( 'user_id', 'object_id', 'snapshot_id', 'after_snapshot_id', 'undoable', 'undone_by' ) as $column ) {
 			if ( isset( $row[ $column ] ) ) {
 				$row[ $column ] = (int) $row[ $column ];
 			}

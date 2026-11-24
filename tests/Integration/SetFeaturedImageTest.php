@@ -742,6 +742,7 @@ final class SetFeaturedImageTest extends PostWriteTestCase {
 		$this->assertSame( 'post', $row['object_type'] );
 		$this->assertSame( $post, (int) $row['object_id'] );
 		$this->assertSame( 0, (int) $row['undoable'] );
+		$this->assertSame( 0, (int) $row['after_snapshot_id'] );
 
 		$this->set(
 			array(

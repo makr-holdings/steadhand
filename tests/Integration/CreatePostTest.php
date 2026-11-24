@@ -586,6 +586,7 @@ final class CreatePostTest extends PostWriteTestCase {
 		$this->assertSame( $out['id'], (int) $row['object_id'] );
 		// A created post has no revision to save, and the pipeline records only a non-zero snapshot as undoable. See the report.
 		$this->assertSame( 0, (int) $row['undoable'] );
+		$this->assertSame( 0, (int) $row['after_snapshot_id'] );
 	}
 
 	public function test_a_refused_create_writes_one_blocked_row(): void {

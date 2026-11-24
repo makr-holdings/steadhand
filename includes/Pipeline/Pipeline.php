@@ -10,6 +10,7 @@ declare( strict_types=1 );
 namespace Steadhand\Pipeline;
 
 use Steadhand\Abilities\Ability;
+use Steadhand\Abilities\PostFields;
 use Steadhand\Agents;
 use Steadhand\Capabilities;
 use Steadhand\Guardrails\Context;
@@ -32,7 +33,8 @@ defined( 'ABSPATH' ) || exit;
  *     2. log reservation: begin() stores a row before anything changes, and if that fails the write is not performed;
  *     3. snapshot: the ability saves what it needs to undo the call, immediately before execute();
  *     4. execute: the ability runs with the final input, while Pipeline::is_writing() is true;
- *     5. log completion: complete() records the outcome on the reserved row.
+ *     5. log completion: after a successful execute() of an undoable write, snapshot_after() names the state the write
+ *        left (inside the write bracket, and 0 on any failure); complete() then records the outcome on the reserved row.
  *   If the outcome cannot be recorded after the write, the caller gets steadhand_log_incomplete, because the change has
  *   happened and cannot be undone by the pipeline.
  *   Every outcome reached writes a log entry, except a successful read (see should_log()). Logging never fails open: if
@@ -500,46 +502,66 @@ final class Pipeline {
 			return $this->log_failed();
 		}
 
-		// (3) Snapshot, immediately before execute(). A throw means nothing was changed, so the row is completed as an
-		// error and execute() does not run.
+		// (3) to (5a) run in one try, so the text a save recorded (PostWriter::written_text()) is cleared once the outcome is decided,
+		// on every path: success, WP_Error, a throw, and a write that was not undoable. The after-state is asked for before the
+		// clear, and only then. A nested write clears every post's entry, including the outer write's, so the outer call is
+		// recorded as not undoable. That is the safe direction.
 		try {
-			$snapshot = $this->within_write(
-				fn(): array => $this->snapshot_for( $ability, $final_input )
-			);
-		} catch ( \Throwable ) {
-			$error = $this->generic_error();
-			return $this->complete_write( $id, $ability, Entry::RESULT_ERROR, $error, $logged, $target, $notes, 0, false )
-				? $error
-				: $this->log_incomplete();
-		}
+			// (3) Snapshot, immediately before execute(). A throw means nothing was changed, so the row is completed as an
+			// error and execute() does not run.
+			try {
+				$snapshot = $this->within_write(
+					fn(): array => $this->snapshot_for( $ability, $final_input )
+				);
+			} catch ( \Throwable ) {
+				$error = $this->generic_error();
+				return $this->complete_write( $id, $ability, Entry::RESULT_ERROR, $error, $logged, $target, $notes, 0, false )
+					? $error
+					: $this->log_incomplete();
+			}
 
-		// (4) Execute with the final input.
-		try {
-			$output = $this->within_write(
-				fn(): mixed => $ability->execute( $final_input )
-			);
-		} catch ( \Throwable ) {
-			$error = self::write_error();
-			return $this->complete_write( $id, $ability, Entry::RESULT_ERROR, $error, $logged, $target, $notes, $snapshot['id'], false )
-				? $error
-				: $this->log_incomplete();
-		}
+			// (4) Execute with the final input.
+			try {
+				$output = $this->within_write(
+					fn(): mixed => $ability->execute( $final_input )
+				);
+			} catch ( \Throwable ) {
+				$error = self::write_error();
+				return $this->complete_write( $id, $ability, Entry::RESULT_ERROR, $error, $logged, $target, $notes, $snapshot['id'], false )
+					? $error
+					: $this->log_incomplete();
+			}
 
-		// (5) Complete the row with the outcome.
-		if ( is_wp_error( $output ) ) {
-			return $this->complete_write( $id, $ability, Entry::RESULT_ERROR, $output, $logged, $target, $notes, $snapshot['id'], false )
-				? $output
-				: $this->log_incomplete();
+			// (5) Complete the row with the outcome.
+			if ( is_wp_error( $output ) ) {
+				return $this->complete_write( $id, $ability, Entry::RESULT_ERROR, $output, $logged, $target, $notes, $snapshot['id'], false )
+					? $output
+					: $this->log_incomplete();
+			}
+
+			// (5a) The state after the write. Asked only for an undoable call, and only when it can be used: an ID that is not
+			// positive, or that is the snapshot taken before the call, is recorded as 0 and the call is not undoable.
+			$after = $snapshot['undoable'] ? $this->snapshot_after_for( $ability, $final_input, $output, $snapshot['id'] ) : 0;
+			if ( $after === $snapshot['id'] ) {
+				$after = 0;
+			}
+		} finally {
+			PostWriter::forget_written_text();
 		}
+		$undoable = $snapshot['undoable'] && $after > 0;
 
 		$object = $this->object_after( $ability, $final_input, $output, $target );
-		if ( ! $this->complete_write( $id, $ability, $outcome, null, $logged, $object, $notes, $snapshot['id'], $snapshot['undoable'] ) ) {
+		if ( ! $this->complete_write( $id, $ability, $outcome, null, $logged, $object, $notes, $snapshot['id'], $undoable, $after ) ) {
 			return $this->log_incomplete();
 		}
 
-		// (6) Return the output, with what the guardrails said.
+		// (6) Return the output, with what the guardrails said, and say so when the change could not be undone after all.
 		if ( is_array( $output ) ) {
 			$output['guardrail_notes'] = $notes;
+
+			if ( $snapshot['undoable'] && ! $undoable ) {
+				$output = $this->with_unundoable_warning( $output );
+			}
 		}
 
 		return $output;
@@ -636,6 +658,55 @@ final class Pipeline {
 	}
 
 	/**
+	 * Asks the ability for the snapshot that holds the state after a successful write, inside the write bracket. A throw,
+	 * or a value that is not a positive integer, is 0.
+	 *
+	 * @param Ability              $ability     Ability being called.
+	 * @param array<string, mixed> $input       Final input.
+	 * @param mixed                $output      What execute() returned.
+	 * @param int                  $snapshot_id The snapshot taken before the call.
+	 * @return int The snapshot ID, or 0.
+	 */
+	private function snapshot_after_for( Ability $ability, array $input, mixed $output, int $snapshot_id ): int {
+		try {
+			$id = $this->within_write( fn(): mixed => $ability->snapshot_after( $input, $output, $snapshot_id ) );
+		} catch ( \Throwable ) {
+			return 0;
+		}
+
+		return is_int( $id ) && $id > 0 ? $id : 0;
+	}
+
+	/**
+	 * Adds the warning that a change was made but cannot be undone, because the state after it could not be saved.
+	 *
+	 * The warning is added unless the output says the call changed nothing ('changed' is exactly false). A call that changed
+	 * nothing has nothing to undo, so it gets no warning. Any other output, including one without a 'changed' key, gets the
+	 * warning: a missing key must not hide a change. An output without a warnings list gets a new list that holds only this
+	 * warning.
+	 *
+	 * The warnings stay within the cap the abilities keep (PostFields::MAX_WARNINGS). When the list is full, the last
+	 * warning is replaced by this one, not dropped, because this one matters more than most.
+	 *
+	 * @param array<string, mixed> $output What the ability returned.
+	 * @return array<string, mixed>
+	 */
+	private function with_unundoable_warning( array $output ): array {
+		if ( false === ( $output['changed'] ?? null ) ) {
+			return $output;
+		}
+
+		$warnings = is_array( $output['warnings'] ?? null ) ? array_values( $output['warnings'] ) : array();
+		if ( count( $warnings ) >= PostFields::MAX_WARNINGS ) {
+			$warnings = array_slice( $warnings, 0, PostFields::MAX_WARNINGS - 1 );
+		}
+		$warnings[]         = __( 'Steadhand could not save the state after this change, so it cannot be undone.', 'steadhand' );
+		$output['warnings'] = $warnings;
+
+		return $output;
+	}
+
+	/**
 	 * The object a completed write names: the ability's logged_object_after() for an array output, otherwise the
 	 * object the call named before it ran. A throw keeps the object the call named before it ran.
 	 *
@@ -704,13 +775,14 @@ final class Pipeline {
 	 * @param string[]                     $notes       Guardrail notes.
 	 * @param int                          $snapshot_id Snapshot ID, or 0.
 	 * @param bool                         $undoable    Whether the call can be undone.
+	 * @param int                          $after_snapshot_id Snapshot ID of the state after the write, or 0.
 	 * @return bool
 	 */
-	private function complete_write( int $id, Ability $ability, string $result, mixed $outcome, array $input, array $target, array $notes, int $snapshot_id, bool $undoable ): bool {
+	private function complete_write( int $id, Ability $ability, string $result, mixed $outcome, array $input, array $target, array $notes, int $snapshot_id, bool $undoable, int $after_snapshot_id = 0 ): bool {
 		// The entry is built inside the try block, so a throw while building it counts as a failed completion.
 		try {
 			$message = is_wp_error( $outcome ) ? $outcome->get_error_message() : '';
-			$entry   = $this->entry_for( $ability, $result, $message, $input, $target, $this->join_notes( $notes ), $snapshot_id, $undoable );
+			$entry   = $this->entry_for( $ability, $result, $message, $input, $target, $this->join_notes( $notes ), $snapshot_id, $undoable, $after_snapshot_id );
 
 			return true === $this->logger->complete( $id, $entry );
 		} catch ( \Throwable ) {
@@ -868,9 +940,10 @@ final class Pipeline {
 	 * @param string                       $notes       Guardrail notes, joined, or ''.
 	 * @param int                          $snapshot_id The snapshot ID, or 0.
 	 * @param bool                         $undoable    Whether the call can be undone.
+	 * @param int                          $after_snapshot_id The snapshot ID of the state after the write, or 0.
 	 * @return Entry
 	 */
-	private function entry_for( Ability $ability, string $result, string $message, array $input = array(), array $target = self::NO_TARGET, string $notes = '', int $snapshot_id = 0, bool $undoable = false ): Entry {
+	private function entry_for( Ability $ability, string $result, string $message, array $input = array(), array $target = self::NO_TARGET, string $notes = '', int $snapshot_id = 0, bool $undoable = false, int $after_snapshot_id = 0 ): Entry {
 		$user_id = get_current_user_id();
 
 		return new Entry(
@@ -884,7 +957,8 @@ final class Pipeline {
 			(int) $target['id'],
 			$notes,
 			$snapshot_id,
-			$undoable
+			$undoable,
+			$after_snapshot_id
 		);
 	}
 

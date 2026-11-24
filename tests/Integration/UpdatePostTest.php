@@ -12,6 +12,7 @@ namespace Steadhand\Tests\Integration;
 
 use Steadhand\Capabilities;
 use Steadhand\Pipeline\Pipeline;
+use Steadhand\Pipeline\Snapshots;
 use Steadhand\Roles;
 use WP\MCP\Abilities\McpAbilityExposure;
 
@@ -767,5 +768,496 @@ final class UpdatePostTest extends PostWriteTestCase {
 
 		$this->assertSame( $rows + 1, $this->count_rows( $agent ) );
 		$this->assertSame( 'blocked', $this->latest_row( $agent )['result'] );
+	}
+
+
+	/**
+	 * A content change on a site with revisions records the state before (snapshot_id) and the state after (a newer
+	 * revision that holds exactly what was stored), and the row is undoable.
+	 */
+	public function test_a_content_change_records_the_state_after_as_a_newer_revision_holding_the_stored_text(): void {
+		$post  = $this->admin_post(
+			array(
+				'post_status'  => 'draft',
+				'post_title'   => 'Before title',
+				'post_content' => 'Before content',
+				'post_excerpt' => 'Before excerpt',
+			)
+		);
+		$agent = $this->act_as_agent();
+
+		$this->output_of(
+			self::TOOL_NAME,
+			array(
+				'id'      => $post,
+				'content' => 'After content',
+			)
+		);
+
+		$row = $this->latest_row( $agent );
+		$this->assertSame( 'ok', $row['result'] );
+		$this->assertSame( 1, (int) $row['undoable'] );
+
+		$before = (int) $row['snapshot_id'];
+		$after  = (int) $row['after_snapshot_id'];
+		$this->assertGreaterThan( 0, $after );
+		$this->assertGreaterThan( $before, $after, 'The after-state is a newer revision than the before-state.' );
+		$this->assertSame( 'Before content', get_post( $before )->post_content );
+
+		$stored   = get_post( $post );
+		$revision = get_post( $after );
+		$this->assertSame( 'After content', $revision->post_content );
+		$this->assertSame( $stored->post_title, $revision->post_title );
+		$this->assertSame( $stored->post_content, $revision->post_content );
+		$this->assertSame( $stored->post_excerpt, $revision->post_excerpt );
+		$this->assertSame( $post, (int) $revision->post_parent );
+	}
+
+	public function test_a_call_that_changes_nothing_records_no_after_snapshot(): void {
+		$post  = $this->admin_post(
+			array(
+				'post_status' => 'draft',
+				'post_title'  => 'Same',
+			)
+		);
+		$agent = $this->act_as_agent();
+
+		$this->output_of(
+			self::TOOL_NAME,
+			array(
+				'id'    => $post,
+				'title' => 'Same',
+			)
+		);
+
+		$row = $this->latest_row( $agent );
+		$this->assertSame( 0, (int) $row['after_snapshot_id'] );
+		$this->assertSame( 0, (int) $row['snapshot_id'] );
+		$this->assertSame( 0, (int) $row['undoable'] );
+	}
+
+	public function test_a_call_that_also_sets_the_slug_is_not_undoable_and_records_no_after_snapshot(): void {
+		$post  = $this->admin_post(
+			array(
+				'post_status'  => 'draft',
+				'post_content' => 'Before',
+			)
+		);
+		$agent = $this->act_as_agent();
+
+		$this->output_of(
+			self::TOOL_NAME,
+			array(
+				'id'      => $post,
+				'content' => 'After',
+				'slug'    => 'a-new-slug',
+			)
+		);
+
+		$row = $this->latest_row( $agent );
+		$this->assertSame( 0, (int) $row['undoable'] );
+		$this->assertSame( 0, (int) $row['after_snapshot_id'] );
+	}
+
+	public function test_with_one_revision_kept_no_after_snapshot_is_recorded(): void {
+		add_filter( 'wp_revisions_to_keep', static fn(): int => 1 );
+		$post  = $this->admin_post(
+			array(
+				'post_status'  => 'draft',
+				'post_content' => 'Before',
+			)
+		);
+		$agent = $this->act_as_agent();
+
+		$this->output_of(
+			self::TOOL_NAME,
+			array(
+				'id'      => $post,
+				'content' => 'After',
+			)
+		);
+
+		$row = $this->latest_row( $agent );
+		$this->assertSame( 0, (int) $row['undoable'] );
+		$this->assertSame( 0, (int) $row['after_snapshot_id'] );
+	}
+
+	public function test_a_post_type_without_revisions_records_no_after_snapshot(): void {
+		$type = 'steadhand_memo';
+		register_post_type(
+			$type,
+			array(
+				'public'   => true,
+				'supports' => array( 'title', 'editor' ),
+			)
+		);
+		add_filter(
+			'steadhand_allowed_post_types',
+			static fn( array $types ): array => array_merge( $types, array( $type ) )
+		);
+
+		try {
+			$post  = $this->admin_post(
+				array(
+					'post_type'    => $type,
+					'post_status'  => 'draft',
+					'post_content' => 'Before',
+				)
+			);
+			$agent = $this->act_as_agent();
+
+			$this->output_of(
+				self::TOOL_NAME,
+				array(
+					'id'      => $post,
+					'content' => 'After',
+				)
+			);
+
+			$row = $this->latest_row( $agent );
+			$this->assertSame( 'ok', $row['result'] );
+			$this->assertSame( 0, (int) $row['undoable'] );
+			$this->assertSame( 0, (int) $row['after_snapshot_id'] );
+		} finally {
+			remove_all_filters( 'steadhand_allowed_post_types' );
+			unregister_post_type( $type );
+		}
+	}
+
+	public function test_a_guardrail_refusal_records_no_after_snapshot(): void {
+		$post  = $this->fixture( 'draft' );
+		$agent = $this->act_as_agent();
+
+		$this->refusal_code(
+			$this->execute_ability(
+				self::ABILITY,
+				array(
+					'id'      => $post,
+					'content' => str_repeat( "\xc3\xa9", 131073 ),
+				)
+			)
+		);
+
+		$row = $this->latest_row( $agent );
+		$this->assertSame( 'blocked', $row['result'] );
+		$this->assertSame( 0, (int) $row['after_snapshot_id'] );
+	}
+
+	/**
+	 * The stored text is what the after-state holds, not the text the agent sent: a script tag is removed on save, and
+	 * the revision keeps the stored version.
+	 */
+	public function test_the_after_snapshot_holds_the_text_as_stored_when_the_save_filters_change_it(): void {
+		$post  = $this->fixture( 'draft' );
+		$agent = $this->act_as_agent();
+
+		$this->output_of(
+			self::TOOL_NAME,
+			array(
+				'id'      => $post,
+				'content' => '<p>Hello</p><script>alert(1)</script>',
+			)
+		);
+
+		$row      = $this->latest_row( $agent );
+		$after    = (int) $row['after_snapshot_id'];
+		$revision = get_post( $after );
+		$this->assertGreaterThan( 0, $after );
+		$this->assertStringNotContainsString( '<script', $revision->post_content );
+		$this->assertSame( get_post( $post )->post_content, $revision->post_content );
+	}
+
+	/**
+	 * The state one write leaves is the state the next write starts from: the second row's before-snapshot is the first
+	 * row's after-snapshot.
+	 */
+	public function test_the_next_write_starts_from_the_snapshot_the_previous_write_left(): void {
+		$post  = $this->admin_post(
+			array(
+				'post_status'  => 'draft',
+				'post_content' => 'Start',
+			)
+		);
+		$agent = $this->act_as_agent();
+
+		$this->output_of(
+			self::TOOL_NAME,
+			array(
+				'id'      => $post,
+				'content' => 'One',
+			)
+		);
+		$first = $this->latest_row( $agent );
+
+		$this->output_of(
+			self::TOOL_NAME,
+			array(
+				'id'      => $post,
+				'content' => 'Two',
+			)
+		);
+		$second = $this->latest_row( $agent );
+
+		$this->assertGreaterThan( 0, (int) $first['after_snapshot_id'] );
+		$this->assertSame( (int) $first['after_snapshot_id'], (int) $second['snapshot_id'] );
+		$this->assertSame( 'One', get_post( (int) $second['snapshot_id'] )->post_content );
+		$this->assertSame( 1, (int) $second['undoable'] );
+	}
+
+	/**
+	 * Another request saves the post after this write's own revision is made, and before the state after is named. The
+	 * simulation runs in this process: a wp_after_insert_post listener (core fires it for the update after the write's
+	 * revision is saved) saves the post as another request would. This request's capture listener is taken off for that
+	 * save, because another request's revisions never reach this request's listener. The write must not name the other
+	 * save's revision as its state after, because undo would then wipe that save.
+	 */
+	public function test_a_save_by_another_request_during_the_write_is_not_named_as_the_state_after(): void {
+		$post  = $this->fixture( 'draft' );
+		$agent = $this->act_as_agent();
+		$hook  = $this->during_the_write(
+			$post,
+			function ( int $post_id ): void {
+				$writer = get_current_user_id();
+				wp_set_current_user( $this->admin_id() );
+				remove_action( '_wp_put_post_revision', array( Snapshots::class, 'capture_revision' ), 10 );
+				try {
+					wp_update_post(
+						array(
+							'ID'           => $post_id,
+							'post_content' => 'Saved by another request',
+						)
+					);
+				} finally {
+					add_action( '_wp_put_post_revision', array( Snapshots::class, 'capture_revision' ), 10, 1 );
+					wp_set_current_user( $writer );
+				}
+			}
+		);
+
+		try {
+			$out = $this->output_of(
+				self::TOOL_NAME,
+				array(
+					'id'      => $post,
+					'content' => 'Written by the agent',
+				)
+			);
+		} finally {
+			remove_action( 'wp_after_insert_post', $hook, 99 );
+		}
+
+		$row = $this->latest_row( $agent );
+		$this->assertSame( 'ok', $row['result'] );
+		$this->assertGreaterThan( 0, (int) $row['snapshot_id'], 'The before-state was saved.' );
+		$this->assertSame( 0, (int) $row['after_snapshot_id'], 'The other save is not this write\'s after-state.' );
+		$this->assertSame( 0, (int) $row['undoable'] );
+		$this->assertSame( 'Saved by another request', get_post( $post )->post_content, 'The other save stays as it was saved.' );
+		$this->assertContains( 'Steadhand could not save the state after this change, so it cannot be undone.', $out['warnings'] );
+	}
+
+	/**
+	 * The before-revision is removed by core during the write. Without it there is nothing to undo to, so the change is
+	 * not undoable, and the agent is told.
+	 */
+	public function test_a_before_revision_deleted_during_the_write_makes_the_change_not_undoable(): void {
+		$post  = $this->fixture( 'draft' );
+		$agent = $this->act_as_agent();
+		$hook  = $this->during_the_write(
+			$post,
+			static function ( int $post_id ): void {
+				foreach ( wp_get_post_revisions( $post_id, array( 'check_enabled' => false ) ) as $revision ) {
+					if ( self::ORIGINAL === $revision->post_content && ! wp_is_post_autosave( $revision ) ) {
+						wp_delete_post_revision( $revision->ID );
+					}
+				}
+			}
+		);
+
+		try {
+			$out = $this->output_of(
+				self::TOOL_NAME,
+				array(
+					'id'      => $post,
+					'content' => 'Written by the agent',
+				)
+			);
+		} finally {
+			remove_action( 'wp_after_insert_post', $hook, 99 );
+		}
+
+		$row = $this->latest_row( $agent );
+		$this->assertGreaterThan( 0, (int) $row['snapshot_id'] );
+		$this->assertSame( 0, (int) $row['after_snapshot_id'] );
+		$this->assertSame( 0, (int) $row['undoable'] );
+		$this->assertContains( 'Steadhand could not save the state after this change, so it cannot be undone.', $out['warnings'] );
+	}
+
+	/**
+	 * A site that keeps two or three revisions gets both revisions for a normal update, so the change is undoable.
+	 *
+	 * @param int $keep The revision limit the site keeps.
+	 * @dataProvider revision_limits_that_keep_both_revisions
+	 */
+	public function test_a_normal_update_is_undoable_when_the_site_keeps_two_or_three_revisions( int $keep ): void {
+		$limit = static fn(): int => $keep;
+		add_filter( 'wp_revisions_to_keep', $limit );
+
+		try {
+			$post  = $this->admin_post(
+				array(
+					'post_status'  => 'draft',
+					'post_title'   => 'Before title',
+					'post_content' => 'Before content',
+					'post_excerpt' => 'Before excerpt',
+				)
+			);
+			$agent = $this->act_as_agent();
+
+			$this->output_of(
+				self::TOOL_NAME,
+				array(
+					'id'      => $post,
+					'content' => 'After content',
+				)
+			);
+		} finally {
+			remove_filter( 'wp_revisions_to_keep', $limit );
+		}
+
+		$row = $this->latest_row( $agent );
+		$this->assertSame( 1, (int) $row['undoable'] );
+		$this->assertGreaterThan( (int) $row['snapshot_id'], (int) $row['after_snapshot_id'] );
+		$this->assertContains( (int) $row['snapshot_id'], $this->revision_ids( $post ), 'The before-revision is kept.' );
+		$this->assertContains( (int) $row['after_snapshot_id'], $this->revision_ids( $post ), 'The after-revision is kept.' );
+	}
+
+	/**
+	 * The revision limits under which a normal update keeps both of its revisions.
+	 *
+	 * @return array<string, array{0: int}>
+	 */
+	public static function revision_limits_that_keep_both_revisions(): array {
+		return array(
+			'two revisions kept'   => array( 2 ),
+			'three revisions kept' => array( 3 ),
+		);
+	}
+
+	/**
+	 * A change that adds only whitespace is stored, and it is a change to the text. WordPress does not save a revision for
+	 * it, because core compares revisions with normalize_whitespace(). So the newest revision is the before-state, whose text
+	 * differs from the stored text byte for byte, and no after-state is named. The change is not undoable, and the agent is
+	 * told.
+	 */
+	public function test_a_whitespace_only_content_change_saves_no_after_revision_and_is_not_undoable(): void {
+		$post  = $this->fixture( 'draft' );
+		$agent = $this->act_as_agent();
+
+		$out = $this->output_of(
+			self::TOOL_NAME,
+			array(
+				'id'      => $post,
+				'content' => self::ORIGINAL . "\n",
+			)
+		);
+
+		$this->assertSame( self::ORIGINAL . "\n", get_post( $post )->post_content, 'The whitespace is stored.' );
+		$this->assertCount( 1, $this->revision_ids( $post ), 'Core saved no revision for a whitespace-only change.' );
+		$row = $this->latest_row( $agent );
+		$this->assertSame( 'ok', $row['result'] );
+		$this->assertGreaterThan( 0, (int) $row['snapshot_id'] );
+		$this->assertSame( 0, (int) $row['after_snapshot_id'] );
+		$this->assertSame( 0, (int) $row['undoable'] );
+		$this->assertContains( 'Steadhand could not save the state after this change, so it cannot be undone.', $out['warnings'] );
+	}
+
+	/**
+	 * The save filters turn the sent markup back into the text that was stored before. The after-state holds the same
+	 * text as the before-state, so it is not a change that undo could restore, and the call is not undoable.
+	 */
+	public function test_a_change_that_the_save_filters_turn_back_into_the_old_text_is_not_undoable(): void {
+		$post  = $this->fixture( 'draft' );
+		$agent = $this->act_as_agent();
+
+		$out = $this->output_of(
+			self::TOOL_NAME,
+			array(
+				'id'      => $post,
+				'content' => self::ORIGINAL . '<script></script>',
+			)
+		);
+
+		$this->assertSame( self::ORIGINAL, get_post( $post )->post_content, 'The save filters remove the script, so the stored text is the old text.' );
+		$row = $this->latest_row( $agent );
+		$this->assertSame( 'ok', $row['result'] );
+		$this->assertGreaterThan( 0, (int) $row['snapshot_id'] );
+		$this->assertSame( 0, (int) $row['after_snapshot_id'] );
+		$this->assertSame( 0, (int) $row['undoable'] );
+		$this->assertContains( 'Steadhand could not save the state after this change, so it cannot be undone.', $out['warnings'] );
+	}
+
+	/**
+	 * An autosave by another user, made during the write and so newer than the write's after-revision, is never named as the
+	 * after-state. Autosaves are excluded, and the after-state is the revision of the stored text.
+	 */
+	public function test_a_newer_autosave_by_another_user_is_not_named_as_the_state_after(): void {
+		$post  = $this->fixture( 'draft' );
+		$agent = $this->act_as_agent();
+		$other = $this->other_agent();
+		$saved = 0;
+		$hook  = $this->during_the_write(
+			$post,
+			static function ( int $post_id ) use ( $other, &$saved ): void {
+				$data                 = get_post( $post_id, ARRAY_A );
+				$data['post_author']  = $other;
+				$data['post_content'] = 'Autosave text by another user';
+				$saved                = (int) _wp_put_post_revision( $data, true );
+			}
+		);
+
+		try {
+			$this->output_of(
+				self::TOOL_NAME,
+				array(
+					'id'      => $post,
+					'content' => 'Written by the agent',
+				)
+			);
+		} finally {
+			remove_action( 'wp_after_insert_post', $hook, 99 );
+		}
+
+		$row = $this->latest_row( $agent );
+		$this->assertSame( 1, (int) $row['undoable'] );
+		$after = (int) $row['after_snapshot_id'];
+		$this->assertGreaterThan( 0, $after );
+		$this->assertGreaterThan( 0, $saved, 'The autosave was made.' );
+		$this->assertGreaterThan( $after, $saved, 'The autosave is newer than the after-state.' );
+		$this->assertStringNotContainsString( '-autosave-v1', (string) get_post( $after )->post_name );
+		$this->assertSame( get_post( $post )->post_content, get_post( $after )->post_content );
+	}
+
+	/**
+	 * A post's hook that runs once, during its update, after the write's own revision is saved and before the state after
+	 * is named. The hook is wp_after_insert_post at priority 99. The caller removes it.
+	 *
+	 * @param int      $post_id The post whose update the hook waits for.
+	 * @param callable $work    Runs with the post ID, once.
+	 * @return callable The hook, to remove.
+	 */
+	private function during_the_write( int $post_id, callable $work ): callable {
+		$done = false;
+		$hook = static function ( int $id, \WP_Post $post, bool $update ) use ( $post_id, $work, &$done ): void {
+			unset( $post );
+			if ( $done || ! $update || $id !== $post_id ) {
+				return;
+			}
+
+			$done = true;
+			$work( $post_id );
+		};
+		add_action( 'wp_after_insert_post', $hook, 99, 3 );
+
+		return $hook;
 	}
 }

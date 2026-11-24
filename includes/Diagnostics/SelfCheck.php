@@ -49,7 +49,7 @@ final class SelfCheck {
 			'abilities_registered'        => self::abilities_registered(),
 			'server_registered'           => self::server_registered(),
 			'lockdown_active'             => self::lockdown_active(),
-			'change_log_ready'            => Schema::exists(),
+			'change_log_ready'            => Schema::ready(),
 		);
 	}
 

@@ -9,6 +9,7 @@ declare( strict_types=1 );
 
 namespace Steadhand\Tests\Integration;
 
+use Steadhand\Diagnostics\SelfCheck;
 use Steadhand\Log\Schema;
 
 /**
@@ -16,28 +17,11 @@ use Steadhand\Log\Schema;
  */
 final class SchemaTest extends LogTestCase {
 
-	private const COLUMNS = array(
-		'id',
-		'created_at',
-		'user_id',
-		'agent_label',
-		'ability',
-		'object_type',
-		'object_id',
-		'input',
-		'result',
-		'message',
-		'guardrail_notes',
-		'snapshot_id',
-		'undoable',
-		'undone_by',
-	);
-
 	public function test_the_table_exists_after_install_with_every_column(): void {
 		Schema::install();
 
 		$this->assertTrue( Schema::exists() );
-		$this->assertSame( self::COLUMNS, $this->column_names() );
+		$this->assertSame( $this->expected_columns(), $this->column_names() );
 	}
 
 	public function test_install_is_idempotent_and_records_the_version(): void {
@@ -46,7 +30,7 @@ final class SchemaTest extends LogTestCase {
 
 		$this->assertTrue( Schema::exists() );
 		$this->assertSame( Schema::DB_VERSION, get_option( Schema::OPTION ) );
-		$this->assertSame( self::COLUMNS, $this->column_names() );
+		$this->assertSame( $this->expected_columns(), $this->column_names() );
 	}
 
 	public function test_maybe_upgrade_installs_when_the_version_option_is_missing(): void {
@@ -65,6 +49,189 @@ final class SchemaTest extends LogTestCase {
 
 		$this->assertSame( Schema::DB_VERSION, get_option( Schema::OPTION ) );
 		$this->assertTrue( Schema::exists() );
+	}
+
+	/**
+	 * A table made with the layout before after_snapshot_id (version 1) gains the column when the version is stale, and
+	 * its existing rows are kept, with the new column at 0.
+	 */
+	public function test_a_table_with_the_old_layout_gains_the_column_and_keeps_its_rows(): void {
+		global $wpdb;
+
+		$this->let_ddl_reach_the_table();
+		$table = Schema::table();
+
+		try {
+			Schema::uninstall();
+
+			$this->create_version_one_table();
+			$this->assertNotContains( 'after_snapshot_id', $this->column_names(), 'The fixture must be the old layout.' );
+
+			$wpdb->insert( // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery -- Test fixture written straight to the change-log table.
+				$table,
+				array(
+					'created_at'  => gmdate( 'Y-m-d H:i:s' ),
+					'user_id'     => 5,
+					'ability'     => 'steadhand/update-post',
+					'result'      => 'ok',
+					'snapshot_id' => 7,
+					'undoable'    => 1,
+				)
+			);
+			$id = (int) $wpdb->insert_id;
+
+			update_option( Schema::OPTION, '1' );
+			Schema::maybe_upgrade();
+
+			$this->assertSame( $this->expected_columns(), $this->column_names() );
+			$this->assertSame( Schema::DB_VERSION, get_option( Schema::OPTION ) );
+
+			$kept = $wpdb->get_row( $wpdb->prepare( "SELECT * FROM {$table} WHERE id = %d", $id ), ARRAY_A ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared,WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching -- The table name is fixed.
+			$this->assertIsArray( $kept, 'The row written before the upgrade must still exist.' );
+			$this->assertSame( 'steadhand/update-post', $kept['ability'] );
+			$this->assertSame( '7', (string) $kept['snapshot_id'] );
+			$this->assertSame( '0', (string) $kept['after_snapshot_id'], 'A row from before the upgrade has no after-state.' );
+			// Rows from before the upgrade have no after-state, so none of them may stay undoable (SPEC §7).
+			$this->assertSame( '0', (string) $kept['undoable'] );
+		} finally {
+			Schema::install();
+		}
+
+		$this->assertSame( $this->expected_columns(), $this->column_names() );
+	}
+
+	public function test_ready_is_true_after_install(): void {
+		Schema::install();
+
+		$this->assertTrue( Schema::ready() );
+	}
+
+	/**
+	 * A table without a column the code writes is not ready, although it exists. The inserts would fail on it.
+	 */
+	public function test_ready_is_false_while_the_table_lacks_a_column_the_code_writes(): void {
+		$this->let_ddl_reach_the_table();
+
+		try {
+			Schema::uninstall();
+			$this->create_version_one_table();
+
+			$this->assertTrue( Schema::exists() );
+			$this->assertFalse( Schema::ready() );
+		} finally {
+			Schema::install();
+		}
+
+		$this->assertTrue( Schema::ready() );
+	}
+
+	/**
+	 * An upgrade whose ALTER is refused records no version, sets the back-off, and the self-check reports the log as not
+	 * ready. The next request does not retry while the back-off is set.
+	 */
+	public function test_a_refused_upgrade_records_no_version_sets_the_back_off_and_the_self_check_reports_not_ready(): void {
+		$this->let_ddl_reach_the_table();
+		$alters = 0;
+		$filter = null;
+
+		try {
+			Schema::uninstall();
+			$this->create_version_one_table();
+			$this->insert_version_one_row();
+			update_option( Schema::OPTION, '1' );
+
+			$filter = $this->fail_the_after_snapshot_alter( $alters );
+
+			ob_start();
+			Schema::maybe_upgrade();
+			$output = (string) ob_get_clean();
+
+			$this->assertSame( '', $output, 'No database error may be printed.' );
+			$this->assertSame( 1, $alters, 'The upgrade ran one ALTER, and it was refused.' );
+			$this->assertSame( '1', get_option( Schema::OPTION ), 'A refused upgrade must not record version 2.' );
+			$this->assertNotFalse( get_transient( Schema::RETRY_TRANSIENT ), 'A refused upgrade sets the back-off.' );
+			$this->assertFalse( Schema::ready() );
+			$this->assertFalse( SelfCheck::report()['change_log_ready'], 'The self-check must report the log as not ready.' );
+
+			Schema::maybe_upgrade();
+			$this->assertSame( 1, $alters, 'maybe_upgrade() runs no ALTER while the back-off is set.' );
+		} finally {
+			if ( null !== $filter ) {
+				remove_filter( 'query', $filter );
+			}
+			Schema::install();
+		}
+
+		$this->assertTrue( Schema::ready() );
+	}
+
+	/**
+	 * After a refused upgrade, the next upgrade that succeeds records the version, and sets the rows from before the
+	 * upgrade to not undoable.
+	 */
+	public function test_a_later_successful_upgrade_records_the_version_and_clears_the_pre_upgrade_undo_flags(): void {
+		global $wpdb;
+
+		$this->let_ddl_reach_the_table();
+		$alters = 0;
+		$filter = null;
+
+		try {
+			Schema::uninstall();
+			$this->create_version_one_table();
+			$id = $this->insert_version_one_row();
+			update_option( Schema::OPTION, '1' );
+
+			$filter = $this->fail_the_after_snapshot_alter( $alters );
+			Schema::maybe_upgrade();
+			remove_filter( 'query', $filter );
+			$filter = null;
+
+			// The back-off is an hour. Clearing it stands for the hour passing.
+			delete_transient( Schema::RETRY_TRANSIENT );
+			Schema::maybe_upgrade();
+
+			$this->assertTrue( Schema::ready() );
+			$this->assertSame( Schema::DB_VERSION, get_option( Schema::OPTION ) );
+
+			$table = Schema::table();
+			$kept  = $wpdb->get_row( $wpdb->prepare( "SELECT * FROM {$table} WHERE id = %d", $id ), ARRAY_A ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared,WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching -- The table name is fixed.
+			$this->assertSame( '0', (string) $kept['undoable'] );
+		} finally {
+			if ( null !== $filter ) {
+				remove_filter( 'query', $filter );
+			}
+			Schema::install();
+		}
+	}
+
+	/**
+	 * The reset touches only rows that are undoable without an after-state. A row with an after-state keeps its flag, and
+	 * running the reset again changes nothing (it is idempotent).
+	 */
+	public function test_the_reset_keeps_rows_with_an_after_state_and_is_idempotent(): void {
+		global $wpdb;
+
+		Schema::install();
+		$table = Schema::table();
+		$wpdb->insert( // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery -- Test fixture written straight to the change-log table.
+			$table,
+			array(
+				'created_at'        => gmdate( 'Y-m-d H:i:s' ),
+				'ability'           => 'steadhand/update-post',
+				'result'            => 'ok',
+				'snapshot_id'       => 3,
+				'after_snapshot_id' => 5,
+				'undoable'          => 1,
+			)
+		);
+		$kept = (int) $wpdb->insert_id;
+
+		Schema::install();
+		Schema::install();
+
+		$row = $wpdb->get_row( $wpdb->prepare( "SELECT undoable FROM {$table} WHERE id = %d", $kept ), ARRAY_A ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared,WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching -- The table name is fixed.
+		$this->assertSame( '1', (string) $row['undoable'], 'A row with an after-state keeps its undoable flag.' );
 	}
 
 	public function test_a_missing_table_is_reported_as_missing(): void {
@@ -94,7 +261,7 @@ final class SchemaTest extends LogTestCase {
 		}
 
 		$this->assertTrue( Schema::exists(), 'The table must be back for the other tests.' );
-		$this->assertSame( self::COLUMNS, $this->column_names() );
+		$this->assertSame( $this->expected_columns(), $this->column_names() );
 	}
 
 	/**
@@ -248,7 +415,97 @@ final class SchemaTest extends LogTestCase {
 	}
 
 	/**
-	 * The column names of the change-log table, in table order.
+	 * Builds the version 1 layout: every column of the current table except after_snapshot_id. The table name is fixed
+	 * (see Schema::table()), and the statement has no input.
+	 */
+	private function create_version_one_table(): void {
+		global $wpdb;
+
+		$table = Schema::table();
+		// phpcs:disable WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.DirectDatabaseQuery.SchemaChange,WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- Test builds the old table layout; the table name is fixed.
+		$wpdb->query(
+			"CREATE TABLE {$table} (
+  id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  created_at DATETIME NOT NULL,
+  user_id BIGINT UNSIGNED NOT NULL DEFAULT 0,
+  agent_label VARCHAR(191) NOT NULL DEFAULT '',
+  ability VARCHAR(100) NOT NULL DEFAULT '',
+  object_type VARCHAR(40) NOT NULL DEFAULT '',
+  object_id BIGINT UNSIGNED NOT NULL DEFAULT 0,
+  input LONGTEXT NOT NULL,
+  result VARCHAR(20) NOT NULL DEFAULT '',
+  message TEXT NOT NULL,
+  guardrail_notes TEXT NOT NULL,
+  snapshot_id BIGINT UNSIGNED NOT NULL DEFAULT 0,
+  undoable TINYINT(1) NOT NULL DEFAULT 0,
+  undone_by BIGINT UNSIGNED NOT NULL DEFAULT 0,
+  PRIMARY KEY  (id),
+  KEY created_at (created_at),
+  KEY user_created (user_id, created_at),
+  KEY user_id_id (user_id, id)
+) {$wpdb->get_charset_collate()};"
+		);
+		// phpcs:enable WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.DirectDatabaseQuery.SchemaChange,WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+	}
+
+	/**
+	 * Inserts a row the way a version 1 write stored it: undoable, with a before-snapshot and no after-state column.
+	 *
+	 * @return int The row ID.
+	 */
+	private function insert_version_one_row(): int {
+		global $wpdb;
+
+		$wpdb->insert( // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery -- Test fixture written straight to the change-log table.
+			Schema::table(),
+			array(
+				'created_at'  => gmdate( 'Y-m-d H:i:s' ),
+				'user_id'     => 5,
+				'ability'     => 'steadhand/update-post',
+				'result'      => 'ok',
+				'snapshot_id' => 7,
+				'undoable'    => 1,
+			)
+		);
+
+		return (int) $wpdb->insert_id;
+	}
+
+	/**
+	 * Makes the ALTER that adds after_snapshot_id fail, the way a refused upgrade would. Counts the ALTERs it sees.
+	 *
+	 * @param int $alters Set by reference to the number of ALTER statements seen. Read it after the call.
+	 * @return \Closure
+	 */
+	private function fail_the_after_snapshot_alter( int &$alters ): \Closure {
+		$filter = static function ( string $query ) use ( &$alters ): string {
+			if ( str_starts_with( $query, 'ALTER TABLE' ) && str_contains( $query, 'ADD COLUMN after_snapshot_id' ) ) {
+				++$alters;
+				return 'THIS IS NOT SQL';
+			}
+
+			return $query;
+		};
+		add_filter( 'query', $filter );
+
+		return $filter;
+	}
+
+	/**
+	 * The expected column names, sorted. A table upgraded from an older layout gets a new column at its end, so the order
+	 * of the columns depends on the history of the table, and only the set of names is compared.
+	 *
+	 * @return string[]
+	 */
+	private function expected_columns(): array {
+		$columns = Schema::REQUIRED_COLUMNS;
+		sort( $columns );
+
+		return $columns;
+	}
+
+	/**
+	 * The column names of the change-log table, sorted (see expected_columns()).
 	 *
 	 * @return string[]
 	 */
@@ -259,6 +516,9 @@ final class SchemaTest extends LogTestCase {
 		// The table name is fixed (see Schema::table()); SHOW COLUMNS cannot bind an identifier.
 		$columns = $wpdb->get_results( "SHOW COLUMNS FROM {$table}", ARRAY_A ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- Test reads the table definition; the table name is fixed.
 
-		return array_column( (array) $columns, 'Field' );
+		$names = array_column( (array) $columns, 'Field' );
+		sort( $names );
+
+		return $names;
 	}
 }

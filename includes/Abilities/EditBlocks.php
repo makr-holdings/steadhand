@@ -11,6 +11,7 @@ namespace Steadhand\Abilities;
 
 use Steadhand\Capabilities;
 use Steadhand\Pipeline\PostWriter;
+use Steadhand\Pipeline\Snapshots;
 
 defined( 'ABSPATH' ) || exit;
 
@@ -368,6 +369,23 @@ final class EditBlocks extends Ability {
 		$this->plans[ $post_id ] = $plan;
 
 		return $snapshot;
+	}
+
+	/**
+	 * Names the revision that holds the post's state after the write. The same rule as update-post: only when the call
+	 * changed the post, as the output says in 'changed'. The output is the one update-post returned.
+	 *
+	 * @param array<string, mixed> $input       Validated, sanitized input.
+	 * @param mixed                $output      What execute() returned.
+	 * @param int                  $snapshot_id The before-revision ID snapshot() returned.
+	 * @return int The revision ID, or 0.
+	 */
+	public function snapshot_after( array $input, mixed $output, int $snapshot_id ): int {
+		if ( ! is_array( $output ) || true !== ( $output['changed'] ?? null ) ) {
+			return 0;
+		}
+
+		return Snapshots::post_revision_after( (int) $input['id'], $snapshot_id );
 	}
 
 	/**
