@@ -930,4 +930,87 @@ final class PipelineWriteTest extends LogTestCase {
 		$this->assertSame( Entry::RESULT_ERROR, $row['result'] );
 		$this->assertSame( 0, (int) $row['after_snapshot_id'] );
 	}
+
+	public function test_current_log_id_is_zero_outside_a_write(): void {
+		$this->assertSame( 0, Pipeline::current_log_id() );
+	}
+
+	public function test_current_log_id_is_the_reserved_row_inside_a_write_and_zero_after_it(): void {
+		$agent = $this->make_agent();
+		wp_set_current_user( $agent );
+		$probe = new WriteProbeAbility();
+		$seen  = null;
+
+		$probe->on_execute = static function ( array $input ) use ( &$seen ): array {
+			unset( $input );
+			$seen = Pipeline::current_log_id();
+
+			return array();
+		};
+		$this->write( $probe, array( 'title' => 'x' ), new DbLogger() );
+
+		$this->assertGreaterThan( 0, $seen );
+		$this->assertSame( (int) $this->latest_row( $agent )['id'], $seen, 'The ID is the row the write reserved.' );
+		$this->assertSame( 0, Pipeline::current_log_id() );
+	}
+
+	public function test_current_log_id_is_restored_to_the_outer_write_after_a_nested_write(): void {
+		wp_set_current_user( $this->make_agent() );
+		$outer    = new WriteProbeAbility();
+		$outer_id = null;
+		$inner_id = null;
+		$after    = null;
+
+		$outer->on_execute = function ( array $input ) use ( &$outer_id, &$inner_id, &$after ): array {
+			unset( $input );
+			$outer_id = Pipeline::current_log_id();
+
+			$inner             = new WriteProbeAbility();
+			$inner->on_execute = static function ( array $input ) use ( &$inner_id ): array {
+				unset( $input );
+				$inner_id = Pipeline::current_log_id();
+
+				return array();
+			};
+			( new Pipeline( new DbLogger() ) )->run( $inner, array( 'title' => 'inner' ) );
+
+			$after = Pipeline::current_log_id();
+
+			return array();
+		};
+		$this->write( $outer, array( 'title' => 'outer' ), new DbLogger() );
+
+		$this->assertGreaterThan( 0, $outer_id );
+		$this->assertGreaterThan( 0, $inner_id );
+		$this->assertNotSame( $outer_id, $inner_id, 'Each write has its own row.' );
+		$this->assertSame( $outer_id, $after, 'The outer write\'s ID is current again after the nested write.' );
+	}
+
+	public function test_current_log_id_is_zero_after_a_write_whose_execute_throws_and_the_outer_id_is_back_after_a_nested_throw(): void {
+		wp_set_current_user( $this->make_agent() );
+		$outer    = new WriteProbeAbility();
+		$outer_id = null;
+		$after    = null;
+
+		$outer->on_execute = function ( array $input ) use ( &$outer_id, &$after ): array {
+			unset( $input );
+			$outer_id = Pipeline::current_log_id();
+
+			$inner                   = new WriteProbeAbility();
+			$inner->throw_in_execute = true;
+			( new Pipeline( new DbLogger() ) )->run( $inner, array( 'title' => 'inner' ) );
+
+			$after = Pipeline::current_log_id();
+
+			return array();
+		};
+		$this->write( $outer, array( 'title' => 'outer' ), new DbLogger() );
+		$this->assertSame( $outer_id, $after, 'A nested write that throws restores the outer ID.' );
+		$this->assertSame( 0, Pipeline::current_log_id(), 'The outer write is finished.' );
+
+		$throwing                   = new WriteProbeAbility();
+		$throwing->throw_in_execute = true;
+		$this->write( $throwing, array( 'title' => 'x' ), new DbLogger() );
+		$this->assertSame( 0, Pipeline::current_log_id(), 'A write whose execute throws leaves no ID behind.' );
+	}
 }

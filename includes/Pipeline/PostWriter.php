@@ -40,6 +40,9 @@ final class PostWriter {
 	/** The zero GMT date WordPress stores for "no date". */
 	private const ZERO_DATE = '0000-00-00 00:00:00';
 
+	/** The post fields that restore() sets and checks: the title, content and excerpt. */
+	private const TEXT_FIELDS = array( 'post_title', 'post_content', 'post_excerpt' );
+
 	/**
 	 * The title, content and excerpt that each post's last Steadhand save stored, by post ID, as the row holds them (unslashed,
 	 * after the save filters). Recorded by save(). An entry is cleared when a capture for the post opens and when it closes
@@ -184,6 +187,135 @@ final class PostWriter {
 				'post_content'          => $content,
 			)
 		);
+	}
+
+	/**
+	 * Puts a post's title, content and excerpt back to the text of an earlier revision, and changes nothing else. Used by
+	 * steadhand/undo-change only.
+	 *
+	 * The post must still hold $expected, the text the change left, or nothing is written and the refusal is
+	 * steadhand_refused_changed_since (409). That is checked twice:
+	 * 1. before the save, with an uncached read of the row (holds_text());
+	 * 2. inside the save, in a wp_insert_post_data filter at PHP_INT_MAX for this post's own update (the same matching
+	 *    conditions as save()). The guard runs before the kept values are set, so when the row no longer holds $expected, the
+	 *    save stops there, and core's UPDATE and its revision are never reached. The exception that stops it is caught here.
+	 * Every filter is removed in finally, as in save().
+	 *
+	 * The restored bytes are kept as $restore holds them, after the save filters have run, so the KSES filters never change
+	 * the text an administrator stored. The stored post_content_filtered is kept as it is. Status, slug, date, author and
+	 * terms are never sent.
+	 *
+	 * The one limit that remains: the guard and core's UPDATE are separate steps. Core runs the rest of wp_insert_post() after
+	 * the filter (the unslashing, and any action it fires before the statement, such as pre_post_update), and a write to the
+	 * row during those steps is not caught here. UndoChange reads the row again after a successful save and reports
+	 * steadhand_update_partial when it does not hold $restore, so such a change is reported, not hidden.
+	 *
+	 * A WP_Error from wp_update_post() is returned as it is. Whether anything changed is for the caller to read back.
+	 *
+	 * @param int                                                                   $post_id  Post ID.
+	 * @param array{post_title: string, post_content: string, post_excerpt: string} $expected The text the post must hold now.
+	 * @param array{post_title: string, post_content: string, post_excerpt: string} $restore  The text to store.
+	 * @return int|\WP_Error The post ID, or the refusal or error.
+	 * @throws \RuntimeException When the save is stopped by the guard, which the method catches; other failures are rethrown.
+	 */
+	public static function restore( int $post_id, array $expected, array $restore ): int|\WP_Error {
+		self::assert_writing();
+		self::assert_text( $expected );
+		self::assert_text( $restore );
+
+		$post = self::fresh_post( $post_id );
+		if ( $post instanceof \WP_Error ) {
+			return $post;
+		}
+
+		if ( ! self::holds_text( $post_id, $expected ) ) {
+			return self::changed_since();
+		}
+
+		$aborted = false;
+		$guard   = static function () use ( $post_id, $expected, &$aborted ): void {
+			if ( ! self::holds_text( $post_id, $expected ) ) {
+				$aborted = true;
+				throw new \RuntimeException( 'The post changed before the restore was saved.' );
+			}
+		};
+
+		// The three restored fields, and the stored filtered content, are put back verbatim after the save filters.
+		$keep = $restore + array( 'post_content_filtered' => (string) $post->post_content_filtered );
+
+		try {
+			return self::save( $post, $restore, $keep, $guard );
+		} catch ( \RuntimeException $error ) {
+			if ( ! $aborted ) {
+				throw $error;
+			}
+
+			return self::changed_since();
+		}
+	}
+
+	/**
+	 * Whether the post's title, content and excerpt, read from the row now without the object cache, are exactly the given
+	 * text. A missing row is not. The comparison is byte for byte.
+	 *
+	 * @param int                                                                   $post_id Post ID.
+	 * @param array{post_title: string, post_content: string, post_excerpt: string} $text    The text.
+	 * @return bool
+	 */
+	public static function holds_text( int $post_id, array $text ): bool {
+		global $wpdb;
+
+		// A direct read of the row. The object cache is not used, so a row changed by another request is seen.
+		$row = $wpdb->get_row( // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching -- An uncached read of the row, on purpose.
+			$wpdb->prepare( "SELECT post_title, post_content, post_excerpt FROM {$wpdb->posts} WHERE ID = %d", $post_id ), // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- The table name is core's; every value is bound by prepare().
+			ARRAY_A
+		);
+		if ( ! is_array( $row ) ) {
+			return false;
+		}
+
+		foreach ( self::TEXT_FIELDS as $field ) {
+			if ( (string) ( $row[ $field ] ?? '' ) !== $text[ $field ] ) {
+				return false;
+			}
+		}
+
+		return true;
+	}
+
+	/**
+	 * The refusal for a post that changed after the change being undone. The one text for it.
+	 *
+	 * @return \WP_Error
+	 */
+	public static function changed_since(): \WP_Error {
+		return new \WP_Error(
+			'steadhand_refused_changed_since',
+			__( 'The post was edited after that change, so it cannot be undone. Nothing was changed.', 'steadhand' ),
+			array( 'status' => 409 )
+		);
+	}
+
+	/**
+	 * Checks that a text array holds exactly the three text fields, each a string.
+	 *
+	 * @param array<mixed, mixed> $text Text.
+	 * @throws \InvalidArgumentException When the keys differ or a value is not a string.
+	 */
+	private static function assert_text( array $text ): void {
+		$keys = array_keys( $text );
+		sort( $keys );
+		$want = self::TEXT_FIELDS;
+		sort( $want );
+		if ( $keys !== $want ) {
+			throw new \InvalidArgumentException( 'PostWriter needs exactly the title, content and excerpt.' );
+		}
+
+		foreach ( $text as $value ) {
+			if ( ! is_string( $value ) ) {
+				throw new \InvalidArgumentException( 'PostWriter needs the title, content and excerpt to be strings.' );
+			}
+		}
 	}
 
 	/**
@@ -380,9 +512,12 @@ final class PostWriter {
 	 * @param \WP_Post              $post   The post as read for this write.
 	 * @param array<string, string> $fields Fields to set.
 	 * @param array<string, string> $keep   Values to put back, by field.
+	 * @param callable|null         $guard  Optional. Runs in the same filter as the values are put back, before they are,
+	 *                                      and only for this post's own update. It may throw, which stops the save before
+	 *                                      core's UPDATE. Null for none.
 	 * @return int|\WP_Error
 	 */
-	private static function save( \WP_Post $post, array $fields, array $keep ): int|\WP_Error {
+	private static function save( \WP_Post $post, array $fields, array $keep, ?callable $guard = null ): int|\WP_Error {
 		$data       = self::dated( $fields );
 		$data['ID'] = $post->ID;
 
@@ -395,11 +530,16 @@ final class PostWriter {
 		$target_id = (int) $post->ID;
 		$post_type = (string) $post->post_type;
 		$armed     = true;
-		$restore   = static function ( array $data, array $postarr, array $unsanitized_postarr, bool $update ) use ( &$armed, $target_id, $post_type, $keep ): array {
+		$restore   = static function ( array $data, array $postarr, array $unsanitized_postarr, bool $update ) use ( &$armed, $target_id, $post_type, $keep, $guard ): array {
 			unset( $unsanitized_postarr );
 
 			if ( ! $armed || ! $update || (int) ( $postarr['ID'] ?? 0 ) !== $target_id || ( $data['post_type'] ?? null ) !== $post_type ) {
 				return $data;
+			}
+
+			// The guard runs first: when it throws, nothing is kept and core's UPDATE does not run.
+			if ( null !== $guard ) {
+				$guard();
 			}
 
 			// Once only: a nested update of this post, from a save_post listener, must not get these values again.

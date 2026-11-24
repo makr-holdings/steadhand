@@ -69,6 +69,7 @@ final class Registry {
 			new SetPostTerms(),
 			new UploadMedia(),
 			new SetFeaturedImage(),
+			new UndoChange( $this->change_log ),
 		);
 	}
 

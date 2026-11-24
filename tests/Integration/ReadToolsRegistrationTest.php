@@ -61,6 +61,7 @@ final class ReadToolsRegistrationTest extends TestCase {
 		'steadhand/set-post-terms',
 		'steadhand/upload-media',
 		'steadhand/set-featured-image',
+		'steadhand/undo-change',
 	);
 
 	private const WRITE_TOOLS = array(
@@ -70,6 +71,7 @@ final class ReadToolsRegistrationTest extends TestCase {
 		'steadhand-set-post-terms',
 		'steadhand-upload-media',
 		'steadhand-set-featured-image',
+		'steadhand-undo-change',
 	);
 
 	/**
@@ -95,6 +97,7 @@ final class ReadToolsRegistrationTest extends TestCase {
 		'steadhand/set-post-terms',
 		'steadhand/upload-media',
 		'steadhand/set-featured-image',
+		'steadhand/undo-change',
 	);
 
 	public function test_server_lists_exactly_the_read_and_write_tools(): void {
