@@ -635,7 +635,10 @@ final class PipelineWriteTest extends LogTestCase {
 			'undoable' => true,
 		);
 		$probe->after_result    = 0;
-		$probe->on_execute      = static fn(): array => array( 'warnings' => array( 'An existing warning.' ) );
+		$probe->on_execute      = static fn(): array => array(
+			'changed'  => true,
+			'warnings' => array( 'An existing warning.' ),
+		);
 
 		$out = $this->write( $probe, array( 'title' => 'x' ), new DbLogger() );
 
@@ -649,9 +652,10 @@ final class PipelineWriteTest extends LogTestCase {
 	}
 
 	/**
-	 * The warning stays within the cap the abilities keep. A full list is returned as it is.
+	 * When the warnings list is full, the last warning is replaced by the cannot-be-undone warning, not dropped, and the
+	 * count stays at the cap.
 	 */
-	public function test_the_cannot_be_undone_warning_is_not_added_to_a_full_list(): void {
+	public function test_the_cannot_be_undone_warning_replaces_the_last_entry_of_a_full_list(): void {
 		$agent = $this->make_agent();
 		wp_set_current_user( $agent );
 		$probe = new WriteProbeAbility();
@@ -662,11 +666,42 @@ final class PipelineWriteTest extends LogTestCase {
 		);
 		$probe->after_result    = 0;
 		$full                   = array_map( static fn( int $i ): string => "Warning $i.", range( 1, \Steadhand\Abilities\PostFields::MAX_WARNINGS ) );
-		$probe->on_execute      = static fn(): array => array( 'warnings' => $full );
+		$probe->on_execute      = static fn(): array => array(
+			'changed'  => true,
+			'warnings' => $full,
+		);
 
 		$out = $this->write( $probe, array( 'title' => 'x' ), new DbLogger() );
 
-		$this->assertSame( $full, $out['warnings'] );
+		$expected   = array_slice( $full, 0, \Steadhand\Abilities\PostFields::MAX_WARNINGS - 1 );
+		$expected[] = 'Steadhand could not save the state after this change, so it cannot be undone.';
+		$this->assertSame( $expected, $out['warnings'] );
+		$this->assertCount( \Steadhand\Abilities\PostFields::MAX_WARNINGS, $out['warnings'] );
+		$this->assertSame( 0, (int) $this->latest_row( $agent )['undoable'] );
+	}
+
+	/**
+	 * A call that changed nothing gets no warning, even when its before-snapshot was undoable and its after-state was not
+	 * saved.
+	 */
+	public function test_a_call_that_changed_nothing_gets_no_cannot_be_undone_warning(): void {
+		$agent = $this->make_agent();
+		wp_set_current_user( $agent );
+		$probe = new WriteProbeAbility();
+
+		$probe->snapshot_result = array(
+			'id'       => 55,
+			'undoable' => true,
+		);
+		$probe->after_result    = 0;
+		$probe->on_execute      = static fn(): array => array(
+			'changed'  => false,
+			'warnings' => array( 'An existing warning.' ),
+		);
+
+		$out = $this->write( $probe, array( 'title' => 'x' ), new DbLogger() );
+
+		$this->assertSame( array( 'An existing warning.' ), $out['warnings'] );
 		$this->assertSame( 0, (int) $this->latest_row( $agent )['undoable'] );
 	}
 

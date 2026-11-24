@@ -9,6 +9,7 @@ declare( strict_types=1 );
 
 namespace Steadhand\Tests\Integration;
 
+use Steadhand\Pipeline\PostWriter;
 use Steadhand\Pipeline\Snapshots;
 
 /**
@@ -92,12 +93,7 @@ final class SnapshotsTest extends PostWriteTestCase {
 		$result = $this->in_write(
 			function () use ( $post ): array {
 				$before = Snapshots::post_revision( $post );
-				wp_update_post(
-					array(
-						'ID'           => $post,
-						'post_content' => 'After',
-					)
-				);
+				PostWriter::update( $post, array( 'post_content' => 'After' ) );
 
 				return array(
 					'first'  => Snapshots::post_revision_after( $post, $before ),
@@ -132,12 +128,7 @@ final class SnapshotsTest extends PostWriteTestCase {
 		$result = $this->in_write(
 			function () use ( $post, $other ): array {
 				$before = Snapshots::post_revision( $post );
-				wp_update_post(
-					array(
-						'ID'           => $post,
-						'post_content' => 'A after',
-					)
-				);
+				PostWriter::update( $post, array( 'post_content' => 'A after' ) );
 				wp_update_post(
 					array(
 						'ID'           => $other,

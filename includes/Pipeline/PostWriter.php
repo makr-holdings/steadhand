@@ -41,6 +41,15 @@ final class PostWriter {
 	private const ZERO_DATE = '0000-00-00 00:00:00';
 
 	/**
+	 * The title, content and excerpt that each post's last Steadhand save stored, by post ID, as the row holds them (unslashed,
+	 * after the save filters). Recorded by save(). Snapshots clears a post's entry when its capture opens and closes, so an
+	 * entry never outlives the write that made it.
+	 *
+	 * @var array<int, array{post_title: string, post_content: string, post_excerpt: string}>
+	 */
+	private static array $written = array();
+
+	/**
 	 * The save filters core adds for post fields (kses_init_filters() in wp-includes/kses.php), by post field. Each is
 	 * added at priority 10, as core adds it. Each entry is the hook and the function. Every write has all four in place.
 	 */
@@ -173,6 +182,42 @@ final class PostWriter {
 				'post_content_filtered' => (string) $post->post_content_filtered,
 				'post_content'          => $content,
 			)
+		);
+	}
+
+	/**
+	 * The title, content and excerpt that the last save of this post by Steadhand stored, or null when there is none since it
+	 * was cleared. Snapshots::post_revision_after() accepts an after-revision only when it holds exactly this text.
+	 *
+	 * @param int $post_id Post ID.
+	 * @return array{post_title: string, post_content: string, post_excerpt: string}|null
+	 */
+	public static function written_text( int $post_id ): ?array {
+		return self::$written[ $post_id ] ?? null;
+	}
+
+	/**
+	 * Forgets the text recorded for a post. Snapshots calls it when a capture for the post opens and when it closes.
+	 *
+	 * @param int $post_id Post ID.
+	 * @return void
+	 */
+	public static function forget_written_text( int $post_id ): void {
+		unset( self::$written[ $post_id ] );
+	}
+
+	/**
+	 * The title, content and excerpt of a save's data, unslashed. The data is slashed when the save filters see it, and core
+	 * unslashes it after them, so this is the text the row holds.
+	 *
+	 * @param array<string, mixed> $data Slashed save data, after the save filters.
+	 * @return array{post_title: string, post_content: string, post_excerpt: string}
+	 */
+	private static function stored_text( array $data ): array {
+		return array(
+			'post_title'   => wp_unslash( (string) ( $data['post_title'] ?? '' ) ),
+			'post_content' => wp_unslash( (string) ( $data['post_content'] ?? '' ) ),
+			'post_excerpt' => wp_unslash( (string) ( $data['post_excerpt'] ?? '' ) ),
 		);
 	}
 
@@ -354,6 +399,10 @@ final class PostWriter {
 					$data[ $field ] = wp_slash( $value );
 				}
 			}
+
+			// This is the last value core will store for the row, from this write. Recorded once, like the kept values above, so a
+			// nested update by another plugin does not replace it: the row then differs from the record, and the call is not undoable.
+			self::$written[ $target_id ] = self::stored_text( $data );
 
 			return $data;
 		};

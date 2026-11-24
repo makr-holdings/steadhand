@@ -670,22 +670,27 @@ final class Pipeline {
 	}
 
 	/**
-	 * Adds the warning that a change was made but cannot be undone, because the state after it could not be saved. The
-	 * warning is added only when the output already has a warnings list with room in it, within the same cap the
-	 * abilities keep (PostFields::MAX_WARNINGS). An output without a warnings list is returned as it is.
+	 * Adds the warning that a change was made but cannot be undone, because the state after it could not be saved.
+	 *
+	 * The warning is added only when the output says the call changed something ('changed' is true). A call that changed
+	 * nothing has nothing to undo, so it gets no warning. An output without a warnings list is returned as it is.
+	 *
+	 * The warnings stay within the cap the abilities keep (PostFields::MAX_WARNINGS). When the list is full, the last
+	 * warning is replaced by this one, not dropped, because this one matters more than most.
 	 *
 	 * @param array<string, mixed> $output What the ability returned.
 	 * @return array<string, mixed>
 	 */
 	private function with_unundoable_warning( array $output ): array {
-		if ( ! isset( $output['warnings'] ) || ! is_array( $output['warnings'] ) ) {
+		if ( true !== ( $output['changed'] ?? null ) || ! isset( $output['warnings'] ) || ! is_array( $output['warnings'] ) ) {
 			return $output;
 		}
 
 		$warnings = array_values( $output['warnings'] );
-		if ( count( $warnings ) < PostFields::MAX_WARNINGS ) {
-			$warnings[] = __( 'Steadhand could not save the state after this change, so it cannot be undone.', 'steadhand' );
+		if ( count( $warnings ) >= PostFields::MAX_WARNINGS ) {
+			$warnings = array_slice( $warnings, 0, PostFields::MAX_WARNINGS - 1 );
 		}
+		$warnings[]         = __( 'Steadhand could not save the state after this change, so it cannot be undone.', 'steadhand' );
 		$output['warnings'] = $warnings;
 
 		return $output;

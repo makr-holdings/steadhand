@@ -19,8 +19,9 @@ defined( 'ABSPATH' ) || exit;
  *
  * The state after a write is named only when this request created the revision. post_revision() opens a capture for the
  * post, and a listener on core's _wp_put_post_revision action records each revision this request makes for a post whose
- * capture is open. post_revision_after() accepts only a revision that was captured, so a save by another request between
- * the write and the check is never recorded as this write's state after the change.
+ * capture is open. post_revision_after() accepts only a revision that was captured and that holds exactly the text the
+ * write stored (PostWriter::written_text()), so a save by another request between the write and the check is never
+ * recorded as this write's state after the change.
  */
 final class Snapshots {
 
@@ -72,10 +73,18 @@ final class Snapshots {
 	/**
 	 * Names the revision that holds the post's state after the write, or 0 when there is none that this write can use.
 	 *
-	 * The revision must be one this request created during the write (captured by post_revision()), be newer than the
-	 * before-revision, and hold exactly the post's current title, content and excerpt. The before-revision must still
-	 * exist and must not be an autosave, and the two must differ in title, content or excerpt. The capture for the post
-	 * is ended on every path, including a throw.
+	 * The checks, in the order the code runs them:
+	 * 1. post_revision() opened a capture for the post during this write.
+	 * 2. The post row holds exactly the text this write stored (PostWriter::written_text(), recorded when the write saved the
+	 *    row). Once the row differs from that, for example because another request or a plugin in this request changed it, the
+	 *    call names nothing, and nothing is saved.
+	 * 3. The latest non-autosave revision holds the row's title, content and excerpt, and the text this write stored. The
+	 *    after-side save (save_current_revision) runs here, and only here, when core did not save the post-save revision.
+	 * 4. That revision was captured during this write, and is newer than the before-revision.
+	 * 5. The before-revision still exists, is not an autosave, and belongs to the post.
+	 * 6. The before-revision and the after-revision differ in title, content or excerpt.
+	 *
+	 * The capture for the post, and the text recorded for it, are ended on every path, including a throw.
 	 *
 	 * @param int $post_id   Post ID.
 	 * @param int $before_id The snapshot post_revision() returned for this write.
@@ -91,6 +100,7 @@ final class Snapshots {
 			return self::after_revision( $post_id, $before_id );
 		} finally {
 			unset( self::$captures[ $post_id ] );
+			PostWriter::forget_written_text( $post_id );
 		}
 	}
 
@@ -133,11 +143,24 @@ final class Snapshots {
 			return 0;
 		}
 
-		// A revision of the current state is saved here if the latest one differs, so it is captured too.
+		// The text this write stored. Without a record of it, nothing can be named.
+		$written = PostWriter::written_text( $post_id );
+		if ( null === $written ) {
+			return 0;
+		}
+
+		// The row must still hold that text. Once another request, or a plugin in this request, has changed it, no revision can
+		// be this write's state after the change. Nothing is saved then, so no revision of the other text is made here.
+		if ( ! self::holds( $post, $written ) ) {
+			return 0;
+		}
+
+		// Core saves the post-save revision itself. This saves one only when core did not (a plugin removed its hook). The row
+		// holds the written text here, so a revision saved now can only hold that text too.
 		self::save_current_revision( $post );
 
 		$revision = self::newest_revision( $post );
-		if ( null === $revision || ! self::same_text( $revision, $post ) ) {
+		if ( null === $revision || ! self::same_text( $revision, $post ) || ! self::holds( $revision, $written ) ) {
 			return 0;
 		}
 
@@ -164,6 +187,7 @@ final class Snapshots {
 	 */
 	private static function open_capture( int $post_id ): void {
 		self::$captures[ $post_id ] = array();
+		PostWriter::forget_written_text( $post_id );
 
 		if ( ! has_action( '_wp_put_post_revision', array( self::class, 'capture_revision' ) ) ) {
 			add_action( '_wp_put_post_revision', array( self::class, 'capture_revision' ), 10, 1 );
@@ -219,8 +243,26 @@ final class Snapshots {
 	 * @return bool
 	 */
 	private static function same_text( \WP_Post $a, \WP_Post $b ): bool {
-		return $a->post_title === $b->post_title
-			&& $a->post_content === $b->post_content
-			&& $a->post_excerpt === $b->post_excerpt;
+		return self::holds(
+			$a,
+			array(
+				'post_title'   => $b->post_title,
+				'post_content' => $b->post_content,
+				'post_excerpt' => $b->post_excerpt,
+			)
+		);
+	}
+
+	/**
+	 * Whether a post holds exactly the given title, content and excerpt, byte for byte.
+	 *
+	 * @param \WP_Post                                                              $post The post.
+	 * @param array{post_title: string, post_content: string, post_excerpt: string} $text Title, content and excerpt.
+	 * @return bool
+	 */
+	private static function holds( \WP_Post $post, array $text ): bool {
+		return $post->post_title === $text['post_title']
+			&& $post->post_content === $text['post_content']
+			&& $post->post_excerpt === $text['post_excerpt'];
 	}
 }
