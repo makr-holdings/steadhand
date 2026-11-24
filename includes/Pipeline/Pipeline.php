@@ -51,7 +51,7 @@ defined( 'ABSPATH' ) || exit;
  * filter turns that on. Refused and failed read calls are always logged.
  *
  * Pipeline::is_running() is true from the start of authorize() until the end of execute() in run(), around
- * authorize() in check(), and for the whole of run_admin(). MetaCaps uses it to limit the post capability mapping to Steadhand calls (SPEC §14.1).
+ * authorize() in check(), and in run_admin() from after its input is prepared until the call returns. MetaCaps uses it to limit the post capability mapping to Steadhand calls (SPEC §14.1).
  * Pipeline::is_writing() is true only while a write ability's snapshot() or execute() runs. PostWriter and Snapshots
  * refuse to run outside it.
  *
@@ -102,10 +102,10 @@ final class Pipeline {
 	private static array $log_ids = array();
 
 	/**
-	 * Whether a Steadhand call is authorizing or executing an ability right now.
+	 * Whether a Steadhand call is authorizing or executing an ability right now: in run(), check() or run_admin().
 	 *
 	 * The metacap mapping (MetaCaps) applies only while this is true (SPEC §14.1, D6). It is true only between
-	 * enter() and leave(), which run() and check() call around authorize() and execute(). Nothing else can set it.
+	 * enter() and leave(), which run(), check() and run_admin() call around authorize() and execute(). Nothing else can set it.
 	 *
 	 * @return bool
 	 */

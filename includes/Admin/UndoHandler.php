@@ -35,7 +35,7 @@ final class UndoHandler {
 	 * not_undoable (refused: nothing to restore, or already undone), forbidden (refused for this administrator), partial (the
 	 * save may have changed the post), log (the change log could not record the undo, so it may or may not have happened) and
 	 * failed (refused or failed, with nothing known to have changed, and the post should be checked) and locked (refused because
-	 * another user is editing the post, so nothing was changed).
+	 * the post has a live edit lock, held by any user (the administrator included), so nothing was changed).
 	 */
 	public const CODES = array( 'done', 'changed', 'not_undoable', 'forbidden', 'partial', 'log', 'failed', 'locked' );
 

@@ -20,6 +20,7 @@ use Steadhand\Abilities\UpdatePost;
 use Steadhand\Agents;
 use Steadhand\Capabilities;
 use Steadhand\Guardrails\Engine;
+use Steadhand\Guardrails\Rules\EditLock;
 use Steadhand\Log\DbLogger;
 use Steadhand\Pipeline\AdminAction;
 use Steadhand\Pipeline\MediaWriter;
@@ -256,8 +257,9 @@ final class UndoEntry extends Ability implements AdminAction {
 			return $this->forbidden();
 		}
 
-		// Another user is editing the post. This takes the place of the agent's EditLock guardrail on the administrator's path.
-		if ( $this->locked_by_another( $post->ID ) ) {
+		// Any live edit lock refuses, whoever holds it, the administrator's own included. EditLock::is_locked() is the rule's own
+		// definition of a live lock, so the two paths cannot drift. The agent's exemptions stay in the rule.
+		if ( EditLock::is_locked( $post->ID ) ) {
 			return $this->locked();
 		}
 
@@ -268,21 +270,6 @@ final class UndoEntry extends Ability implements AdminAction {
 		};
 
 		return is_wp_error( $decision ) ? $decision : $row;
-	}
-
-	/**
-	 * Whether another user holds the post's edit lock now. wp_check_post_lock() returns that user's ID when another user holds a
-	 * recent lock, and false when there is no lock or the lock is the current user's.
-	 *
-	 * @param int $post_id The post.
-	 * @return bool
-	 */
-	private function locked_by_another( int $post_id ): bool {
-		if ( ! function_exists( 'wp_check_post_lock' ) ) {
-			require_once ABSPATH . 'wp-admin/includes/post.php';
-		}
-
-		return false !== wp_check_post_lock( $post_id );
 	}
 
 	/**
@@ -333,7 +320,8 @@ final class UndoEntry extends Ability implements AdminAction {
 
 	/**
 	 * The checks for terms: the saved states are valid, the taxonomy is still allowed and attached to the post's type, the caller
-	 * may assign its terms, and the post does not hold more terms in it than a set-post-terms call allows.
+	 * may assign its terms, each saved term is still a term of the taxonomy, a post format is one term, and the post does not hold
+	 * more terms in it than a set-post-terms call allows.
 	 *
 	 * @param array<string, mixed> $row  The entry.
 	 * @param \WP_Post             $post The post.
@@ -353,6 +341,20 @@ final class UndoEntry extends Ability implements AdminAction {
 
 		if ( ! current_user_can( $object->cap->assign_terms ) ) {
 			return $this->forbidden();
+		}
+
+		// The rules SetPostTerms::validate_input() applies to a set of term IDs, applied to the set this undo would restore. The
+		// count and the uniqueness of the IDs are already checked by UndoRules::valid_state().
+		foreach ( $states['before']['term_ids'] as $term_id ) {
+			$term = get_term( (int) $term_id, $taxonomy );
+			if ( ! $term instanceof \WP_Term || $term->taxonomy !== $taxonomy ) {
+				return $this->restore_blocked();
+			}
+		}
+
+		// The post-format rule (SetPostTerms::validate_input()): a post format is one term, so a saved set of more than one is refused.
+		if ( 'post_format' === $taxonomy && count( $states['before']['term_ids'] ) > 1 ) {
+			return $this->restore_blocked();
 		}
 
 		if ( TermReader::assigned_count( $post->ID, $taxonomy ) > TermReader::MAX_TERMS_PER_TAXONOMY ) {
@@ -673,14 +675,14 @@ final class UndoEntry extends Ability implements AdminAction {
 	}
 
 	/**
-	 * The refusal for a post that another user is editing now. Nothing is written.
+	 * The refusal for a post that has a live edit lock, held by any user, the administrator included. Nothing is written.
 	 *
 	 * @return \WP_Error
 	 */
 	private function locked(): \WP_Error {
 		return new \WP_Error(
 			'steadhand_refused_locked',
-			__( 'Someone is editing this post right now. Try again when they have finished. Nothing was changed.', 'steadhand' ),
+			__( 'This post is open in the editor right now. Close the editor, wait a few minutes, and try again. Nothing was changed.', 'steadhand' ),
 			array( 'status' => 409 )
 		);
 	}

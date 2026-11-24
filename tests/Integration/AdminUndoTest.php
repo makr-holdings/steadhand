@@ -20,6 +20,7 @@ use Steadhand\Guardrails\Result;
 use Steadhand\Log\DbLogger;
 use Steadhand\Log\Entry;
 use Steadhand\Log\Schema;
+use Steadhand\Log\SnapshotStore;
 use Steadhand\Pipeline\Pipeline;
 use Steadhand\Plugin;
 use Steadhand\Roles;
@@ -901,20 +902,21 @@ final class AdminUndoTest extends PostWriteTestCase {
 	}
 
 	/**
-	 * Asserts that the refusal came from the writer's own check: execute()'s check passed before the writer's re-read, and the
-	 * writer's check, after the re-read, was the one that denied.
+	 * Asserts that the refusal came from the writer's own check. Before the writer's first cache clean (its re-read), exactly two
+	 * edit_post checks have run: the object check of the call, and execute()'s own check. The first check after the re-read is the
+	 * writer's, and it is the one that denies.
 	 *
 	 * @param string[] $events The events the deny helper recorded.
 	 */
 	private function assert_the_writer_check_refused( array $events ): void {
 		$clean = array_search( 'clean', $events, true );
 		$this->assertIsInt( $clean, 'The writer must re-read the post before its check.' );
-		$this->assertContains( 'allowed', array_slice( $events, 0, $clean ), "execute()'s own check must pass before the writer re-reads the post." );
 		$this->assertSame(
-			array( 'denied' ),
-			array_values( array_intersect( array_slice( $events, $clean + 1 ), array( 'allowed', 'denied' ) ) ),
-			"The writer's own check must be the one that refuses."
+			array( 'allowed', 'allowed' ),
+			array_slice( $events, 0, $clean ),
+			"Before the writer's re-read, exactly two edit_post checks must run: the object check, then execute()'s own check."
 		);
+		$this->assertSame( 'denied', $events[ $clean + 1 ] ?? null, "The writer's own check, after the re-read, must be the one that refuses." );
 	}
 
 	public function test_a_capability_removed_after_execute_checked_stops_the_terms_write_in_the_writer(): void {
@@ -1086,14 +1088,167 @@ final class AdminUndoTest extends PostWriteTestCase {
 		$this->assertSame( 0, (int) $this->stored( $entry )['undone_by'] );
 	}
 
-	public function test_an_undo_is_allowed_when_the_administrator_holds_the_edit_lock_herself(): void {
+	public function test_an_undo_is_refused_when_the_administrator_holds_the_edit_lock_herself(): void {
+		$post   = $this->text_fixture();
+		$entry  = $this->agent_text_change( $post, array( 'title' => 'Agent title' ) );
+		$before = $this->text_of_post( $post );
+		$this->lock_post( $post, $this->admin_id() );
+
+		wp_set_current_user( $this->admin_id() );
+		$this->assertSame( 'locked', $this->code_of( $this->submit_undo( $entry ) ) );
+		$this->assert_nothing_changed( $before, $post, $entry );
+	}
+
+	public function test_an_undo_is_refused_while_a_timestamp_only_lock_is_live(): void {
+		$post   = $this->text_fixture();
+		$entry  = $this->agent_text_change( $post, array( 'title' => 'Agent title' ) );
+		$before = $this->text_of_post( $post );
+		update_post_meta( $post, '_edit_lock', (string) time() );
+
+		wp_set_current_user( $this->admin_id() );
+		$this->assertSame( 'locked', $this->code_of( $this->submit_undo( $entry ) ) );
+		$this->assert_nothing_changed( $before, $post, $entry );
+	}
+
+	public function test_an_undo_is_allowed_when_the_edit_lock_has_expired(): void {
 		$post  = $this->text_fixture();
 		$entry = $this->agent_text_change( $post, array( 'title' => 'Agent title' ) );
-		$this->lock_post( $post, $this->admin_id() );
+		update_post_meta( $post, '_edit_lock', ( time() - 1000 ) . ':' . $this->other_user() );
 
 		wp_set_current_user( $this->admin_id() );
 		$this->assertSame( 'done', $this->code_of( $this->submit_undo( $entry ) ) );
 		$this->assertSame( 'Before title', get_post( $post )->post_title );
+	}
+
+	/**
+	 * Gives the post a live edit lock from another user at the first cache clean of the write. That clean is the writer's own
+	 * re-read, which runs after execute()'s check has passed, so a refusal can only come from the writer's check.
+	 *
+	 * @param int  $post_id The post.
+	 * @param bool $locked  Set to true when the lock has been given.
+	 */
+	private function lock_at_the_writers_reread( int $post_id, bool &$locked ): void {
+		$holder = $this->other_user();
+		$this->filter(
+			'clean_post_cache',
+			function () use ( $post_id, $holder, &$locked ): void {
+				if ( ! $locked ) {
+					$locked = true;
+					$this->lock_post( $post_id, $holder );
+				}
+			}
+		);
+	}
+
+	public function test_a_terms_undo_is_refused_when_a_lock_appears_at_the_writers_reread(): void {
+		$post = $this->admin_post( array( 'post_status' => 'draft' ) );
+		$one  = $this->tag( 'One' );
+		$two  = $this->tag( 'Two' );
+		wp_set_object_terms( $post, array( $one ), 'post_tag' );
+		$entry = $this->agent_terms( $post, array( $two ) );
+
+		$locked = false;
+		$this->lock_at_the_writers_reread( $post, $locked );
+
+		wp_set_current_user( $this->admin_id() );
+		$this->assertSame( 'locked', $this->code_of( $this->submit_undo( $entry ) ) );
+		$this->assertTrue( $locked, 'The lock must have been given at the writer\'s re-read.' );
+		$this->assertSame( array( $two ), $this->tag_ids( $post ), 'Nothing may be written while the post is locked.' );
+		$this->assertSame( 0, (int) $this->stored( $entry )['undone_by'] );
+	}
+
+	public function test_a_featured_undo_is_refused_when_a_lock_appears_at_the_writers_reread(): void {
+		$post   = $this->admin_post( array( 'post_status' => 'draft' ) );
+		$media  = $this->image();
+		$entry  = $this->agent_image( $post, $media );
+		$locked = false;
+		$this->lock_at_the_writers_reread( $post, $locked );
+
+		wp_set_current_user( $this->admin_id() );
+		$this->assertSame( 'locked', $this->code_of( $this->submit_undo( $entry ) ) );
+		$this->assertTrue( $locked, 'The lock must have been given at the writer\'s re-read.' );
+		$this->assertSame( $media, (int) get_post_thumbnail_id( $post ), 'Nothing may be written while the post is locked.' );
+		$this->assertSame( 0, (int) $this->stored( $entry )['undone_by'] );
+	}
+
+	/**
+	 * A post format term, created for the test.
+	 *
+	 * @param string $name The format's name, e.g. aside.
+	 */
+	private function post_format( string $name ): int {
+		return (int) self::factory()->term->create(
+			array(
+				'taxonomy' => 'post_format',
+				'slug'     => 'post-format-' . $name,
+				'name'     => $name,
+			)
+		);
+	}
+
+	/**
+	 * The post's term IDs in a taxonomy, ascending.
+	 *
+	 * @param int    $post     Post ID.
+	 * @param string $taxonomy Taxonomy name.
+	 * @return int[]
+	 */
+	private function ids_in( int $post, string $taxonomy ): array {
+		$ids = array_map( 'intval', (array) wp_get_object_terms( $post, $taxonomy, array( 'fields' => 'ids' ) ) );
+		sort( $ids, SORT_NUMERIC );
+
+		return $ids;
+	}
+
+	public function test_a_terms_undo_is_refused_when_the_saved_before_state_holds_two_post_formats(): void {
+		$post    = $this->admin_post( array( 'post_status' => 'draft' ) );
+		$aside   = $this->post_format( 'aside' );
+		$gallery = $this->post_format( 'gallery' );
+		$agent   = $this->agent();
+		wp_set_current_user( $agent );
+
+		// The agent cannot save two post formats, so the saved states are written directly, as a write would write them: the
+		// before state holds two formats, which a set-post-terms call can never leave on a post.
+		$before = (int) $this->in_write(
+			fn(): int => SnapshotStore::save(
+				SnapshotStore::KIND_POST_TERMS,
+				'post',
+				$post,
+				array(
+					'taxonomy' => 'post_format',
+					'term_ids' => array( $aside, $gallery ),
+				)
+			)
+		);
+		$after  = (int) $this->in_write(
+			fn(): int => SnapshotStore::save(
+				SnapshotStore::KIND_POST_TERMS,
+				'post',
+				$post,
+				array(
+					'taxonomy' => 'post_format',
+					'term_ids' => array( $gallery ),
+				)
+			)
+		);
+		wp_set_object_terms( $post, array( $gallery ), 'post_format' );
+		$entry = $this->insert_row(
+			array(
+				'user_id'           => $agent,
+				'ability'           => self::TERMS,
+				'object_type'       => 'post',
+				'object_id'         => $post,
+				'result'            => Entry::RESULT_OK,
+				'undoable'          => 1,
+				'snapshot_id'       => $before,
+				'after_snapshot_id' => $after,
+			)
+		);
+
+		wp_set_current_user( $this->admin_id() );
+		$this->assertSame( 'not_undoable', $this->code_of( $this->submit_undo( $entry ) ) );
+		$this->assertSame( array( $gallery ), $this->ids_in( $post, 'post_format' ), 'The post format must be unchanged.' );
+		$this->assertSame( 0, (int) $this->stored( $entry )['undone_by'] );
 	}
 
 	public function test_the_undo_is_refused_when_the_change_log_table_is_not_ready(): void {

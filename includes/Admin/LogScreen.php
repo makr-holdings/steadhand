@@ -625,7 +625,7 @@ final class LogScreen {
 			'forbidden'    => __( 'The change was not undone. The entry does not exist, or you may not edit its post. Nothing was changed.', 'steadhand' ),
 			'partial'      => __( 'The undo did not finish as expected, so the post may have been changed. Check the post before you continue.', 'steadhand' ),
 			'log'          => __( 'The change log could not record the undo. If the post was changed, check it before you continue.', 'steadhand' ),
-			'locked'       => __( 'Someone is editing this post right now. Try again when they have finished.', 'steadhand' ),
+			'locked'       => __( 'This post is open in the editor right now. Close the editor, wait a few minutes, and try again.', 'steadhand' ),
 			default        => __( 'The undo did not complete. Check the post before you try again.', 'steadhand' ),
 		};
 

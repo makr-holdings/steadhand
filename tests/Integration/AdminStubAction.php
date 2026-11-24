@@ -42,6 +42,13 @@ final class AdminStubAction extends Ability implements AdminAction {
 	public bool $throw_in_authorize = false;
 
 	/**
+	 * Whether execute() throws, after it has recorded that it ran.
+	 *
+	 * @var bool
+	 */
+	public bool $throw_in_execute = false;
+
+	/**
 	 * Whether execute() ran.
 	 *
 	 * @var bool
@@ -111,6 +118,9 @@ final class AdminStubAction extends Ability implements AdminAction {
 	public function execute( array $input ): array|\WP_Error {
 		unset( $input );
 		$this->executed = true;
+		if ( $this->throw_in_execute ) {
+			throw new \RuntimeException( 'SECRET /var/www/secret-path' );
+		}
 
 		return array( 'ok' => true );
 	}

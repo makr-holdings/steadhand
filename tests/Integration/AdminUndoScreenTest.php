@@ -254,7 +254,7 @@ final class AdminUndoScreenTest extends PostWriteTestCase {
 			'partial'      => array( 'notice-warning', 'the post may have been changed' ),
 			'log'          => array( 'notice-warning', 'could not record the undo' ),
 			'failed'       => array( 'notice-warning', 'The undo did not complete.' ),
-			'locked'       => array( 'notice-error', 'Someone is editing this post right now.' ),
+			'locked'       => array( 'notice-error', 'This post is open in the editor right now. Close the editor, wait a few minutes, and try again.' ),
 		);
 
 		foreach ( $expected as $code => $want ) {

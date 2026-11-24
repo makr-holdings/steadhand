@@ -75,6 +75,7 @@ final class RunAdminTest extends PostWriteTestCase {
 		$before = $this->blocked_rows();
 
 		$result = $this->pipeline()->run_admin( $stub, $input );
+		$this->assert_no_bracket( "After a refusal: $why" );
 
 		$this->assertWPError( $result, $why );
 		if ( null !== $code ) {
@@ -98,14 +99,48 @@ final class RunAdminTest extends PostWriteTestCase {
 		return $id;
 	}
 
+	/**
+	 * Asserts that no Steadhand call bracket is open: run_admin() has returned, or has refused, or its execute() has thrown.
+	 *
+	 * @param string $when What has just happened, for the failure message.
+	 */
+	private function assert_no_bracket( string $when ): void {
+		$this->assertFalse( Pipeline::is_running(), "is_running() must be false. $when" );
+		$this->assertFalse( Pipeline::is_write_call(), "is_write_call() must be false. $when" );
+		$this->assertFalse( Pipeline::is_writing(), "is_writing() must be false. $when" );
+	}
+
 	public function test_an_administrator_runs_the_stub_and_it_is_stored(): void {
-		$stub = new AdminStubAction();
-		wp_set_current_user( $this->admin_id() );
+		$stub  = new AdminStubAction();
+		$admin = $this->admin_id();
+		wp_set_current_user( $admin );
 
 		$result = $this->pipeline()->run_admin( $stub, array( 'id' => 1 ) );
 
 		$this->assertIsArray( $result, 'The control case: an administrator must be allowed.' );
 		$this->assertTrue( $stub->executed );
+		$this->assert_no_bracket( 'After a call that ran.' );
+
+		$row = $this->latest_row( $admin );
+		$this->assertSame( 'steadhand/zz-admin-stub', $row['ability'] );
+		$this->assertSame( Entry::RESULT_OK, $row['result'] );
+		$this->assertSame( (string) $admin, (string) $row['user_id'] );
+	}
+
+	public function test_an_execute_that_throws_is_logged_as_an_error_and_leaves_no_bracket_open(): void {
+		$stub                   = new AdminStubAction();
+		$stub->throw_in_execute = true;
+		$admin                  = $this->admin_id();
+		wp_set_current_user( $admin );
+
+		$result = $this->pipeline()->run_admin( $stub, array( 'id' => 1 ) );
+
+		$this->assertWPError( $result );
+		$this->assertSame( 'steadhand_error', $result->get_error_code() );
+		$this->assertStringNotContainsString( 'SECRET', $result->get_error_message() );
+		$this->assertTrue( $stub->executed, 'The control case: execute() must have been reached.' );
+		$this->assert_no_bracket( 'After an execute() that threw.' );
+		$this->assertSame( Entry::RESULT_ERROR, $this->latest_row( $admin )['result'] );
 	}
 
 	public function test_run_admin_refuses_every_caller_who_is_not_an_administrator_without_the_agent_role(): void {
