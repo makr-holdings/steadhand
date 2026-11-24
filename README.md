@@ -65,7 +65,7 @@ Steadhand has eight capabilities. The table shows the defaults for a new agent. 
 | `steadhand_trash` | off | None yet |
 | `steadhand_settings` | off | None yet |
 
-There is no admin screen for agents or capabilities yet. That is planned for milestone M3.
+Administrators create and manage agents on the **Agents** screen under **Steadhand** in the admin menu (see [Agents screen](#agents-screen)). The access rules are in SPEC section 4.
 
 ## Change log
 
@@ -90,6 +90,20 @@ Use the table prefix from `wp-config.php`. The table holds every agent's entries
 ## Change log screen
 
 Administrators find the change log under **Steadhand** in the admin menu. The list filters by agent, tool, result and date (days are read in the site's timezone), and shows 50 entries a page. Open an entry to see its stored fields, its input and a diff of the change: the title, content and excerpt for a post edit, the terms added and removed, or the featured image before and after. The diff needs the right to edit that post; without it, the diff is not shown. The message, the guardrail notes and the input of an entry about a post are hidden from a viewer who may not edit that post, and the screen shows a short note in their place. Entries about no post are always shown. Agents cannot open the screen. The screen reads, except for one action: on an entry that Steadhand can reverse, an administrator who holds no agent role and may edit the post sees an **Undo this change** button. The undo is refused, with nothing changed, while the post has a live edit lock, held by any user, the administrator's own session included. It puts the post back as it was before that change (its text, terms or featured image), under the same rules as the agent's `steadhand/undo-change`, and the undo is recorded in the change log. Nothing is undone unless the post still holds what the change left.
+
+## Agents screen
+
+Under **Steadhand** in the admin menu, **Agents** lists the agent users of the site. An administrator can:
+
+- create an agent: a username, and the label of its first Application Password. The label is the agent's name in the change log. The agent gets only the default capabilities;
+- turn each Steadhand capability on or off for an agent. Only the capabilities that Steadhand's tools use are offered;
+- add an Application Password to an agent (up to 10), or revoke one or all of them.
+
+The new password is shown once, in the response to the form that made it. Copy it then. It cannot be shown again, and Steadhand does not save it, log it or put it in a link.
+
+Only an administrator who holds no agent role, and may list users, sees the screen. Each change needs a valid form, `manage_options` and `list_users`, and the WordPress capability for the act: `create_users` to create an agent, and `edit_user` for the agent to change it. Only a dedicated agent can be changed, so an administrator, an editor, or an account that also holds another role is refused. Such an account is listed with a warning, and it has no forms. Application Passwords need HTTPS. Without them the screen says so and offers no create or add form. The screen is not available on a multisite network, where it shows only a notice (SPEC D13). A new agent is checked again after each write, and a user that does not hold only the agent role is deleted with no password shown.
+
+`bin/create-agent.sh` (below) creates an agent from the command line, on the local wp-env site only. Use it for local development, never on a real site.
 
 ## Guardrails
 

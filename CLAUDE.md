@@ -32,7 +32,7 @@ includes/
   Pipeline/              # validate → authorize → guardrails → log reservation → snapshot → execute → log completion (writes); Pipeline.php, PostWriter.php (the only post writes), TermWriter.php (the only term assignments), MediaWriter.php (the only attachments and featured images), Snapshots.php (core revisions); Pipeline::run_admin() and AdminAction.php (the administrator's undo path, which run() and check() refuse for an AdminAction ability)
   Guardrails/            # Engine, Verdict, the public Rule, Context, Result and Registry classes, Rules/ (ContentLimits, BlockMarkup, RateLimit, DailyUploadLimit, EditLock); presets are not built yet
   Log/                   # change log (Schema, DbLogger, Logger), snapshots, undo
-  Admin/                 # admin screens: the change-log screen is built, with its Undo button (UndoEntry.php, the administrator's undo, and UndoHandler.php, the admin-post handler); the agents and guardrails screens are not yet
+  Admin/                 # admin screens: the change-log screen is built, with its Undo button (UndoEntry.php, the administrator's undo, and UndoHandler.php, the admin-post handler); the Agents screen is built (AgentsScreen.php, the rendering, and AgentsHandler.php, its actions); the guardrails screen is not yet
   Dev/                   # dev-only updater (Updater.php) and its Plugin Update Checker library; excluded from the WordPress.org build
 tests/
 bin/                     # build.sh (release zips), check-wporg-build.sh (leak check), test-wporg-gate.sh (gate self-test), create-agent.sh (local agent user)

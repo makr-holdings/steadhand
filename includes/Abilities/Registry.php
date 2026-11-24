@@ -9,6 +9,7 @@ declare( strict_types=1 );
 
 namespace Steadhand\Abilities;
 
+use Steadhand\Capabilities;
 use Steadhand\Log\DbLogger;
 use Steadhand\Pipeline\Pipeline;
 
@@ -99,6 +100,25 @@ final class Registry {
 		}
 
 		return $names;
+	}
+
+	/**
+	 * Returns the Steadhand capabilities that at least one registered ability needs, in canonical order.
+	 *
+	 * The agents screen offers these to an administrator, so a capability no ability uses (one whose tools are not built yet) is not offered.
+	 *
+	 * @return string[]
+	 */
+	public function capabilities_used(): array {
+		$used = array();
+
+		foreach ( $this->abilities() as $ability ) {
+			foreach ( array_merge( array( $ability->capability() ), $ability->capabilities_any() ) as $capability ) {
+				$used[ $capability ] = true;
+			}
+		}
+
+		return array_values( array_intersect( Capabilities::all(), array_keys( $used ) ) );
 	}
 
 	/**
