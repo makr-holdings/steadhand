@@ -1,12 +1,12 @@
 # Steadhand extension points
 
-**Status:** Steadhand defines four filters and two actions so far (see [Filters](#filters) and [Actions](#actions)), and the public guardrail classes in the [Guardrail API](#guardrail-api) section. This page is the reference for the public extension points that Steadhand Pro and third-party code will build on. It fills in as each extension point is built. The plan is in [SPEC.md](SPEC.md), section 9.1.
+**Status:** Steadhand defines four filters and four actions so far (see [Filters](#filters) and [Actions](#actions)), and the public guardrail classes in the [Guardrail API](#guardrail-api) section. This page is the reference for the public extension points that Steadhand Pro and third-party code will build on. It fills in as each extension point is built. The plan is in [SPEC.md](SPEC.md), section 9.1.
 
 ## Current extension points
 
-Steadhand defines four filters, documented in [Filters](#filters), and two actions, documented in [Actions](#actions). The [Guardrail API](#guardrail-api) section documents the public classes that third-party guardrail rules use.
+Steadhand defines four filters, documented in [Filters](#filters), and four actions, documented in [Actions](#actions). The [Guardrail API](#guardrail-api) section documents the public classes that third-party guardrail rules use.
 
-To check, run this from the repository root. It lists Steadhand's own hooks: the filters `steadhand_allowed_post_types`, `steadhand_log_read_calls`, `steadhand_log_retention_days` and `steadhand_rate_limit_per_minute`, and the actions `steadhand_log_entry_stored` and `steadhand_register_guardrails`. It also lists two WordPress hooks that Steadhand calls rather than attaches to: `the_content`, which `get-rendered` runs on purpose, and `wp_check_post_lock_window`, which the edit-lock rule reads. Today the output has eight lines: one for each of the six Steadhand hooks, and one for each of the two WordPress hooks. Any other `apply_filters()` or `do_action()` call in this output is a mistake, or a new extension point that needs a section here:
+To check, run this from the repository root. It lists Steadhand's own hooks: the filters `steadhand_allowed_post_types`, `steadhand_log_read_calls`, `steadhand_log_retention_days` and `steadhand_rate_limit_per_minute`, and the actions `steadhand_admin_log_entry`, `steadhand_admin_log_toolbar`, `steadhand_log_entry_stored` and `steadhand_register_guardrails`. It also lists three WordPress hooks that Steadhand calls rather than attaches to: `the_content`, which `get-rendered` runs on purpose, and `wp_check_post_lock_window`, which the edit-lock rule reads, and `image_memory_limit`, which the media tools read. Today the output has eleven lines: one for each of the eight Steadhand hooks, and one for each of the three WordPress hooks. Any other `apply_filters()` or `do_action()` call in this output is a mistake, or a new extension point that needs a section here:
 
 ```
 grep -rnE "apply_filters\(|do_action\(" includes steadhand.php uninstall.php --exclude-dir=vendor
@@ -231,6 +231,50 @@ add_action(
 
 This action is public API. The [stability policy](#stability-policy) above applies. Any new parameter will go at the end.
 
+### `steadhand_admin_log_toolbar`
+
+Runs on the list view of the change-log screen (under Steadhand in the admin menu, SPEC section 7), after the filter form. Use it to add controls to the toolbar above the list.
+
+- **Since:** unreleased (see [CHANGELOG.md](../CHANGELOG.md)).
+- **Type:** action.
+- **Parameter:** `$filters` (`array<string, string>`), the validated filters the form shows. The keys are `agent` (a user ID), `ability`, `result`, `from` and `to` (dates as `Y-m-d`, in the site's timezone), `paged` and `entry`. A filter that is not set, or is not valid, is `''`.
+- **When it runs:** once for each render of the list view, after the capability check has passed. It runs even when a filter is not valid, in which case the list shows no rows. It does not run on the single-entry view, and not for a viewer who is refused.
+- **Who gets it:** only a user with `manage_options` who is not an agent.
+- **If a listener throws:** the exception is caught and ignored, so the screen still renders.
+- **Trust and output:** listeners are trusted code, and they run inside an administrator's request. Whatever a listener prints appears on the page, so the listener must escape its own output.
+- **What it does not do:** it cannot change the rows or the filters the screen shows. It has no return value.
+
+This example prints the agent the list is filtered to:
+
+```php
+add_action(
+	'steadhand_admin_log_toolbar',
+	static function ( array $filters ): void {
+		printf(
+			'<p>%s</p>',
+			esc_html( '' === $filters['agent'] ? 'All agents' : 'Agent ' . $filters['agent'] )
+		);
+	}
+);
+```
+
+This action is public API. The [stability policy](#stability-policy) above applies. Any new parameter will go at the end.
+
+### `steadhand_admin_log_entry`
+
+Runs on the single-entry view of the change-log screen, after the entry's stored fields and its input, and before its diff.
+
+- **Since:** unreleased (see [CHANGELOG.md](../CHANGELOG.md)).
+- **Type:** action.
+- **Parameter:** `$entry` (`array<string, mixed>`), the entry as `Steadhand\Log\DbLogger::find_any()` returns it: every column of the change log, with the types that `steadhand_log_entry_stored` gives them. Unlike the list, it includes `input`, which is the stored JSON text.
+- **When it runs:** once for each render of an entry that exists, after the capability check has passed. It does not run for an entry that does not exist, nor for a viewer who is refused.
+- **Who gets it:** the same viewers as `steadhand_admin_log_toolbar`.
+- **If a listener throws:** the exception is caught and ignored, so the screen still renders.
+- **Trust and output:** the same as `steadhand_admin_log_toolbar`. The listener must escape what it prints, and `input` is an agent's data.
+- **What it does not do:** it cannot change the entry, the diff, or what the screen shows. It has no return value.
+
+This action is public API. The [stability policy](#stability-policy) above applies. Any new parameter will go at the end.
+
 ## Guardrail API
 
 Third-party guardrail rules are written against four classes in `Steadhand\Guardrails`: `Rule`, `Context`, `Result` and `Registry`. They are public API under the [stability policy](#stability-policy). The engine (`Engine`) and the verdict (`Verdict`) are internal and may change.
@@ -335,7 +379,8 @@ SPEC section 9.1 says Free will provide these extension points for Pro. Their ho
 - Tool registration.
 - Pre-execute interception, used for approvals.
 - Log export filters.
-- Admin screen slots.
+
+The admin screen slots of the change-log screen are the actions `steadhand_admin_log_toolbar` and `steadhand_admin_log_entry`, documented above. The slots of the agents and guardrails screens come with those screens.
 
 **Tool registration is not public yet.** `Steadhand\Abilities\Ability` is an internal base class. The tool list is a fixed list in `Steadhand\Abilities\Registry::abilities()`, and no filter or action adds a tool, so a third party cannot add an MCP tool today.
 

@@ -52,6 +52,13 @@ final class Plugin {
 	private CapabilityGuard $capability_guard;
 
 	/**
+	 * The admin menu and the change-log screen.
+	 *
+	 * @var Admin\Admin
+	 */
+	private Admin\Admin $admin;
+
+	/**
 	 * Constructor. Builds the service graph; registers no hooks.
 	 */
 	public function __construct() {
@@ -76,6 +83,7 @@ final class Plugin {
 		$this->lockdown         = new Lockdown();
 		$this->meta_caps        = new MetaCaps();
 		$this->capability_guard = new CapabilityGuard();
+		$this->admin            = new Admin\Admin( new Admin\LogScreen( $change_log, $this->registry ) );
 	}
 
 	/**
@@ -99,9 +107,10 @@ final class Plugin {
 	/**
 	 * Hooks Steadhand into WordPress, or shows a notice if a dependency is missing.
 	 *
-	 * The lockdown and the capability guard are registered first and whatever the requirements, because they depend only
-	 * on WordPress core. Without the lockdown, an agent's application password would work on core REST and wp-login while
-	 * the MCP Adapter is missing. Without the guard, a user_has_cap filter could grant a Steadhand capability.
+	 * The lockdown, the capability guard and the change-log screen are registered first and whatever the requirements,
+	 * because they depend only on WordPress core and the log table. Without the lockdown, an agent's application password
+	 * would work on core REST and wp-login while the MCP Adapter is missing. Without the guard, a user_has_cap filter could
+	 * grant a Steadhand capability. Without the screen, the audit trail could not be read while a dependency is missing.
 	 * Only the ability and server wiring needs the dependencies.
 	 *
 	 * @param Requirements $requirements The detected dependency state.
@@ -110,6 +119,7 @@ final class Plugin {
 	public function boot( Requirements $requirements ): bool {
 		$this->lockdown->register();
 		$this->capability_guard->register();
+		$this->admin->register();
 
 		if ( ! $requirements->are_met() ) {
 			add_action( 'admin_notices', array( $requirements, 'render_notice' ) );

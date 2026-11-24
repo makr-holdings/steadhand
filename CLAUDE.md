@@ -32,7 +32,7 @@ includes/
   Pipeline/              # validate → authorize → guardrails → log reservation → snapshot → execute → log completion (writes); Pipeline.php, PostWriter.php (the only post writes), TermWriter.php (the only term assignments), MediaWriter.php (the only attachments and featured images), Snapshots.php (core revisions)
   Guardrails/            # Engine, Verdict, the public Rule, Context, Result and Registry classes, Rules/ (ContentLimits, BlockMarkup, RateLimit, DailyUploadLimit, EditLock); presets are not built yet
   Log/                   # change log (Schema, DbLogger, Logger), snapshots, undo
-  Admin/                 # settings screens (agents, guardrails, log)
+  Admin/                 # admin screens: the change-log screen is built; the agents and guardrails screens are not yet
   Dev/                   # dev-only updater (Updater.php) and its Plugin Update Checker library; excluded from the WordPress.org build
 tests/
 bin/                     # build.sh (release zips), check-wporg-build.sh (leak check), test-wporg-gate.sh (gate self-test), create-agent.sh (local agent user)
