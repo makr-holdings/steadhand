@@ -15,6 +15,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). The
 
 ### Changed
 - The guardrails evaluate an undo twice: first as `steadhand/undo-change`, then as the direct call it amounts to (`steadhand/set-post-terms` or `steadhand/set-featured-image` with the input the undo writes with, or `steadhand/update-post` with no content for post text). A rule that limits the direct call now limits the undo, and a rewrite of that call refuses the undo. Other abilities are evaluated once, as before. See `docs/HOOKS.md`.
+- An undo whose direct call cannot be determined is refused, and the guardrails' second evaluation is never skipped. The direct call the guardrails checked is checked again before the write, and the undo writes nothing if it changed.
+- Notes from the second evaluation no longer cut the block note of the direct call, and a note both evaluations produce is recorded once.
 - A terms undo returns the warnings the direct `set-post-terms` call with the same set gives (a moved permalink, a post left with no category).
 - A post with more than 100 terms in the taxonomy before a change is not saved as undoable, and the call says so.
 - An undo refused for an image the caller can no longer read, a taxonomy whose assign capability was revoked, or a post type no longer allowed gets the generic refusal, as a direct call would.

@@ -348,7 +348,7 @@ final class Pipeline {
 		// refused with a fixed message, logged as blocked, and never allowed. The call never ran, so the rate limits do
 		// not count it (a refused call is not counted).
 		try {
-			$prepared = $this->prepare( $ability, $input );
+			$prepared = self::prepare_input( $ability, $input );
 		} catch ( \Throwable ) {
 			$this->write_entry( $ability, Entry::RESULT_BLOCKED, $this->check_failed()->get_error_message(), $this->loggable( $ability, $input ) );
 			return $this->check_failed();
@@ -404,7 +404,7 @@ final class Pipeline {
 		// A throw from prepare() or authorize() fails closed (see check()): nothing executes after it, and the refusal is
 		// logged as blocked, so it does not count toward the rate limits.
 		try {
-			$prepared = $this->prepare( $ability, $input );
+			$prepared = self::prepare_input( $ability, $input );
 		} catch ( \Throwable ) {
 			return $this->finish( $ability, Entry::RESULT_BLOCKED, $this->check_failed(), $this->loggable( $ability, $input ) );
 		}
@@ -487,7 +487,7 @@ final class Pipeline {
 
 		$latest     = $context;
 		$revalidate = function ( array $fixed ) use ( $ability, &$latest ): Context|\WP_Error {
-			$prepared = $this->prepare( $ability, $fixed );
+			$prepared = self::prepare_input( $ability, $fixed );
 			if ( is_wp_error( $prepared ) ) {
 				return $prepared;
 			}
@@ -520,9 +520,9 @@ final class Pipeline {
 		$outcome     = $verdict->fixed ? Entry::RESULT_FIXED : Entry::RESULT_OK;
 
 		// (1b) The direct call this call amounts to (Ability::equivalent_call()), for an ability such as undo-change that does
-		// something else with the same effect. The rules see that call too, on the same user and object. Only a verdict that
-		// passes is applied; a block, a rewrite, or a failure to ask refuses the write. Abilities that return null are
-		// evaluated once, as before.
+		// something else with the same effect. The rules see that call too, on the same user and object. A block refuses the write
+		// with the rule's message. A rule that would rewrite the direct call is answered with a block, because a rewrite cannot be
+		// applied to this change. A throw or a malformed value refuses the write. An ability that returns null is evaluated once.
 		$equivalent = $this->equivalent_for( $ability, $final_input );
 		if ( $equivalent instanceof \WP_Error ) {
 			return $this->refuse_write( $ability, $input, $this->target_for( $ability, $input ), $equivalent->get_error_message(), $notes );
@@ -539,7 +539,6 @@ final class Pipeline {
 				$equivalent['content']
 			);
 
-			// A rule that would rewrite the direct call is answered with a block: a rewrite cannot be applied to this change.
 			$direct = $this->engine->evaluate(
 				$as_direct,
 				static function ( array $fixed ): \WP_Error {
@@ -548,21 +547,12 @@ final class Pipeline {
 					return new \WP_Error( 'steadhand_guardrail_blocked', __( 'A guardrail changed this call into one that is not allowed, so it was refused.', 'steadhand' ) );
 				}
 			);
-			$notes  = array_slice( array_merge( $notes, $direct->notes ), 0, Engine::MAX_NOTES );
 
 			if ( $direct->blocked ) {
-				return $this->refuse_write( $ability, $input, $this->target_for( $ability, $input ), $direct->message, $notes );
+				return $this->refuse_write( $ability, $input, $this->target_for( $ability, $input ), $direct->message, $this->merged_notes( $notes, $direct->notes, true ) );
 			}
 
-			if ( $direct->fixed ) {
-				return $this->refuse_write(
-					$ability,
-					$input,
-					$this->target_for( $ability, $input ),
-					__( 'A guardrail would rewrite the direct call that this change amounts to. A change cannot apply a rewrite made to that call, so it was refused. Nothing was changed.', 'steadhand' ),
-					$notes
-				);
-			}
+			$notes = $this->merged_notes( $notes, $direct->notes, false );
 		}
 
 		// (2) Reserve the log row. No row, no write.
@@ -654,7 +644,7 @@ final class Pipeline {
 	 * @param array<string, mixed> $input   Input from the caller.
 	 * @return array<string, mixed>|\WP_Error The sanitized input, or a steadhand_invalid_input WP_Error (status 400).
 	 */
-	private function prepare( Ability $ability, array $input ): array|\WP_Error {
+	public static function prepare_input( Ability $ability, array $input ): array|\WP_Error {
 		$schema = $ability->input_schema();
 
 		foreach ( (array) ( $schema['properties'] ?? array() ) as $name => $property ) {
@@ -708,6 +698,30 @@ final class Pipeline {
 			$target['id'],
 			$content
 		);
+	}
+
+	/**
+	 * Joins the notes of a call's own evaluation with those of the direct call it amounts to. An identical note is kept once. When
+	 * the direct call is blocked, all of its notes are kept, its block note last, and the call's own notes are trimmed from the front
+	 * to make room, so the block note is never cut. Otherwise the list is capped at Engine::MAX_NOTES.
+	 *
+	 * @param string[] $own     The call's own notes.
+	 * @param string[] $direct  The direct call's notes.
+	 * @param bool     $blocked Whether the direct call was blocked.
+	 * @return string[]
+	 */
+	private function merged_notes( array $own, array $direct, bool $blocked ): array {
+		$direct = array_values( array_unique( $direct ) );
+		$own    = array_values( array_diff( array_unique( $own ), $direct ) );
+
+		if ( $blocked ) {
+			$room = max( 0, Engine::MAX_NOTES - count( $direct ) );
+			$own  = $room > 0 ? array_slice( $own, -$room ) : array();
+
+			return array_merge( $own, $direct );
+		}
+
+		return array_slice( array_merge( $own, $direct ), 0, Engine::MAX_NOTES );
 	}
 
 	/**

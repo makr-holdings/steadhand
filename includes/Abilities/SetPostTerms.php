@@ -58,11 +58,23 @@ final class SetPostTerms extends Ability {
 	 */
 	private string $before_warning = '';
 
-	/** The warning for a change whose before state could not be saved. */
-	private const BEFORE_UNSAVED_WARNING = 'Steadhand could not save the state before this change, so it cannot be undone.';
+	/**
+	 * The warning for a change whose before state could not be saved.
+	 *
+	 * @return string
+	 */
+	private static function before_unsaved_warning(): string {
+		return __( 'Steadhand could not save the state before this change, so it cannot be undone.', 'steadhand' );
+	}
 
-	/** The warning for a change to a post that had more terms in the taxonomy than one undo can put back. */
-	private const BEFORE_TOO_MANY_WARNING = 'Steadhand cannot undo this change: the post had more than 100 terms in this taxonomy before it, and an undo can put back at most 100.';
+	/**
+	 * The warning for a change to a post that had more terms in the taxonomy than one undo can put back.
+	 *
+	 * @return string
+	 */
+	private static function before_too_many_warning(): string {
+		return __( 'Steadhand cannot undo this change: the post had more than 100 terms in this taxonomy before it, and an undo can put back at most 100.', 'steadhand' );
+	}
 
 	/**
 	 * Constructor.
@@ -370,9 +382,10 @@ final class SetPostTerms extends Ability {
 	 * Saves the post's terms in the taxonomy as they are before the call, for undo. Runs inside the write, immediately before
 	 * execute(). The state is { taxonomy, term_ids } with the IDs ascending and unique.
 	 *
-	 * Not undoable when the post has more terms in the taxonomy than the 500 execute() allows (it would refuse the call anyway),
-	 * when the terms cannot be read, or when the snapshots table cannot save the state. Only the last case gives a warning (see
-	 * execute()).
+	 * Not undoable when the post has more terms in the taxonomy than the 500 execute() allows (it would refuse the call anyway, with
+	 * no warning), when the terms cannot be read (no warning), when the post has more than 100 terms in the taxonomy (the warning
+	 * for that size), and when the snapshots table cannot save the state or the state is over the size cap (the warning for an
+	 * unsaved state). The warning is kept in $before_warning, and execute() adds it to a change that was made.
 	 *
 	 * @param array<string, mixed> $input Validated, sanitized input.
 	 * @return array{id: int, undoable: bool}
@@ -401,7 +414,7 @@ final class SetPostTerms extends Ability {
 		// An undo puts the before set back with a replace call, which takes at most MAX_RESULT_TERMS IDs. A larger set could never
 		// be restored, so it is not saved, and the change is not undoable.
 		if ( count( $ids ) > self::MAX_RESULT_TERMS ) {
-			$this->before_warning = self::BEFORE_TOO_MANY_WARNING;
+			$this->before_warning = self::before_too_many_warning();
 
 			return array(
 				'id'       => 0,
@@ -419,7 +432,7 @@ final class SetPostTerms extends Ability {
 			)
 		);
 
-		$this->before_warning = 0 === $id ? self::BEFORE_UNSAVED_WARNING : '';
+		$this->before_warning = 0 === $id ? self::before_unsaved_warning() : '';
 
 		return array(
 			'id'       => $id,
