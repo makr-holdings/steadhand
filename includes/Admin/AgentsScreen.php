@@ -114,19 +114,26 @@ final class AgentsScreen {
 	}
 
 	/**
-	 * Renders the page. Refuses everyone but an administrator who holds no agent role.
+	 * Renders the page. Refuses everyone but an administrator who holds no agent role and may list users. On a multisite network it
+	 * shows only the notice that agent management is not available there (SPEC D13): no forms and no list.
 	 *
 	 * @return void
 	 */
 	public function render(): void {
-		if ( ! current_user_can( 'manage_options' ) || Agents::holds_agent_role( wp_get_current_user() ) ) {
+		if ( ! current_user_can( 'manage_options' ) || Agents::holds_agent_role( wp_get_current_user() ) || ! current_user_can( 'list_users' ) ) {
 			wp_die( esc_html__( 'You are not allowed to view this page.', 'steadhand' ), esc_html__( 'Forbidden', 'steadhand' ), array( 'response' => 403 ) );
 		}
 
-		$available = wp_is_application_passwords_available();
-
 		echo '<div class="wrap">';
 		printf( '<h1>%s</h1>', esc_html__( 'Steadhand agents', 'steadhand' ) );
+
+		if ( $this->handler->is_network() ) {
+			$this->notice( 'warning', __( 'Agent management is not available on multisite networks.', 'steadhand' ) );
+			echo '</div>';
+			return;
+		}
+
+		$available = wp_is_application_passwords_available();
 
 		$this->notice_for_request();
 
@@ -194,6 +201,8 @@ final class AgentsScreen {
 
 	/**
 	 * Shows the notice of this request's action, or of the code in the query string. Only a code from the fixed list is printed.
+	 * A code in the query string must be one a redirect can carry (AgentsHandler::REDIRECT_CODES). The one-time panel's codes, such as
+	 * created and password_added, are shown only from this request's own outcome.
 	 *
 	 * @return void
 	 */
@@ -204,7 +213,7 @@ final class AgentsScreen {
 		}
 
 		$query = isset( $_GET['agents'] ) ? sanitize_text_field( wp_unslash( $_GET['agents'] ) ) : ''; // phpcs:ignore WordPress.Security.NonceVerification.Recommended -- Read-only view; only a fixed code is printed.
-		if ( is_string( $query ) ) {
+		if ( is_string( $query ) && in_array( $query, AgentsHandler::REDIRECT_CODES, true ) ) {
 			$this->notice_for_code( $query );
 		}
 	}
@@ -240,7 +249,7 @@ final class AgentsScreen {
 			'capabilities_mismatch'     => array( 'error', __( 'The capabilities could not be confirmed after saving. Check them before the agent is used.', 'steadhand' ) ),
 			'invalid_username'          => array( 'error', __( 'The username is not valid. Use 1 to 60 lower-case letters, digits, underscores or hyphens, starting with a letter or digit.', 'steadhand' ) ),
 			'username_taken'            => array( 'error', __( 'That username already exists.', 'steadhand' ) ),
-			'invalid_label'             => array( 'error', __( 'The label is not valid. Use 1 to 60 characters on one line, without markup or leading or trailing spaces.', 'steadhand' ) ),
+			'invalid_label'             => array( 'error', __( 'The label is not valid. Use 1 to 60 characters on one line, with no markup, no invisible or control characters, and no leading or trailing spaces.', 'steadhand' ) ),
 			'label_taken'               => array( 'error', __( 'The agent already has a password with that label.', 'steadhand' ) ),
 			'too_many_passwords'        => array( 'error', __( 'The agent already has the most Application Passwords allowed. Revoke one first.', 'steadhand' ) ),
 			'app_passwords_unavailable' => array( 'error', __( 'Application Passwords are not available for this user, so no password was made.', 'steadhand' ) ),
@@ -249,6 +258,8 @@ final class AgentsScreen {
 			'create_failed'             => array( 'error', __( 'The agent could not be created.', 'steadhand' ) ),
 			'password_failed'           => array( 'error', __( 'The password could not be saved. Nothing was left behind.', 'steadhand' ) ),
 			'capabilities_failed'       => array( 'error', __( 'The capabilities could not be saved.', 'steadhand' ) ),
+			'role_missing'              => array( 'error', __( 'The Steadhand agent role is missing. Deactivate and reactivate Steadhand to restore it.', 'steadhand' ) ),
+			'multisite'                 => array( 'warning', __( 'Agent management is not available on multisite networks.', 'steadhand' ) ),
 		);
 	}
 

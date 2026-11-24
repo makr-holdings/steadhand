@@ -11,6 +11,7 @@ namespace Steadhand\Tests\Integration;
 
 use Steadhand\Admin\AgentsHandler;
 use Steadhand\Admin\AgentsScreen;
+use Steadhand\Admin\LogScreen;
 use Steadhand\Agents;
 use Steadhand\Capabilities;
 use Steadhand\Plugin;
@@ -438,20 +439,30 @@ final class AgentsScreenTest extends TestCase {
 		get_userdata( $mixed )->add_role( Roles::ROLE );
 		$this->as_user( $this->admin() );
 
-		foreach ( array( $admin, $editor, $mixed, 999999, 0 ) as $target ) {
-			$before = $target > 0 ? $this->state( $target ) : null;
-			$nonce  = $this->nonce( AgentsHandler::ACTION_CAPABILITIES, $target );
+		// The three real users are not agents, so every action answers with the not_agent code, exactly.
+		foreach ( array( $admin, $editor, $mixed ) as $target ) {
+			$before = $this->state( $target );
 
+			$this->assertSame( 'not_agent', $this->handler->add_password( $this->nonce( AgentsHandler::ACTION_ADD_PASSWORD, $target ), $target, 'Extra' )['code'], "add_password for $target" );
+			$this->assertSame( 'not_agent', $this->handler->revoke_all( $this->nonce( AgentsHandler::ACTION_REVOKE_ALL, $target ), $target )['code'], "revoke_all for $target" );
+			$this->assertSame( 'not_agent', $this->handler->revoke( $this->nonce( AgentsHandler::ACTION_REVOKE, $target ), $target, '0b0bfbea-2a1f-4e1b-9a5a-000000000001' )['code'], "revoke for $target" );
+			$this->assertSame(
+				'not_agent',
+				$this->handler->set_capabilities( $this->nonce( AgentsHandler::ACTION_CAPABILITIES, $target ), $target, array( Capabilities::CONNECT, Capabilities::PUBLISH, Capabilities::MEDIA ) )['code'],
+				"set_capabilities for $target"
+			);
+
+			$this->assertSame( $before, $this->state( $target ) );
+		}
+
+		// 999999 and 0 are not users. The guard may refuse them before the agent check, so either refusal is accepted.
+		foreach ( array( 999999, 0 ) as $target ) {
 			$this->assertTrue( $this->refused( fn() => $this->handler->add_password( $this->nonce( AgentsHandler::ACTION_ADD_PASSWORD, $target ), $target, 'Extra' ) ) );
 			$this->assertTrue( $this->refused( fn() => $this->handler->revoke_all( $this->nonce( AgentsHandler::ACTION_REVOKE_ALL, $target ), $target ) ) );
 			$this->assertTrue( $this->refused( fn() => $this->handler->revoke( $this->nonce( AgentsHandler::ACTION_REVOKE, $target ), $target, '0b0bfbea-2a1f-4e1b-9a5a-000000000001' ) ) );
 			$this->assertTrue(
-				$this->refused( fn() => $this->handler->set_capabilities( $nonce, $target, array( Capabilities::CONNECT, Capabilities::PUBLISH, Capabilities::MEDIA ) ) )
+				$this->refused( fn() => $this->handler->set_capabilities( $this->nonce( AgentsHandler::ACTION_CAPABILITIES, $target ), $target, array( Capabilities::CONNECT ) ) )
 			);
-
-			if ( $target > 0 ) {
-				$this->assertSame( $before, $this->state( $target ) );
-			}
 		}
 
 		$admin_user = get_userdata( $admin );
@@ -928,5 +939,366 @@ final class AgentsScreenTest extends TestCase {
 		$this->assertSame( 'capabilities_saved', $saved['code'] );
 
 		$this->assertStringContainsString( 'throw-agent', $this->render() );
+	}
+
+	/**
+	 * The fields of one action's form, for a target (or for create). The nonce is added by the caller.
+	 *
+	 * @param string $action The action.
+	 * @param int    $agent  The agent the form targets. Not used by create.
+	 * @return array<string,mixed>
+	 */
+	private function fields_for( string $action, int $agent ): array {
+		return match ( $action ) {
+			AgentsHandler::ACTION_CREATE       => array(
+				'username' => 'nonce-agent',
+				'label'    => 'Desk',
+			),
+			AgentsHandler::ACTION_ADD_PASSWORD => array(
+				'user_id' => (string) $agent,
+				'label'   => 'Extra',
+			),
+			AgentsHandler::ACTION_REVOKE       => array(
+				'user_id' => (string) $agent,
+				'uuid'    => \WP_Application_Passwords::get_user_application_passwords( $agent )[0]['uuid'],
+			),
+			AgentsHandler::ACTION_REVOKE_ALL   => array( 'user_id' => (string) $agent ),
+			default                            => array(
+				'user_id'      => (string) $agent,
+				'capabilities' => array( Capabilities::PUBLISH ),
+			),
+		};
+	}
+
+	/**
+	 * Sends each of the five actions once, with its valid nonce, and returns what each POST gave: 'died' or the request's result.
+	 *
+	 * @param int $agent The agent the forms target.
+	 * @return array<string,mixed>
+	 */
+	private function each_action( int $agent ): array {
+		$results = array();
+		foreach ( array( AgentsHandler::ACTION_CREATE, AgentsHandler::ACTION_ADD_PASSWORD, AgentsHandler::ACTION_REVOKE, AgentsHandler::ACTION_REVOKE_ALL, AgentsHandler::ACTION_CAPABILITIES ) as $action ) {
+			$target = AgentsHandler::ACTION_CREATE === $action ? 0 : $agent;
+
+			$results[ $action ] = $this->post( $action, $this->fields_for( $action, $agent ) + array( '_wpnonce' => $this->nonce( $action, $target ) ) );
+		}
+
+		return $results;
+	}
+
+	/**
+	 * Cases for the nonce test: each action, and a nonce that is missing, is another action's, or is for another target user.
+	 *
+	 * @return array<string, array{0: string, 1: string}>
+	 */
+	public static function nonce_cases(): array {
+		$cases = array();
+		foreach ( array( AgentsHandler::ACTION_CREATE, AgentsHandler::ACTION_ADD_PASSWORD, AgentsHandler::ACTION_REVOKE, AgentsHandler::ACTION_REVOKE_ALL, AgentsHandler::ACTION_CAPABILITIES ) as $action ) {
+			$cases[ $action . ', no nonce' ] = array( $action, 'none' );
+
+			$cases[ $action . ', another action\'s nonce' ] = array( $action, 'other_action' );
+
+			if ( AgentsHandler::ACTION_CREATE !== $action ) {
+				$cases[ $action . ', another target\'s nonce' ] = array( $action, 'other_target' );
+			}
+		}
+
+		return $cases;
+	}
+
+	/**
+	 * A missing nonce, another action's nonce or another target's nonce is refused for every action, and changes nothing.
+	 *
+	 * @dataProvider nonce_cases
+	 * @param string $action  The action the form posts.
+	 * @param string $variant The nonce variant: none, other_action or other_target.
+	 */
+	public function test_a_missing_or_foreign_nonce_is_refused_for_every_action( string $action, string $variant ): void {
+		$this->as_user( $this->admin() );
+
+		$agent        = $this->agent( '', 2 );
+		$other        = $this->agent( '', 1 );
+		$before       = $this->state( $agent );
+		$other_before = $this->state( $other );
+		$users        = count( get_users( array( 'fields' => 'ID' ) ) );
+
+		$fields = $this->fields_for( $action, $agent );
+
+		$target = AgentsHandler::ACTION_CREATE === $action ? 0 : $agent;
+
+		$other_action = AgentsHandler::ACTION_CAPABILITIES === $action ? AgentsHandler::ACTION_REVOKE_ALL : AgentsHandler::ACTION_CAPABILITIES;
+
+		if ( 'other_action' === $variant ) {
+			$fields['_wpnonce'] = $this->nonce( $other_action, $target );
+		} elseif ( 'other_target' === $variant ) {
+			$fields['_wpnonce'] = $this->nonce( $action, $other );
+		}
+
+		$this->assertSame( 'died', $this->post( $action, $fields ) );
+		$this->assertSame( $before, $this->state( $agent ) );
+		$this->assertSame( $other_before, $this->state( $other ) );
+		$this->assertCount( $users, get_users( array( 'fields' => 'ID' ) ) );
+	}
+
+	public function test_a_role_with_create_users_edit_users_and_list_users_but_not_manage_options_is_refused_for_every_action(): void {
+		$role = 'steadhand_test_no_manage';
+		add_role(
+			$role,
+			'Test role',
+			array(
+				'read'         => true,
+				'create_users' => true,
+				'edit_users'   => true,
+				'list_users'   => true,
+			)
+		);
+
+		try {
+			$this->as_user( self::factory()->user->create( array( 'role' => $role ) ) );
+			$agent  = $this->agent( '', 1 );
+			$before = $this->state( $agent );
+			$users  = count( get_users( array( 'fields' => 'ID' ) ) );
+
+			foreach ( $this->each_action( $agent ) as $action => $result ) {
+				$this->assertSame( 'died', $result, $action );
+			}
+			$this->assertSame( 'died', $this->call( fn() => $this->render() ) );
+
+			$this->assertSame( $before, $this->state( $agent ) );
+			$this->assertCount( $users, get_users( array( 'fields' => 'ID' ) ) );
+		} finally {
+			remove_role( $role );
+		}
+	}
+
+	public function test_a_role_with_manage_options_but_not_list_users_is_refused_for_every_action(): void {
+		$role = 'steadhand_test_no_list';
+		add_role(
+			$role,
+			'Test role',
+			array(
+				'read'           => true,
+				'manage_options' => true,
+				'create_users'   => true,
+				'edit_users'     => true,
+			)
+		);
+
+		try {
+			$this->as_user( self::factory()->user->create( array( 'role' => $role ) ) );
+			$agent  = $this->agent( '', 1 );
+			$before = $this->state( $agent );
+			$users  = count( get_users( array( 'fields' => 'ID' ) ) );
+
+			foreach ( $this->each_action( $agent ) as $action => $result ) {
+				$this->assertSame( 'died', $result, $action );
+			}
+			$this->assertSame( 'died', $this->call( fn() => $this->render() ) );
+
+			$this->assertSame( $before, $this->state( $agent ) );
+			$this->assertCount( $users, get_users( array( 'fields' => 'ID' ) ) );
+		} finally {
+			remove_role( $role );
+		}
+	}
+
+	public function test_a_malformed_user_id_is_refused_and_changes_no_agent(): void {
+		$agent = $this->agent( '', 1 );
+		$this->as_user( $this->admin() );
+		$before = $this->state( $agent );
+
+		// The nonce is for target 0, because the screen reads a malformed ID as 0. The refusal is the not_agent code.
+		foreach ( array( $agent . 'abc', ' ' . $agent, '-' . $agent, '1e3', array( (string) $agent ) ) as $raw ) {
+			$url = $this->post(
+				AgentsHandler::ACTION_REVOKE_ALL,
+				array(
+					'user_id'  => $raw,
+					'_wpnonce' => $this->nonce( AgentsHandler::ACTION_REVOKE_ALL, 0 ),
+				)
+			);
+
+			$this->assertIsString( $url, wp_json_encode( $raw ) );
+			$this->assertStringContainsString( 'agents=not_agent', $url, wp_json_encode( $raw ) );
+		}
+
+		$this->assertSame( $before, $this->state( $agent ) );
+	}
+
+	public function test_an_empty_or_unknown_action_is_refused(): void {
+		$this->as_user( $this->admin() );
+
+		foreach ( array( '', 'bogus', 'CREATE', 'revoke-password' ) as $action ) {
+			$this->assertSame( 'died', $this->post( $action, array( '_wpnonce' => $this->nonce( $action ) ) ), wp_json_encode( $action ) );
+		}
+	}
+
+	public function test_the_load_hook_is_attached_only_to_the_agents_page(): void {
+		// add_submenu_page() returns false for a user without the capability, so the menu is built as an administrator.
+		$this->as_user( $this->admin() );
+		do_action( 'admin_menu' ); // phpcs:ignore WordPress.NamingConventions.PrefixAllGlobals.NonPrefixedHooknameFound -- Core's admin_menu hook, on which the plugin's menu is built.
+
+		$found = array();
+		foreach ( $GLOBALS['wp_filter'] as $tag => $hook ) {
+			if ( ! str_starts_with( (string) $tag, 'load-' ) ) {
+				continue;
+			}
+			foreach ( $hook->callbacks as $callbacks ) {
+				foreach ( $callbacks as $callback ) {
+					$function = $callback['function'];
+					if ( is_array( $function ) && $function[0] instanceof AgentsScreen ) {
+						$found[] = $tag;
+					}
+				}
+			}
+		}
+
+		$this->assertSame( array( 'load-' . get_plugin_page_hookname( AgentsScreen::SLUG, LogScreen::SLUG ) ), array_values( array_unique( $found ) ) );
+	}
+
+	public function test_the_url_shows_only_redirect_codes_and_never_the_one_time_panel_codes(): void {
+		$this->as_user( $this->admin() );
+
+		$_GET = array( 'agents' => 'created' );
+		$this->assertStringNotContainsString( 'The agent was created.', $this->render() );
+
+		$_GET = array( 'agents' => 'password_added' );
+		$this->assertStringNotContainsString( 'The password was added.', $this->render() );
+
+		$_GET = array( 'agents' => 'create_failed' );
+		$this->assertStringNotContainsString( 'The agent could not be created.', $this->render() );
+
+		$_GET = array( 'agents' => 'password_revoked' );
+		$this->assertStringContainsString( 'The password was revoked.', $this->render() );
+	}
+
+	public function test_label_rules_refuse_invisible_control_separator_and_bad_utf8_characters(): void {
+		$refused = array(
+			"\u{202E}Desk",
+			"Desk\u{202E}",
+			"De\u{200B}sk",
+			"Desk\u{200B}",
+			"Desk\u{FEFF}",
+			"Desk\u{00A0}",
+			"\u{00A0}Desk",
+			"\u{3000}Desk",
+			"Desk\u{0085}",
+			"Desk\u{2028}more",
+			"Desk\u{2029}",
+			"Caf\xC3\x28",
+			"Desk\xFF",
+		);
+		foreach ( $refused as $label ) {
+			$this->assertFalse( AgentsHandler::is_valid_label( $label ), bin2hex( $label ) );
+		}
+
+		// Length is counted in characters: 60 two-byte characters are accepted, 61 are not.
+		$this->assertTrue( AgentsHandler::is_valid_label( str_repeat( "\u{00E9}", 60 ) ) );
+		$this->assertFalse( AgentsHandler::is_valid_label( str_repeat( "\u{00E9}", 61 ) ) );
+		$this->assertTrue( AgentsHandler::is_valid_label( "Caf\u{00E9} desk" ) );
+
+		// Through create, a refused label leaves no user behind.
+		$this->as_user( $this->admin() );
+		$users = count( get_users( array( 'fields' => 'ID' ) ) );
+		$this->assertSame( 'invalid_label', $this->handler->create( $this->nonce( AgentsHandler::ACTION_CREATE ), 'rtl-agent', "\u{202E}Desk" )['code'] );
+		$this->assertFalse( username_exists( 'rtl-agent' ) );
+		$this->assertCount( $users, get_users( array( 'fields' => 'ID' ) ) );
+	}
+
+	public function test_the_password_is_stored_in_no_table_and_passed_to_no_write_hook(): void {
+		$this->as_user( $this->admin() );
+		$seen    = array();
+		$capture = static function ( ...$args ) use ( &$seen ): void {
+			// The 'all' hook passes the hook name first. Core carries the plaintext in two places by design: wp_generate_password() passes
+			// it through its random_password filter, and core's wp_create_application_password action receives it. Steadhand listens to
+			// neither. Every other hook, including every option, transient and meta write, must not carry it.
+			if ( in_array( (string) ( $args[0] ?? '' ), array( 'random_password', 'wp_create_application_password' ), true ) ) {
+				return;
+			}
+			$seen[] = print_r( array_slice( $args, 1 ), true ); // phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_print_r -- Test: captures the arguments as text.
+		};
+
+		add_filter( 'all', $capture, PHP_INT_MIN, 10 );
+		try {
+			$this->post(
+				AgentsHandler::ACTION_CREATE,
+				array(
+					'_wpnonce' => $this->nonce( AgentsHandler::ACTION_CREATE ),
+					'username' => 'stored-nowhere',
+					'label'    => 'Stored nowhere',
+				)
+			);
+		} finally {
+			remove_filter( 'all', $capture, PHP_INT_MIN );
+		}
+
+		$password = $this->password_on_screen( $this->render() );
+		$this->assertNotSame( '', $password );
+		$this->assertNotEmpty( $seen, 'Hooks ran during the request.' );
+
+		$plain = array( $password, str_replace( ' ', '', $password ) );
+		foreach ( $seen as $arguments ) {
+			foreach ( $plain as $text ) {
+				$this->assertStringNotContainsString( $text, $arguments );
+			}
+		}
+
+		// Every row of every table of the test database, whatever its columns.
+		global $wpdb;
+		foreach ( $wpdb->get_col( 'SHOW TABLES' ) as $table ) { // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching -- Test: reads every table; the names come from SHOW TABLES.
+			foreach ( $wpdb->get_results( "SELECT * FROM `{$table}`", ARRAY_N ) as $row ) { // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- Test: reads every row.
+				foreach ( $row as $value ) {
+					foreach ( $plain as $text ) {
+						$this->assertStringNotContainsString( $text, (string) $value, "table $table" );
+					}
+				}
+			}
+		}
+	}
+
+	public function test_on_a_multisite_network_every_action_is_refused_before_anything_changes(): void {
+		$network = new AgentsHandler( ( new Plugin() )->registry(), true );
+		$agent   = $this->agent( '', 1 );
+		$other   = $this->admin();
+		$this->as_user( $this->admin() );
+		$before = $this->state( $agent );
+		$users  = count( get_users( array( 'fields' => 'ID' ) ) );
+		$uuid   = \WP_Application_Passwords::get_user_application_passwords( $agent )[0]['uuid'];
+
+		$this->assertSame( 'multisite', $network->create( $this->nonce( AgentsHandler::ACTION_CREATE ), 'network-agent', 'Desk' )['code'] );
+		$this->assertSame( 'multisite', $network->add_password( $this->nonce( AgentsHandler::ACTION_ADD_PASSWORD, $agent ), $agent, 'Extra' )['code'] );
+		$this->assertSame( 'multisite', $network->revoke( $this->nonce( AgentsHandler::ACTION_REVOKE, $agent ), $agent, $uuid )['code'] );
+		$this->assertSame( 'multisite', $network->revoke_all( $this->nonce( AgentsHandler::ACTION_REVOKE_ALL, $agent ), $agent )['code'] );
+		$this->assertSame( 'multisite', $network->set_capabilities( $this->nonce( AgentsHandler::ACTION_CAPABILITIES, $agent ), $agent, array( Capabilities::READ ) )['code'] );
+		// The network check comes before the agent check, so a non-agent target gets the same answer.
+		$this->assertSame( 'multisite', $network->revoke_all( $this->nonce( AgentsHandler::ACTION_REVOKE_ALL, $other ), $other )['code'] );
+
+		$this->assertSame( $before, $this->state( $agent ) );
+		$this->assertCount( $users, get_users( array( 'fields' => 'ID' ) ) );
+		$this->assertFalse( username_exists( 'network-agent' ) );
+	}
+
+	public function test_on_a_multisite_network_a_missing_nonce_is_still_refused_with_wp_die(): void {
+		$network = new AgentsHandler( ( new Plugin() )->registry(), true );
+		$this->as_user( $this->admin() );
+
+		$this->assertSame( 'died', $this->call( fn() => $network->create( '', 'network-agent', 'Desk' ) ) );
+	}
+
+	public function test_on_a_multisite_network_the_screen_shows_only_the_notice(): void {
+		$this->screen = new AgentsScreen( new AgentsHandler( ( new Plugin() )->registry(), true ) );
+		$this->agent( 'network-listed', 1 );
+		$this->as_user( $this->admin() );
+
+		$html = $this->render();
+
+		$this->assertStringContainsString( 'Agent management is not available on multisite networks.', $html );
+		$this->assertStringNotContainsString( 'network-listed', $html );
+		$this->assertStringNotContainsString( 'name="' . AgentsHandler::FIELD . '"', $html );
+		$this->assertStringNotContainsString( 'name="username"', $html );
+	}
+
+	public function test_the_handler_checks_is_multisite_unless_a_test_says_otherwise(): void {
+		$this->assertSame( is_multisite(), ( new AgentsHandler( ( new Plugin() )->registry() ) )->is_network() );
 	}
 }

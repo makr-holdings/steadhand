@@ -101,7 +101,7 @@ Under **Steadhand** in the admin menu, **Agents** lists the agent users of the s
 
 The new password is shown once, in the response to the form that made it. Copy it then. It cannot be shown again, and Steadhand does not save it, log it or put it in a link.
 
-Only an administrator who holds no agent role sees the screen. Each change needs a valid form, `manage_options`, and the WordPress capability for the act: `create_users` to create an agent, and `edit_user` for the agent to change it. Only a dedicated agent can be changed, so an administrator, an editor, or an account that also holds another role is refused. Such an account is listed with a warning, and it has no forms. Application Passwords need HTTPS. Without them the screen says so and offers no create or add form.
+Only an administrator who holds no agent role, and may list users, sees the screen. Each change needs a valid form, `manage_options` and `list_users`, and the WordPress capability for the act: `create_users` to create an agent, and `edit_user` for the agent to change it. Only a dedicated agent can be changed, so an administrator, an editor, or an account that also holds another role is refused. Such an account is listed with a warning, and it has no forms. Application Passwords need HTTPS. Without them the screen says so and offers no create or add form. The screen is not available on a multisite network, where it shows only a notice (SPEC D13). A new agent is checked again after each write, and a user that does not hold only the agent role is deleted with no password shown.
 
 `bin/create-agent.sh` (below) creates an agent from the command line, on the local wp-env site only. Use it for local development, never on a real site.
 
