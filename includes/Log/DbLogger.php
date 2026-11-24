@@ -649,50 +649,69 @@ final class DbLogger implements Logger {
 	}
 
 	/**
-	 * Deletes entries past retention, in batches, at most once a day.
+	 * Deletes entries past retention, in batches, at most once a day. The snapshots table (SnapshotStore) is pruned in the same
+	 * pass with the same cutoff, so a saved state is never kept longer than the log entry it belongs to.
 	 *
-	 * A pass deletes batches of PRUNE_BATCH rows until a batch comes back short, which means nothing old is left, or
-	 * until PRUNE_MAX_BATCHES batches have run. Only a pass that ended on a short batch records the day's prune. If the
-	 * budget ran out, nothing is recorded, so the next write prunes again. Never fails the call that triggered it.
+	 * Each table is pruned in batches of PRUNE_BATCH rows until a batch comes back short, which means nothing old is left, or
+	 * until PRUNE_MAX_BATCHES batches have run. Only a pass in which both tables ended on a short batch records the day's
+	 * prune. If a budget ran out, nothing is recorded, so the next write prunes again. A table that cannot be pruned (for
+	 * example, one that does not exist) counts as done, so it is not retried on every write. Never fails the call that
+	 * triggered it.
 	 */
 	private function prune_if_due(): void {
-		global $wpdb;
-
 		try {
 			$now = time();
 			if ( (int) get_option( self::PRUNE_OPTION, 0 ) > $now - DAY_IN_SECONDS ) {
 				return;
 			}
 
-			$table  = Schema::table();
 			$cutoff = gmdate( 'Y-m-d H:i:s', $now - $this->retention_days() * DAY_IN_SECONDS );
-			$batch  = $this->prune_batch;
 
-			for ( $i = 0; $i < $this->prune_max_batches; $i++ ) {
-				$deleted = $this->quietly(
-					static fn(): mixed => $wpdb->query( // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching -- A bounded delete on the change log.
-						// The table name is fixed (see Schema::table()); every value is bound by prepare().
-						$wpdb->prepare(
-							"DELETE FROM {$table} WHERE created_at < %s ORDER BY id ASC LIMIT %d", // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- See the comment above.
-							$cutoff,
-							$batch
-						)
-					)
-				);
+			// Both are run, not short-circuited, so the snapshots are pruned even when the log's budget ran out.
+			$log_done       = $this->prune_table( Schema::table(), $cutoff );
+			$snapshots_done = $this->prune_table( Schema::snapshots_table(), $cutoff );
 
-				// A short batch means nothing old is left. A failed delete also counts as short, so it is not retried on
-				// every write.
-				if ( (int) $deleted < $batch ) {
-					update_option( self::PRUNE_OPTION, $now, false );
-					return;
-				}
+			if ( $log_done && $snapshots_done ) {
+				update_option( self::PRUNE_OPTION, $now, false );
 			}
-
-			// The budget ran out with old rows possibly left. Nothing is recorded, so the next write continues.
 		} catch ( \Throwable ) {
 			// Deliberately ignored: pruning is best effort and the entry is already stored.
 			return;
 		}
+	}
+
+	/**
+	 * Deletes rows of one table created before the cutoff, in bounded batches.
+	 *
+	 * @param string $table  Fixed table name (Schema::table() or Schema::snapshots_table()).
+	 * @param string $cutoff Cutoff, UTC 'Y-m-d H:i:s'. Rows created before it are deleted; newer rows never are.
+	 * @return bool True when a batch came back short (nothing old is left), false when the budget ran out.
+	 */
+	private function prune_table( string $table, string $cutoff ): bool {
+		global $wpdb;
+
+		$batch = $this->prune_batch;
+
+		for ( $i = 0; $i < $this->prune_max_batches; $i++ ) {
+			$deleted = $this->quietly(
+				static fn(): mixed => $wpdb->query( // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching -- A bounded delete on the change log or the snapshots.
+					// The table name is fixed (see Schema::table() and Schema::snapshots_table()); every value is bound by prepare().
+					$wpdb->prepare(
+						"DELETE FROM {$table} WHERE created_at < %s ORDER BY id ASC LIMIT %d", // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- See the comment above.
+						$cutoff,
+						$batch
+					)
+				)
+			);
+
+			// A short batch means nothing old is left. A failed delete also counts as short, so it is not retried on every write.
+			if ( (int) $deleted < $batch ) {
+				return true;
+			}
+		}
+
+		// The budget ran out with old rows possibly left. Nothing is recorded, so the next write continues.
+		return false;
 	}
 
 	/**

@@ -281,7 +281,7 @@ final class SchemaTest extends LogTestCase {
 			$output = (string) ob_get_clean();
 
 			$this->assertSame( '', $output, 'No database error may be printed.' );
-			$this->assertSame( 1, $creates, 'Install ran one CREATE.' );
+			$this->assertSame( 2, $creates, 'Install ran one CREATE for each table.' );
 			$this->assertFalse( Schema::exists() );
 			$this->assertFalse( get_option( Schema::OPTION ), 'A failed create must not record the layout version.' );
 			$this->assertNotFalse( get_transient( Schema::RETRY_TRANSIENT ), 'A failed create sets the back-off.' );
@@ -291,7 +291,7 @@ final class SchemaTest extends LogTestCase {
 			$output = (string) ob_get_clean();
 
 			$this->assertSame( '', $output );
-			$this->assertSame( 1, $creates, 'maybe_upgrade must run no CREATE while the back-off is set.' );
+			$this->assertSame( 2, $creates, 'maybe_upgrade must run no CREATE while the back-off is set.' );
 		} finally {
 			remove_filter( 'query', $filter );
 			Schema::install();
@@ -314,7 +314,7 @@ final class SchemaTest extends LogTestCase {
 			set_transient( Schema::RETRY_TRANSIENT, 1, HOUR_IN_SECONDS );
 			Schema::install();
 
-			$this->assertSame( 1, $creates, 'install() tries even while the back-off is set.' );
+			$this->assertSame( 2, $creates, 'install() tries even while the back-off is set.' );
 		} finally {
 			remove_filter( 'query', $filter );
 			Schema::install();
@@ -489,6 +489,131 @@ final class SchemaTest extends LogTestCase {
 		add_filter( 'query', $filter );
 
 		return $filter;
+	}
+
+	/**
+	 * Version 3 is the layout with the snapshots table, and the snapshots table has exactly the columns the code writes.
+	 */
+	public function test_version_three_has_the_snapshots_table_with_exactly_the_columns_the_code_writes(): void {
+		global $wpdb;
+
+		$this->assertSame( '3', Schema::DB_VERSION );
+		$this->assertSame( Schema::DB_VERSION, get_option( Schema::OPTION ) );
+		$this->assertTrue( Schema::snapshots_ready() );
+
+		$table = Schema::snapshots_table();
+		// The table name is fixed (see Schema::snapshots_table()); SHOW COLUMNS cannot bind an identifier.
+		$names = array_column( (array) $wpdb->get_results( "SHOW COLUMNS FROM {$table}", ARRAY_A ), 'Field' ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- Test reads the table definition; the table name is fixed.
+		sort( $names );
+		$expected = Schema::SNAPSHOT_COLUMNS;
+		sort( $expected );
+
+		$this->assertSame( $expected, $names );
+	}
+
+	/**
+	 * An install from version 2 adds the snapshots table, and leaves every change-log row as it was, undoable included when it
+	 * has its after-state.
+	 */
+	public function test_an_upgrade_from_version_two_keeps_every_log_row_and_adds_the_snapshots_table(): void {
+		global $wpdb;
+
+		$this->let_ddl_reach_the_table();
+		$log       = Schema::table();
+		$snapshots = Schema::snapshots_table();
+
+		try {
+			Schema::uninstall();
+			Schema::install();
+			// Version 2 had no snapshots table. The fixed name is dropped to show that layout.
+			$wpdb->query( "DROP TABLE IF EXISTS {$snapshots}" ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.DirectDatabaseQuery.SchemaChange,WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- Fixed table name; the test removes the table a version 2 install never had.
+			$this->assertFalse( Schema::snapshots_ready() );
+
+			$wpdb->insert( // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery -- Test fixture written straight to the change-log table.
+				$log,
+				array(
+					'created_at'        => gmdate( 'Y-m-d H:i:s' ),
+					'user_id'           => 5,
+					'ability'           => 'steadhand/update-post',
+					'result'            => 'ok',
+					'snapshot_id'       => 7,
+					'after_snapshot_id' => 8,
+					'undoable'          => 1,
+				)
+			);
+			$id = (int) $wpdb->insert_id;
+
+			update_option( Schema::OPTION, '2' );
+			Schema::maybe_upgrade();
+
+			$this->assertTrue( Schema::snapshots_ready() );
+			$this->assertSame( '3', get_option( Schema::OPTION ) );
+			$kept = $wpdb->get_row( $wpdb->prepare( "SELECT * FROM {$log} WHERE id = %d", $id ), ARRAY_A ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared,WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching -- The table name is fixed.
+			$this->assertIsArray( $kept );
+			$this->assertSame( '7', (string) $kept['snapshot_id'] );
+			$this->assertSame( '8', (string) $kept['after_snapshot_id'] );
+			$this->assertSame( '1', (string) $kept['undoable'], 'A row with an after-state keeps its undoable flag through the upgrade.' );
+		} finally {
+			Schema::install();
+		}
+	}
+
+	/**
+	 * A snapshots table that cannot be created leaves the version unrecorded and sets the back-off, but the log still works:
+	 * logging does not depend on the snapshots table.
+	 */
+	public function test_a_missing_snapshots_table_keeps_logging_and_leaves_the_version_unrecorded(): void {
+		$this->let_ddl_reach_the_table();
+		$filter = static function ( string $query ): string {
+			return str_starts_with( $query, 'CREATE TABLE' ) && str_contains( $query, 'steadhand_snapshots' ) ? 'THIS IS NOT SQL' : $query;
+		};
+
+		try {
+			Schema::uninstall();
+			add_filter( 'query', $filter );
+
+			ob_start();
+			Schema::install();
+			$output = (string) ob_get_clean();
+
+			$this->assertSame( '', $output, 'No database error may be printed.' );
+			$this->assertFalse( get_option( Schema::OPTION ), 'The version is recorded only when both tables are ready.' );
+			$this->assertNotFalse( get_transient( Schema::RETRY_TRANSIENT ), 'A failed snapshots table sets the back-off.' );
+			$this->assertTrue( Schema::ready(), 'The change log is ready.' );
+			$this->assertFalse( Schema::snapshots_ready() );
+
+			$user = self::factory()->user->create();
+			$this->assertTrue( $this->log( $this->entry( $user ) ), 'Logging works without the snapshots table.' );
+			$this->assertSame( 1, $this->count_rows( $user ) );
+		} finally {
+			remove_filter( 'query', $filter );
+			Schema::install();
+		}
+
+		$this->assertTrue( Schema::snapshots_ready() );
+		$this->assertSame( Schema::DB_VERSION, get_option( Schema::OPTION ) );
+		$this->assertFalse( get_transient( Schema::RETRY_TRANSIENT ), 'A successful install clears the back-off.' );
+	}
+
+	/**
+	 * Uninstall drops the snapshots table with the log table.
+	 */
+	public function test_uninstall_drops_the_snapshots_table(): void {
+		global $wpdb;
+
+		$this->let_ddl_reach_the_table();
+
+		try {
+			Schema::uninstall();
+
+			$this->assertFalse( Schema::snapshots_ready() );
+			$found = $wpdb->get_var( $wpdb->prepare( 'SHOW TABLES LIKE %s', $wpdb->esc_like( Schema::snapshots_table() ) ) ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching -- Test checks the table is gone.
+			$this->assertNull( $found, 'uninstall must drop the snapshots table.' );
+		} finally {
+			Schema::install();
+		}
+
+		$this->assertTrue( Schema::snapshots_ready() );
 	}
 
 	/**

@@ -133,19 +133,26 @@ final class SetFeaturedImageTest extends PostWriteTestCase {
 	}
 
 	/**
-	 * Runs a change once, the first time the post's thumbnail is read after this is set up. The ability reads the thumbnail
-	 * first, and the writer reads it again: the change lands between the two reads. The first read still gets the value before
-	 * the change.
+	 * Runs a change once, the first time the post's thumbnail is read after this is set up, or the Nth time when $read is N.
+	 * The snapshot reads the thumbnail first, the ability's own read is the second, and the writer reads it again. The read
+	 * that fires still gets the value before the change.
 	 *
 	 * @param int      $post_id The post.
 	 * @param callable $change  What to do.
+	 * @param int      $read   Fire on this read (1 is the first). Reads before it pass through unchanged.
 	 */
-	private function once_after_the_thumbnail_is_read( int $post_id, callable $change ): void {
+	private function once_after_the_thumbnail_is_read( int $post_id, callable $change, int $read = 1 ): void {
 		$fired = false;
+		$reads = 0;
 		add_filter(
 			'get_post_metadata',
-			static function ( $value, $object_id, $meta_key, $single ) use ( &$fired, $post_id, $change ) {
+			static function ( $value, $object_id, $meta_key, $single ) use ( &$fired, &$reads, $post_id, $change, $read ) {
 				if ( $fired || (int) $object_id !== $post_id || '_thumbnail_id' !== $meta_key ) {
+					return $value;
+				}
+
+				++$reads;
+				if ( $reads < $read ) {
 					return $value;
 				}
 
@@ -211,7 +218,7 @@ final class SetFeaturedImageTest extends PostWriteTestCase {
 		$this->assertSame( 0, $set['previous_featured_media'] );
 		$this->assertSame( $post, $set['id'] );
 		$this->assertIsString( $set['link'] );
-		$this->assertSame( array( 'Steadhand cannot undo this change to the featured image yet. previous_featured_media holds the image the post had before.' ), $set['warnings'] );
+		$this->assertSame( array(), $set['warnings'] );
 		$this->assertSame( array(), $set['guardrail_notes'] );
 
 		$valid = rest_validate_value_from_schema( $set, wp_get_ability( self::ABILITY )->get_output_schema(), 'output' );
@@ -675,9 +682,11 @@ final class SetFeaturedImageTest extends PostWriteTestCase {
 		$other  = $this->image();
 		$wanted = $this->image();
 
+		// The second read of the thumbnail is the call's own read (the first is the snapshot's), so the change lands after it.
 		$this->once_after_the_thumbnail_is_read(
 			$post,
-			fn() => update_post_meta( $post, '_thumbnail_id', $other )
+			fn() => update_post_meta( $post, '_thumbnail_id', $other ),
+			2
 		);
 
 		$result = $this->set(
@@ -741,8 +750,8 @@ final class SetFeaturedImageTest extends PostWriteTestCase {
 		$this->assertSame( 'ok', $row['result'] );
 		$this->assertSame( 'post', $row['object_type'] );
 		$this->assertSame( $post, (int) $row['object_id'] );
-		$this->assertSame( 0, (int) $row['undoable'] );
-		$this->assertSame( 0, (int) $row['after_snapshot_id'] );
+		$this->assertSame( 1, (int) $row['undoable'] );
+		$this->assertGreaterThan( 0, (int) $row['after_snapshot_id'] );
 
 		$this->set(
 			array(

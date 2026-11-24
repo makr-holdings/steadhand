@@ -31,7 +31,7 @@ final class UndoChangeTest extends PostWriteTestCase {
 	private const NOT_FOUND = 'Not found, or this agent may not access it.';
 
 	/** The refusal for a change that cannot be undone, when the caller can read the entry. */
-	private const NOT_UNDOABLE = 'Steadhand cannot undo this change. Only a change to a post\'s title, content or excerpt that update-post or edit-blocks made, and that was saved with its revisions, can be undone. Nothing was changed.';
+	private const NOT_UNDOABLE = 'Steadhand cannot undo this change. Only a change that update-post, edit-blocks, set-post-terms or set-featured-image made, and that was saved with the state it needs, can be undone. Nothing was changed.';
 
 	/** The refusal for an entry that was already undone. */
 	private const ALREADY = 'This change has already been undone, so it cannot be undone again. Nothing was changed.';
@@ -389,7 +389,8 @@ final class UndoChangeTest extends PostWriteTestCase {
 		$agent  = $this->act_as_agent();
 		$before = $this->row( $post );
 
-		foreach ( array( 'steadhand/create-post', 'steadhand/set-post-terms', 'steadhand/set-featured-image', 'steadhand/upload-media' ) as $ability ) {
+		// The two terms and featured-image abilities are undoable now, and have their own tests below.
+		foreach ( array( 'steadhand/create-post', 'steadhand/upload-media' ) as $ability ) {
 			$entry = $this->insert_row(
 				array(
 					'user_id'           => $agent,
@@ -936,7 +937,7 @@ final class UndoChangeTest extends PostWriteTestCase {
 		$entry  = $this->insert_row(
 			array(
 				'user_id'           => $agent,
-				'ability'           => 'steadhand/set-post-terms',
+				'ability'           => 'steadhand/create-post',
 				'object_type'       => 'post',
 				'object_id'         => $post,
 				'result'            => 'ok',

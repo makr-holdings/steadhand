@@ -17,7 +17,7 @@ defined( 'ABSPATH' ) || exit;
 final class Schema {
 
 	/** Version of the table layout. Bump it with any change to the columns or keys. */
-	public const DB_VERSION = '2';
+	public const DB_VERSION = '3';
 
 	/** Option that stores the installed layout version. */
 	public const OPTION = 'steadhand_db_version';
@@ -51,6 +51,20 @@ final class Schema {
 	);
 
 	/**
+	 * Every column of the snapshots table, in the order of its CREATE TABLE in install(). snapshots_ready() checks these names
+	 * against the real table; the schema test compares this list with the columns the table has.
+	 */
+	public const SNAPSHOT_COLUMNS = array(
+		'id',
+		'created_at',
+		'user_id',
+		'kind',
+		'object_type',
+		'object_id',
+		'state',
+	);
+
+	/**
 	 * Returns the full name of the change-log table.
 	 *
 	 * @return string
@@ -59,6 +73,18 @@ final class Schema {
 		global $wpdb;
 
 		return $wpdb->prefix . 'steadhand_log';
+	}
+
+	/**
+	 * Returns the full name of the snapshots table, which holds the saved state that the undo of term and featured-image
+	 * changes restores (SPEC §7). Fixed, like table(); never built from input.
+	 *
+	 * @return string
+	 */
+	public static function snapshots_table(): string {
+		global $wpdb;
+
+		return $wpdb->prefix . 'steadhand_snapshots';
 	}
 
 	/**
@@ -72,6 +98,10 @@ final class Schema {
 	 * written before version 2 have no after-state, so they cannot be undone. The statement is idempotent, so it runs on
 	 * every install. A row written by this version always has an after-state when it is undoable, so it is never changed.
 	 *
+	 * The snapshots table is created in the same way. The version is recorded only when both tables are ready. A missing or
+	 * broken snapshots table does not stop logging: ready() is about the log alone. It only makes the writes that need a
+	 * snapshot not undoable (see SnapshotStore).
+	 *
 	 * This is the activation path, so it always tries, whatever the back-off says.
 	 *
 	 * @return void
@@ -81,8 +111,9 @@ final class Schema {
 
 		require_once ABSPATH . 'wp-admin/includes/upgrade.php';
 
-		$table   = self::table();
-		$charset = $wpdb->get_charset_collate();
+		$table     = self::table();
+		$snapshots = self::snapshots_table();
+		$charset   = $wpdb->get_charset_collate();
 
 		// dbDelta() needs one column per line, two spaces before PRIMARY KEY, and KEY rather than INDEX.
 		$sql = "CREATE TABLE {$table} (
@@ -107,9 +138,24 @@ final class Schema {
   KEY user_id_id (user_id, id)
 ) {$charset};";
 
+		// The snapshots table: a binary-safe JSON state per saved snapshot. Its state column holds a JSON document that
+		// SnapshotStore::save() encodes and find() decodes.
+		$snapshots_sql = "CREATE TABLE {$snapshots} (
+  id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  created_at DATETIME NOT NULL,
+  user_id BIGINT UNSIGNED NOT NULL DEFAULT 0,
+  kind VARCHAR(32) NOT NULL DEFAULT '',
+  object_type VARCHAR(32) NOT NULL DEFAULT '',
+  object_id BIGINT UNSIGNED NOT NULL DEFAULT 0,
+  state LONGTEXT NOT NULL,
+  PRIMARY KEY  (id),
+  KEY created_at (created_at)
+) {$charset};";
+
 		$ready = self::quietly(
-			static function () use ( $sql ): bool {
+			static function () use ( $sql, $snapshots_sql ): bool {
 				dbDelta( $sql );
+				dbDelta( $snapshots_sql );
 
 				return self::ready();
 			}
@@ -124,6 +170,10 @@ final class Schema {
 				static fn(): mixed => $wpdb->query( $wpdb->prepare( "UPDATE {$table} SET undoable = %d WHERE undoable = %d AND after_snapshot_id = %d", 0, 1, 0 ) ) // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared,WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching -- The table name is fixed (see table()); every value is bound by prepare().
 			);
 			$ready   = false !== $cleared;
+		}
+
+		if ( $ready ) {
+			$ready = self::snapshots_ready();
 		}
 
 		if ( $ready ) {
@@ -160,18 +210,38 @@ final class Schema {
 	 * @return bool
 	 */
 	public static function ready(): bool {
+		return self::columns_ready( self::table(), self::REQUIRED_COLUMNS );
+	}
+
+	/**
+	 * Whether the snapshots table is usable: it exists and has every column in SNAPSHOT_COLUMNS. Checked the same way as
+	 * ready(). A failed check reports false and prints nothing.
+	 *
+	 * @return bool
+	 */
+	public static function snapshots_ready(): bool {
+		return self::columns_ready( self::snapshots_table(), self::SNAPSHOT_COLUMNS );
+	}
+
+	/**
+	 * Whether a table exists and has every one of the given columns.
+	 *
+	 * @param string   $table    Fixed table name.
+	 * @param string[] $required Column names the code writes.
+	 * @return bool
+	 */
+	private static function columns_ready( string $table, array $required ): bool {
 		global $wpdb;
 
-		if ( ! self::exists() ) {
+		if ( ! self::table_exists( $table ) ) {
 			return false;
 		}
 
-		$table   = self::table();
 		$columns = self::quietly(
 			static fn(): mixed => $wpdb->get_col( "SHOW COLUMNS FROM {$table}" ) // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- The table name is fixed (see table()); SHOW COLUMNS cannot bind an identifier.
 		);
 
-		return is_array( $columns ) && array() === array_diff( self::REQUIRED_COLUMNS, $columns );
+		return is_array( $columns ) && array() === array_diff( $required, $columns );
 	}
 
 	/**
@@ -181,11 +251,21 @@ final class Schema {
 	 * @return bool
 	 */
 	public static function exists(): bool {
+		return self::table_exists( self::table() );
+	}
+
+	/**
+	 * Whether a table exists. Errors are suppressed and read as false.
+	 *
+	 * @param string $table Fixed table name.
+	 * @return bool
+	 */
+	private static function table_exists( string $table ): bool {
 		global $wpdb;
 
 		$found = self::quietly(
 			static fn(): mixed => $wpdb->get_var( // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching -- A table check must not be cached.
-				$wpdb->prepare( 'SHOW TABLES LIKE %s', $wpdb->esc_like( self::table() ) )
+				$wpdb->prepare( 'SHOW TABLES LIKE %s', $wpdb->esc_like( $table ) )
 			)
 		);
 
@@ -211,16 +291,18 @@ final class Schema {
 	}
 
 	/**
-	 * Drops the change-log table and removes its options. Called by uninstall.php.
+	 * Drops the change-log and snapshots tables and removes its options. Called by uninstall.php.
 	 *
 	 * @return void
 	 */
 	public static function uninstall(): void {
 		global $wpdb;
 
-		// The table name is fixed (see table()), so there is nothing to bind. The schema change is the point.
-		$table = self::table();
+		// The table names are fixed (see table() and snapshots_table()), so there is nothing to bind. The schema change is the point.
+		$table     = self::table();
+		$snapshots = self::snapshots_table();
 		$wpdb->query( "DROP TABLE IF EXISTS {$table}" ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.DirectDatabaseQuery.SchemaChange,WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- Fixed table name; uninstall drops the table.
+		$wpdb->query( "DROP TABLE IF EXISTS {$snapshots}" ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.DirectDatabaseQuery.SchemaChange,WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- Fixed table name; uninstall drops the table.
 
 		delete_option( self::OPTION );
 		delete_option( self::PRUNE_OPTION );

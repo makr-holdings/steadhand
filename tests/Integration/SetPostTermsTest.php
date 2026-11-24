@@ -77,17 +77,20 @@ final class SetPostTermsTest extends PostWriteTestCase {
 	}
 
 	/**
-	 * Runs a change once, the first time WordPress reads a post's terms after this is called. The ability's first read of
-	 * the terms comes after its check and before its write, so the change lands between them.
+	 * Runs a change once, the first time WordPress reads a post's terms after this is called, or the Nth time when $read is N.
+	 * Since set-post-terms records the before state, its first read is the snapshot's; its second read is the call's own, and
+	 * the change lands between that read and the write when $read is 2.
 	 *
 	 * @param callable $change What to do.
+	 * @param int      $read   Fire on this read (1 is the first). Reads before it pass through unchanged.
 	 */
-	private function once_after_the_first_read( callable $change ): void {
+	private function once_after_the_first_read( callable $change, int $read = 1 ): void {
 		$fired = false;
+		$reads = 0;
 		add_filter(
 			'wp_get_object_terms',
-			static function ( $terms ) use ( &$fired, $change ) {
-				if ( ! $fired ) {
+			static function ( $terms ) use ( &$fired, &$reads, $change, $read ) {
+				if ( ! $fired && ++$reads >= $read ) {
 					$fired = true;
 					$change();
 				}
@@ -845,7 +848,8 @@ final class SetPostTermsTest extends PostWriteTestCase {
 		$this->assertSame( self::ABILITY, $row['ability'] );
 		$this->assertSame( 'post', $row['object_type'] );
 		$this->assertSame( $post, (int) $row['object_id'] );
-		$this->assertSame( 0, (int) $row['after_snapshot_id'] );
+		$this->assertSame( 1, (int) $row['undoable'] );
+		$this->assertGreaterThan( 0, (int) $row['after_snapshot_id'] );
 		$this->assertStringContainsString( (string) $tag, (string) $row['input'] );
 		$this->assertStringNotContainsString( 'Secret Name', (string) $row['input'] );
 	}
@@ -1237,8 +1241,10 @@ final class SetPostTermsTest extends PostWriteTestCase {
 			$extra = $this->term( 'post_tag', "Extra $mode" );
 			$mine  = $this->term( 'post_tag', "Mine $mode" );
 			wp_set_object_terms( $post, array( $first ), 'post_tag', false );
+			// The second read is the call's own read (the first is the snapshot's), so the term is added after it.
 			$this->once_after_the_first_read(
-				static fn() => wp_set_object_terms( $post, array( $extra ), 'post_tag', true )
+				static fn() => wp_set_object_terms( $post, array( $extra ), 'post_tag', true ),
+				2
 			);
 
 			$result = $this->execute_ability(
