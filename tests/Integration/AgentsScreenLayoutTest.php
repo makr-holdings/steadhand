@@ -272,7 +272,7 @@ final class AgentsScreenLayoutTest extends TestCase {
 		$this->assertStringNotContainsString( '<form', $html );
 	}
 
-	public function test_a_detail_request_for_a_mixed_role_user_prints_the_refusal_and_nothing_about_the_user(): void {
+	public function test_a_detail_request_for_a_mixed_role_user_shows_the_normal_list_warning_and_the_fixed_notice(): void {
 		$login = 'layout-mixed-login';
 		$mixed = self::factory()->user->create(
 			array(
@@ -282,14 +282,67 @@ final class AgentsScreenLayoutTest extends TestCase {
 		);
 		get_userdata( $mixed )->add_role( Roles::ROLE );
 		$this->as_user( $this->admin() );
-		$_GET = array( 'agent' => (string) $mixed );
 
+		$_GET = array();
+		$list = $this->render();
+
+		$_GET = array( 'agent' => (string) $mixed );
 		$html = $this->render();
 
-		$this->assertStringContainsString( 'That user is not a dedicated agent.', $html );
-		$this->assertStringNotContainsString( $login, $html, 'Not even the list warning names the user the request refused.' );
+		$notice = '<div class="notice notice-error"><p>That user is not a dedicated agent.</p></div>';
+		$this->assertStringContainsString( $notice, $html );
+		$this->assertStringContainsString( $login . ': This user also has another role', $html, 'The list prints its normal warning for the mixed-role holder.' );
+		$this->assertSame( $list, str_replace( $notice, '', $html ), 'The fallback is the normal list output plus the fixed notice, and nothing else.' );
 		$this->assertStringNotContainsString( '<h2>', $html );
 		$this->assertStringNotContainsString( '<form', $html );
+	}
+
+	public function test_a_detail_request_for_an_administrator_or_a_missing_user_adds_nothing_about_that_user_to_the_list(): void {
+		$this->as_user( $this->admin() );
+
+		$_GET = array();
+		$list = $this->render();
+
+		$admin = self::factory()->user->create(
+			array(
+				'role'       => 'administrator',
+				'user_login' => 'layout-admin-plain',
+			)
+		);
+
+		$_GET = array( 'agent' => (string) $admin );
+		$html = $this->render();
+		$this->assertSame( $list, str_replace( '<div class="notice notice-error"><p>That user is not a dedicated agent.</p></div>', '', $html ) );
+		$this->assertStringNotContainsString( 'layout-admin-plain', $html );
+
+		$_GET = array( 'agent' => '987654321' );
+		$html = $this->render();
+		$this->assertSame( $list, str_replace( '<div class="notice notice-error"><p>That user is not a dedicated agent.</p></div>', '', $html ) );
+	}
+
+	public function test_a_create_post_with_an_invalid_nonce_dies_and_no_posted_value_is_printed(): void {
+		$this->as_user( $this->admin() );
+		$marker = 'zz-marker-zz';
+
+		ob_start();
+		$result = $this->post(
+			AgentsHandler::ACTION_CREATE,
+			array(
+				'username'             => $marker,
+				'label'                => 'Desk app',
+				'capabilities_present' => '1',
+				'capabilities'         => array( Capabilities::CONNECT ),
+				'_wpnonce'             => 'not-a-valid-nonce',
+			)
+		);
+		$output = (string) ob_get_clean();
+
+		$this->assertSame( 'died', $result, 'The guard refuses a bad nonce with wp_die().' );
+		$this->assertFalse( username_exists( $marker ), 'No user is made.' );
+		$this->assertStringNotContainsString( $marker, $output );
+
+		$html = $this->render();
+		$this->assertStringNotContainsString( $marker, $html );
 	}
 
 	public function test_malformed_agent_and_view_arguments_fall_back_to_the_list(): void {
@@ -597,7 +650,7 @@ final class AgentsScreenLayoutTest extends TestCase {
 		$this->assertTrue( $boxes[ Capabilities::READ ] );
 	}
 
-	public function test_a_get_of_the_add_view_after_a_refused_create_shows_the_defaults(): void {
+	public function test_a_new_request_for_the_add_view_after_a_refused_create_shows_the_defaults(): void {
 		self::factory()->user->create( array( 'user_login' => 'taken-three' ) );
 		$this->refused_create(
 			array(
@@ -619,6 +672,30 @@ final class AgentsScreenLayoutTest extends TestCase {
 			$this->assertSame( true === ( $defaults[ $capability ] ?? false ), $checked, $capability );
 		}
 		$this->assertStringNotContainsString( 'taken-three', $html );
+	}
+
+	public function test_a_get_on_the_same_screen_after_a_refused_create_shows_the_defaults(): void {
+		self::factory()->user->create( array( 'user_login' => 'taken-four' ) );
+		$this->refused_create(
+			array(
+				'username'             => 'taken-four',
+				'capabilities_present' => '1',
+				'capabilities'         => array( Capabilities::CONNECT ),
+			)
+		);
+
+		// The same screen object now receives a GET of view=new. The posted create must not be drawn again.
+		$_POST                     = array();
+		$_SERVER['REQUEST_METHOD'] = 'GET';
+		$_GET                      = array( 'view' => 'new' );
+		$this->screen->process_post();
+
+		$html     = $this->render();
+		$defaults = Capabilities::agent_defaults();
+		foreach ( $this->checkboxes( $html ) as $capability => $checked ) {
+			$this->assertSame( true === ( $defaults[ $capability ] ?? false ), $checked, $capability );
+		}
+		$this->assertStringNotContainsString( 'taken-four', $html );
 	}
 
 	public function test_after_a_successful_create_a_later_get_never_shows_the_password(): void {

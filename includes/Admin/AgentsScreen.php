@@ -87,6 +87,9 @@ final class AgentsScreen {
 	 * @return string|null
 	 */
 	public function process_post(): ?string {
+		// Every request starts with no posted create, so a GET after a refused create draws the defaults, not the posted values.
+		$this->posted_create = null;
+
 		$method = isset( $_SERVER['REQUEST_METHOD'] ) ? strtoupper( sanitize_text_field( wp_unslash( (string) $_SERVER['REQUEST_METHOD'] ) ) ) : ''; // phpcs:ignore WordPress.Security.ValidatedSanitizedInput.InputNotSanitized,WordPress.Security.ValidatedSanitizedInput.MissingUnslash -- Sanitized on this line; it is only compared.
 		if ( 'POST' !== $method ) {
 			return null;
@@ -221,7 +224,7 @@ final class AgentsScreen {
 		} elseif ( 'detail' === $view['mode'] && null !== $view['agent'] ) {
 			$this->agent_view( $view['agent'], $available );
 		} else {
-			$this->list_view( $view['hidden'] );
+			$this->list_view();
 		}
 
 		echo '</div>';
@@ -229,11 +232,12 @@ final class AgentsScreen {
 
 	/**
 	 * Decides which view to show. A POST's response shows the view its action set; a GET reads view=new or agent=<digits>. A detail
-	 * request for a user who is not a dedicated agent falls back to the list, and the list then leaves that user out, so nothing about
-	 * it is printed. The add view needs Application Passwords and create_users; without them it falls back to the list.
+	 * request for a user who is not a dedicated agent falls back to the list, with the fixed "not a dedicated agent" notice above it, and
+	 * the list prints its normal warnings. Nothing about that user is printed except what the list prints for any holder of the agent role
+	 * (a mixed-role warning). The add view needs Application Passwords and create_users; without them it falls back to the list.
 	 *
 	 * @param bool $available Whether Application Passwords are available on the site.
-	 * @return array{mode: string, agent: ?\WP_User, hidden: int, refused: bool}
+	 * @return array{mode: string, agent: ?\WP_User, refused: bool}
 	 */
 	private function resolve_view( bool $available ): array {
 		$requested = null !== $this->after
@@ -245,7 +249,6 @@ final class AgentsScreen {
 				return array(
 					'mode'    => 'add',
 					'agent'   => null,
-					'hidden'  => 0,
 					'refused' => false,
 				);
 			}
@@ -255,7 +258,6 @@ final class AgentsScreen {
 				return array(
 					'mode'    => 'detail',
 					'agent'   => $agent,
-					'hidden'  => 0,
 					'refused' => false,
 				);
 			}
@@ -263,7 +265,6 @@ final class AgentsScreen {
 			return array(
 				'mode'    => 'list',
 				'agent'   => null,
-				'hidden'  => $requested['id'],
 				'refused' => true,
 			);
 		}
@@ -271,7 +272,6 @@ final class AgentsScreen {
 		return array(
 			'mode'    => 'list',
 			'agent'   => null,
-			'hidden'  => 0,
 			'refused' => false,
 		);
 	}
@@ -451,13 +451,12 @@ final class AgentsScreen {
 	}
 
 	/**
-	 * The list view: one table of the dedicated agents, with the warning for a user who holds the agent role and another role. The
-	 * user $hidden is left out of the warnings, so a refused detail request prints nothing about that user. The list has no forms.
+	 * The list view: one table of the dedicated agents, with the warning for each user who holds the agent role and another role. The
+	 * warnings are the same whatever the request, including a refused detail request. The list has no forms.
 	 *
-	 * @param int $hidden A user ID to leave out, or 0 for none.
 	 * @return void
 	 */
-	private function list_view( int $hidden ): void {
+	private function list_view(): void {
 		$users = get_users(
 			array(
 				'role'    => Roles::ROLE,
@@ -475,7 +474,7 @@ final class AgentsScreen {
 
 			if ( Agents::is_agent( $user ) ) {
 				$agents[] = $user;
-			} elseif ( Agents::holds_agent_role( $user ) && $user->ID !== $hidden ) {
+			} elseif ( Agents::holds_agent_role( $user ) ) {
 				$this->notice(
 					'warning',
 					sprintf(

@@ -234,7 +234,7 @@ final class AgentsCreateCapabilitiesTest extends TestCase {
 		}
 	}
 
-	public function test_names_that_are_not_offered_are_never_stored(): void {
+	public function test_non_offered_non_steadhand_names_are_never_stored_and_non_offered_steadhand_names_are_stored_false(): void {
 		$this->assertNotContains( Capabilities::SETTINGS, $this->handler->offered_capabilities(), 'Precondition: settings is not offered.' );
 		$this->assertNotContains( Capabilities::MENUS, $this->handler->offered_capabilities(), 'Precondition: menus is not offered.' );
 
@@ -284,6 +284,9 @@ final class AgentsCreateCapabilitiesTest extends TestCase {
 		$this->assertFalse( $made, 'The password step was never reached.' );
 	}
 
+	/**
+	 * Proves the outcome (refused, rolled back, no password made), not which of the two catches handled the throw.
+	 */
 	public function test_a_capability_write_that_throws_refuses_and_leaves_no_user(): void {
 		$made = false;
 		$this->on(
@@ -410,6 +413,11 @@ final class AgentsCreateCapabilitiesTest extends TestCase {
 
 		wp_set_current_user( $user_id );
 		$this->assertTrue( ( new Plugin() )->server()->can_connect(), 'Connect was checked, so the transport gate passes; read is refused per ability.' );
+
+		// GetSiteInfo needs steadhand_read. The agent holds connect, so the refusal here can only come from read.
+		$authorized = ( new Pipeline( new SpyLogger() ) )->authorize( new GetSiteInfo(), array() );
+		$this->assertInstanceOf( \WP_Error::class, $authorized );
+		$this->assertSame( 'steadhand_forbidden', $authorized->get_error_code() );
 	}
 
 	public function test_a_listener_that_adds_a_capability_after_the_password_refuses_and_rolls_back(): void {
@@ -436,6 +444,20 @@ final class AgentsCreateCapabilitiesTest extends TestCase {
 		$result = $this->create( 'flipped-publish', array( Capabilities::READ ) );
 
 		$this->assert_refused( $result, 'create_failed', 'flipped-publish' );
+	}
+
+	public function test_a_listener_that_sets_a_non_offered_steadhand_capability_true_refuses_and_rolls_back(): void {
+		$this->assertNotContains( Capabilities::MENUS, $this->handler->offered_capabilities(), 'Precondition: menus is not offered.' );
+		$this->on(
+			'steadhand_agent_created',
+			static function ( $user_id ): void {
+				get_userdata( $user_id )->add_cap( Capabilities::MENUS, true );
+			}
+		);
+
+		$result = $this->create( 'menus-listener', array( Capabilities::READ ) );
+
+		$this->assert_refused( $result, 'create_failed', 'menus-listener' );
 	}
 
 	public function test_the_capabilities_changed_action_does_not_fire_from_create(): void {

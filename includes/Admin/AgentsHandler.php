@@ -181,7 +181,8 @@ final class AgentsHandler {
 			return $refused;
 		}
 
-		// Null keeps the role's defaults. An array becomes an explicit true or false for every offered capability.
+		// Null keeps the role's defaults. An array becomes an explicit true or false for every Steadhand capability (Capabilities::all()):
+		// the offered ones with the posted value, and the rest false.
 		$values = null === $capabilities ? null : $this->values_from( $capabilities );
 
 		if ( 1 !== preg_match( self::USERNAME_PATTERN, $username ) || ! validate_username( $username ) ) {
@@ -648,7 +649,8 @@ final class AgentsHandler {
 	 * The values a list of checked boxes sets, for every Steadhand capability in Capabilities::all(). Only strings are read. An offered
 	 * capability maps to whether its name was in the list. Every other capability maps to false, so it is written as an explicit false
 	 * and nothing the agent role grants reaches the agent. Only the names of Capabilities::all() are keys, so a name that is not a
-	 * Steadhand capability is never written.
+	 * Steadhand capability is never written. Do not narrow this to the offered names: the explicit false is what stops a capability granted
+	 * to the role from reaching the new agent.
 	 *
 	 * @param array<mixed> $checked The posted values. Anything that is not a string is ignored.
 	 * @return array<string,bool>
@@ -707,7 +709,7 @@ final class AgentsHandler {
 	 *
 	 * @param \WP_User|null           $user     The user as it is now.
 	 * @param string                  $username The posted login.
-	 * @param array<string,bool>|null $values   The offered capabilities and the values the user must store, or null for the role's defaults.
+	 * @param array<string,bool>|null $values   Every Steadhand capability and the value the user must store (values_from()), or null for the role's defaults.
 	 * @return string|null
 	 */
 	private function new_user_problem( ?\WP_User $user, string $username, ?array $values = null ): ?string {
@@ -737,8 +739,9 @@ final class AgentsHandler {
 	 * Whether a new user holds exactly the expected roles and capabilities, and nothing else. That means two things, both checked against
 	 * the stored data: the user's roles are exactly [steadhand_agent] (Agents::is_agent()), and the stored capability map ($user->caps, the
 	 * wp_capabilities meta) has exactly the expected keys, each with exactly the expected value. The expected map is the agent role set to
-	 * true, plus the offered capabilities when $values is given (expected_caps()). With $values null nothing else may be stored, not even a
-	 * capability set to false. A value must be the bool expected, so a stored '1' or a true where false was written is refused.
+	 * true, plus every Steadhand capability with its value when $values is given (expected_caps()). With $values null nothing else may be
+	 * stored, not even a capability set to false. A value must be the bool expected, so a stored '1' or a true where false was written is
+	 * refused.
 	 *
 	 * Call it with null before any capability is written, and with the posted values for the final check.
 	 *
@@ -746,7 +749,7 @@ final class AgentsHandler {
 	 * but is not in the roles, so Agents::is_agent() alone would pass it.
 	 *
 	 * @param \WP_User                $user   The user.
-	 * @param array<string,bool>|null $values The offered capabilities and the values the user must store, or null for the role's defaults.
+	 * @param array<string,bool>|null $values Every Steadhand capability and the value the user must store (values_from()), or null for the role's defaults.
 	 * @return bool
 	 */
 	private static function holds_only_agent_role( \WP_User $user, ?array $values = null ): bool {
@@ -772,7 +775,7 @@ final class AgentsHandler {
 	 * count here; holds_only_agent_role() refuses that.
 	 *
 	 * @param \WP_User                $user   The user.
-	 * @param array<string,bool>|null $values The offered capabilities and the values the user must store, or null for the role's defaults.
+	 * @param array<string,bool>|null $values Every Steadhand capability and the value the user must store (values_from()), or null for the role's defaults.
 	 * @return bool
 	 */
 	private static function holds_anything_else( \WP_User $user, ?array $values = null ): bool {
