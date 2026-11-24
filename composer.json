@@ -36,7 +36,10 @@
 	"scripts": {
 		"phpcs": "phpcs",
 		"phpcbf": "phpcbf",
-		"test": "npx wp-env run tests-cli --env-cwd=wp-content/plugins/steadhand vendor/bin/phpunit",
+		"test": [
+			"Composer\\Config::disableProcessTimeout",
+			"npx wp-env run tests-cli --env-cwd=wp-content/plugins/steadhand vendor/bin/phpunit"
+		],
 		"dev-updater:install": "composer install -d includes/Dev"
 	}
 }
