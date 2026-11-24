@@ -723,6 +723,7 @@ final class AgentsScreenTest extends TestCase {
 
 		$this->assertIsString( $url );
 		$this->assertStringContainsString( 'agents=password_revoked', $url );
+		$this->assertSame( (string) $agent, $this->query_of( $url )['agent'] ?? '' );
 		$this->assertStringNotContainsString( $uuid, $url );
 	}
 
@@ -788,16 +789,43 @@ final class AgentsScreenTest extends TestCase {
 		);
 
 		$this->assertStringContainsString( 'agents=capabilities_saved', (string) $url );
+		$this->assertSame( (string) $agent, $this->query_of( (string) $url )['agent'] ?? '' );
+	}
+
+	/**
+	 * The query arguments of a redirect URL.
+	 *
+	 * @param string $url The URL.
+	 * @return array<string, string>
+	 */
+	private function query_of( string $url ): array {
+		$query = (string) wp_parse_url( $url, PHP_URL_QUERY );
+		parse_str( $query, $args );
+
+		return array_map( 'strval', $args );
 	}
 
 	public function test_the_screen_refuses_a_viewer_who_is_not_an_administrator_or_holds_the_agent_role(): void {
+		$agent = $this->agent( 'refused-agent', 1 );
+		$views = array(
+			array(),
+			array( 'view' => 'new' ),
+			array( 'agent' => (string) $agent ),
+		);
+
 		$this->as_user( self::factory()->user->create( array( 'role' => 'editor' ) ) );
-		$this->assertSame( 'died', $this->call( fn() => $this->render() ) );
+		foreach ( $views as $query ) {
+			$_GET = $query;
+			$this->assertSame( 'died', $this->call( fn() => $this->render() ), wp_json_encode( $query ) );
+		}
 
 		$admin = $this->admin();
 		get_userdata( $admin )->add_role( Roles::ROLE );
 		$this->as_user( $admin );
-		$this->assertSame( 'died', $this->call( fn() => $this->render() ) );
+		foreach ( $views as $query ) {
+			$_GET = $query;
+			$this->assertSame( 'died', $this->call( fn() => $this->render() ), wp_json_encode( $query ) );
+		}
 	}
 
 	public function test_a_label_with_markup_is_escaped_on_the_screen(): void {
@@ -808,6 +836,7 @@ final class AgentsScreenTest extends TestCase {
 		update_user_meta( $agent, \WP_Application_Passwords::USERMETA_KEY_APPLICATION_PASSWORDS, $items );
 
 		$this->as_user( $this->admin() );
+		$_GET = array( 'agent' => (string) $agent );
 		$html = $this->render();
 
 		$this->assertStringNotContainsString( '<img src=x', $html );
@@ -837,11 +866,16 @@ final class AgentsScreenTest extends TestCase {
 		$this->as_user( $this->admin() );
 
 		$html = $this->render();
-
 		$this->assertStringContainsString( 'visible-agent', $html );
+		$this->assertStringNotContainsString( '<form', $html );
+
+		$_GET = array( 'agent' => (string) $agent );
+		$html = $this->render();
+		$this->assertStringContainsString( '<h2>visible-agent</h2>', $html );
 		$this->assertStringNotContainsString( 'name="' . AgentsHandler::FIELD . '"', $html );
 		$this->assertStringNotContainsString( 'name="username"', $html );
 		$this->assertStringNotContainsString( 'name="capabilities[]"', $html );
+		$this->assertStringNotContainsString( 'name="label"', $html );
 	}
 
 	public function test_an_unknown_code_prints_nothing_and_a_known_one_prints_its_notice(): void {
@@ -903,7 +937,7 @@ final class AgentsScreenTest extends TestCase {
 		$this->assertSame( array( $result['user_id'], 'Hooked' ), $seen );
 	}
 
-	public function test_the_row_action_fires_per_dedicated_agent_with_the_user(): void {
+	public function test_the_row_action_fires_once_in_the_detail_view_with_the_user(): void {
 		$agent = $this->agent( 'row-agent', 1 );
 		$this->agent( 'row-agent-two', 1 );
 		$this->as_user( $this->admin() );
@@ -911,15 +945,20 @@ final class AgentsScreenTest extends TestCase {
 		$this->on(
 			'steadhand_admin_agent_row',
 			static function ( $user ) use ( &$seen ) {
-				$seen[] = $user->ID;
+				$seen[] = $user;
 			},
 			10
 		);
 
 		$this->render();
+		$this->assertSame( array(), $seen, 'The list view does not fire it.' );
 
-		$this->assertContains( $agent, $seen );
-		$this->assertCount( 2, $seen );
+		$_GET = array( 'agent' => (string) $agent );
+		$this->render();
+
+		$this->assertCount( 1, $seen );
+		$this->assertInstanceOf( \WP_User::class, $seen[0] );
+		$this->assertSame( $agent, $seen[0]->ID );
 	}
 
 	public function test_a_throwing_listener_breaks_nothing(): void {
@@ -938,7 +977,8 @@ final class AgentsScreenTest extends TestCase {
 		$saved = $this->handler->set_capabilities( $this->nonce( AgentsHandler::ACTION_CAPABILITIES, $agent ), $agent, array( Capabilities::READ ) );
 		$this->assertSame( 'capabilities_saved', $saved['code'] );
 
-		$this->assertStringContainsString( 'throw-agent', $this->render() );
+		$_GET = array( 'agent' => (string) $agent );
+		$this->assertStringContainsString( '<h2>throw-agent</h2>', $this->render() );
 	}
 
 	/**

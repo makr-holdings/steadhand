@@ -155,22 +155,34 @@ final class AgentsHandler {
 	}
 
 	/**
-	 * Creates a dedicated agent with its first Application Password. The agent has the role's default capabilities only.
+	 * Creates a dedicated agent with its first Application Password.
 	 *
-	 * The new user is checked after each write. It must hold the agent role and nothing else, and the login must be the one posted.
-	 * The steadhand_agent_created action fires once the password is made, and then the final check runs. A failed check, or a listener
-	 * that throws, rolls the request back (see roll_back()) and refuses. No password is returned then.
+	 * $capabilities decides the agent's Steadhand capabilities. Null gives the role's defaults, and no user-level capability is written.
+	 * An array is the list of checked boxes: only strings are read, and every Steadhand capability (Capabilities::all()) is written. An
+	 * offered one is written as true when it was checked and as false when it was not; a capability that is not offered is always
+	 * written as false, so a grant something else made to the agent role never reaches the agent. So an empty array gives an agent that
+	 * cannot do anything.
 	 *
-	 * @param string $nonce    The nonce from the form.
-	 * @param string $username The requested login name, after wp_unslash().
-	 * @param string $label    The label of the first Application Password, after wp_unslash().
+	 * The order is: the login count and the first strict check (the user holds only the agent role), then the capability writes, which
+	 * are read back, then the Application Password, then the steadhand_agent_created action, then the final strict check against the
+	 * posted values. Each check is made on the user as it is then. The capability writes come before the password, so a refused agent
+	 * never holds one. A failed check, or a listener that throws, rolls the request back (see roll_back()) and refuses. No password is
+	 * returned then. This method does not fire steadhand_agent_capabilities_changed.
+	 *
+	 * @param string            $nonce        The nonce from the form.
+	 * @param string            $username     The requested login name, after wp_unslash().
+	 * @param string            $label        The label of the first Application Password, after wp_unslash().
+	 * @param array<mixed>|null $capabilities Null for the role's defaults, or the checked capability names from the form.
 	 * @return array{code: string, ok: bool, user_id: int, secret: ?array{username: string, password: string}}
 	 */
-	public function create( string $nonce, string $username, string $label ): array {
+	public function create( string $nonce, string $username, string $label, ?array $capabilities = null ): array {
 		$refused = $this->guard( $nonce, self::nonce_action( self::ACTION_CREATE ), 'create_users' );
 		if ( null !== $refused ) {
 			return $refused;
 		}
+
+		// Null keeps the role's defaults. An array becomes an explicit true or false for every offered capability.
+		$values = null === $capabilities ? null : $this->values_from( $capabilities );
 
 		if ( 1 !== preg_match( self::USERNAME_PATTERN, $username ) || ! validate_username( $username ) ) {
 			return $this->result( 'invalid_username' );
@@ -218,7 +230,7 @@ final class AgentsHandler {
 				return $this->after_failed_insert( $new_id, $username );
 			}
 
-			return $this->verify_new_agent( (int) $inserted, $username, $label );
+			return $this->verify_new_agent( (int) $inserted, $username, $label, $values );
 		} catch ( \Throwable ) {
 			return $this->after_failed_insert( $new_id, $username );
 		} finally {
@@ -227,15 +239,17 @@ final class AgentsHandler {
 	}
 
 	/**
-	 * The checks and writes after the user row exists: the login count, the new user's state, the first Application Password, the
-	 * steadhand_agent_created action, and the final check. Every refusal rolls the user back through refuse().
+	 * The checks and writes after the user row exists: the login count, the new user's state, the capability writes (when $values is
+	 * not null), the first Application Password, the steadhand_agent_created action, and the final check. Every refusal rolls the user
+	 * back through refuse().
 	 *
-	 * @param int    $user_id  The new user.
-	 * @param string $username The posted login.
-	 * @param string $label    The label of the first Application Password.
+	 * @param int                     $user_id  The new user.
+	 * @param string                  $username The posted login.
+	 * @param string                  $label    The label of the first Application Password.
+	 * @param array<string,bool>|null $values   Each Steadhand capability and the value it is written with (values_from()), or null for the role's defaults.
 	 * @return array{code: string, ok: bool, user_id: int, secret: ?array{username: string, password: string}}
 	 */
-	private function verify_new_agent( int $user_id, string $username, string $label ): array {
+	private function verify_new_agent( int $user_id, string $username, string $label, ?array $values ): array {
 		// Two requests can pass username_exists() together, and user_login has no unique index. Count the login again. A count that
 		// cannot be read is a refusal.
 		$count = $this->login_count( $username );
@@ -247,6 +261,7 @@ final class AgentsHandler {
 			return $this->refuse( $user_id, 'username_taken', $username );
 		}
 
+		// Before any capability is written, so the user must still hold only the agent role.
 		$user    = $this->fresh_user( $user_id );
 		$problem = $this->new_user_problem( $user, $username );
 		if ( null !== $problem ) {
@@ -255,6 +270,11 @@ final class AgentsHandler {
 
 		if ( null === $user || ! wp_is_application_passwords_available_for_user( $user ) ) {
 			return $this->refuse( $user_id, 'app_passwords_unavailable', $username );
+		}
+
+		// The capabilities are written before the password, so a refused agent never holds one.
+		if ( null !== $values && ! $this->grant_capabilities( $user_id, $values ) ) {
+			return $this->refuse( $user_id, 'create_failed', $username );
 		}
 
 		$created = \WP_Application_Passwords::create_new_application_password( $user_id, array( 'name' => $label ) );
@@ -279,8 +299,8 @@ final class AgentsHandler {
 			// A listener must not break the action. The final check below decides, whatever the listener did.
 		}
 
-		// The final check is the same strict check as the first, on the user as it is now.
-		$problem = $this->new_user_problem( $this->fresh_user( $user_id ), $username );
+		// The final check is the same strict check, on the user as it is now, against the posted values.
+		$problem = $this->new_user_problem( $this->fresh_user( $user_id ), $username, $values );
 		if ( null !== $problem ) {
 			return $this->refuse( $user_id, $problem, $username );
 		}
@@ -625,55 +645,142 @@ final class AgentsHandler {
 	}
 
 	/**
-	 * Why a freshly created user fails the strict check, or null when it passes. The login must be the posted one, and the user must hold
-	 * nothing but the agent role (holds_only_agent_role()). A user that holds any other role or capability gets 'extra_role'. Any other
-	 * failure (a missing user, a wrong login, a missing role) gets 'create_failed'.
+	 * The values a list of checked boxes sets, for every Steadhand capability in Capabilities::all(). Only strings are read. An offered
+	 * capability maps to whether its name was in the list. Every other capability maps to false, so it is written as an explicit false
+	 * and nothing the agent role grants reaches the agent. Only the names of Capabilities::all() are keys, so a name that is not a
+	 * Steadhand capability is never written.
 	 *
-	 * @param \WP_User|null $user     The user as it is now.
-	 * @param string        $username The posted login.
+	 * @param array<mixed> $checked The posted values. Anything that is not a string is ignored.
+	 * @return array<string,bool>
+	 */
+	private function values_from( array $checked ): array {
+		$names   = array_values( array_filter( $checked, 'is_string' ) );
+		$offered = $this->offered_capabilities();
+		$values  = array();
+		foreach ( Capabilities::all() as $capability ) {
+			$values[ $capability ] = in_array( $capability, $offered, true ) && in_array( $capability, $names, true );
+		}
+
+		return $values;
+	}
+
+	/**
+	 * Writes every Steadhand capability of a new agent, each with its value, and reads them back. The writes must stick: the user must
+	 * still be a dedicated agent, and every capability must read back as the value it was written with. A throw is a failure.
+	 *
+	 * @param int                $user_id The new user.
+	 * @param array<string,bool> $values  Each Steadhand capability and the value it is written with (values_from()).
+	 * @return bool True when every write is in place and checked.
+	 */
+	private function grant_capabilities( int $user_id, array $values ): bool {
+		try {
+			$user = $this->fresh_user( $user_id );
+			if ( null === $user ) {
+				return false;
+			}
+
+			foreach ( $values as $capability => $grant ) {
+				$user->add_cap( $capability, $grant );
+			}
+
+			$fresh = $this->fresh_user( $user_id );
+			if ( null === $fresh || ! Agents::is_agent( $fresh ) ) {
+				return false;
+			}
+
+			foreach ( $values as $capability => $grant ) {
+				if ( Capabilities::user_has( $fresh, $capability ) !== $grant ) {
+					return false;
+				}
+			}
+
+			return true;
+		} catch ( \Throwable ) {
+			return false;
+		}
+	}
+
+	/**
+	 * Why a new user fails the strict check, or null when it passes. The login must be the posted one, and the user's stored roles and
+	 * capabilities must be exactly the expected ones (holds_only_agent_role()). A user that stores anything outside the expected set gets
+	 * 'extra_role'. Any other failure (a missing user, a wrong login, a missing role, a wrong value) gets 'create_failed'.
+	 *
+	 * @param \WP_User|null           $user     The user as it is now.
+	 * @param string                  $username The posted login.
+	 * @param array<string,bool>|null $values   The offered capabilities and the values the user must store, or null for the role's defaults.
 	 * @return string|null
 	 */
-	private function new_user_problem( ?\WP_User $user, string $username ): ?string {
+	private function new_user_problem( ?\WP_User $user, string $username, ?array $values = null ): ?string {
 		if ( null === $user || $user->user_login !== $username ) {
 			return 'create_failed';
 		}
 
-		if ( self::holds_only_agent_role( $user ) ) {
+		if ( self::holds_only_agent_role( $user, $values ) ) {
 			return null;
 		}
 
-		return self::holds_anything_else( $user ) ? 'extra_role' : 'create_failed';
+		return self::holds_anything_else( $user, $values ) ? 'extra_role' : 'create_failed';
 	}
 
 	/**
-	 * Whether a freshly created user holds nothing but the agent role. That means two things, both checked against the stored data:
-	 * the user's roles are exactly [steadhand_agent] (Agents::is_agent()), and the stored capability map ($user->caps, the
-	 * wp_capabilities meta) has exactly one key, steadhand_agent, set to true. Nothing else may be stored, not even a capability set to
-	 * false. Used only right after creation, when no Steadhand capability has been granted yet.
+	 * The stored capability map a new agent must have: the agent role set to true, and, when values were posted, each Steadhand
+	 * capability with the value it was written with.
+	 *
+	 * @param array<string,bool>|null $values Each Steadhand capability and its value (values_from()), or null.
+	 * @return array<string,bool>
+	 */
+	private static function expected_caps( ?array $values ): array {
+		return array( Roles::ROLE => true ) + ( $values ?? array() );
+	}
+
+	/**
+	 * Whether a new user holds exactly the expected roles and capabilities, and nothing else. That means two things, both checked against
+	 * the stored data: the user's roles are exactly [steadhand_agent] (Agents::is_agent()), and the stored capability map ($user->caps, the
+	 * wp_capabilities meta) has exactly the expected keys, each with exactly the expected value. The expected map is the agent role set to
+	 * true, plus the offered capabilities when $values is given (expected_caps()). With $values null nothing else may be stored, not even a
+	 * capability set to false. A value must be the bool expected, so a stored '1' or a true where false was written is refused.
+	 *
+	 * Call it with null before any capability is written, and with the posted values for the final check.
 	 *
 	 * The caps comparison is what catches a capability or role name that is not a registered role: such a name is stored in the caps
 	 * but is not in the roles, so Agents::is_agent() alone would pass it.
 	 *
-	 * @param \WP_User $user The user.
+	 * @param \WP_User                $user   The user.
+	 * @param array<string,bool>|null $values The offered capabilities and the values the user must store, or null for the role's defaults.
 	 * @return bool
 	 */
-	private static function holds_only_agent_role( \WP_User $user ): bool {
-		$caps = is_array( $user->caps ) ? $user->caps : array();
+	private static function holds_only_agent_role( \WP_User $user, ?array $values = null ): bool {
+		$caps     = is_array( $user->caps ) ? $user->caps : array();
+		$expected = self::expected_caps( $values );
 
-		return Agents::is_agent( $user ) && array( Roles::ROLE ) === array_keys( $caps ) && true === ( $caps[ Roles::ROLE ] ?? null );
+		if ( ! Agents::is_agent( $user ) || array() !== array_diff_key( $caps, $expected ) || array() !== array_diff_key( $expected, $caps ) ) {
+			return false;
+		}
+
+		foreach ( $expected as $capability => $grant ) {
+			if ( ( $caps[ $capability ] ?? null ) !== $grant ) {
+				return false;
+			}
+		}
+
+		return true;
 	}
 
 	/**
-	 * Whether a user stores any role or capability other than the agent role, whatever its value.
+	 * Whether a new user stores any role or capability outside the expected set, whatever its value. A role other than the agent role
+	 * counts, and so does a capability key that is not expected. A value that differs from the expected one on an expected key does not
+	 * count here; holds_only_agent_role() refuses that.
 	 *
-	 * @param \WP_User $user The user.
+	 * @param \WP_User                $user   The user.
+	 * @param array<string,bool>|null $values The offered capabilities and the values the user must store, or null for the role's defaults.
 	 * @return bool
 	 */
-	private static function holds_anything_else( \WP_User $user ): bool {
-		$caps  = is_array( $user->caps ) ? array_map( 'strval', array_keys( $user->caps ) ) : array();
-		$roles = is_array( $user->roles ) ? $user->roles : array();
+	private static function holds_anything_else( \WP_User $user, ?array $values = null ): bool {
+		$caps     = is_array( $user->caps ) ? array_map( 'strval', array_keys( $user->caps ) ) : array();
+		$roles    = is_array( $user->roles ) ? $user->roles : array();
+		$expected = array_map( 'strval', array_keys( self::expected_caps( $values ) ) );
 
-		return array() !== array_diff( $caps, array( Roles::ROLE ) ) || array() !== array_diff( $roles, array( Roles::ROLE ) );
+		return array() !== array_diff( $caps, $expected ) || array() !== array_diff( $roles, array( Roles::ROLE ) );
 	}
 
 	/**
