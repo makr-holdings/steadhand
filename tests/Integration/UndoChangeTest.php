@@ -1048,4 +1048,151 @@ final class UndoChangeTest extends PostWriteTestCase {
 		$this->assert_refused( $result, 'steadhand_update_partial' );
 		$this->assertSame( 0, (int) $this->stored( $entry )['undone_by'] );
 	}
+
+	public function test_six_newer_autosaves_do_not_stop_an_undo_of_a_change_with_no_newer_revision(): void {
+		$post = $this->fixture();
+		$this->act_as_agent();
+		$entry = $this->changed( $post, array( 'title' => 'After' ) );
+
+		// Autosaves are revisions too. Six newer ones would crowd a limited lookup. None is a real revision.
+		for ( $i = 1; $i <= 6; $i++ ) {
+			wp_insert_post(
+				array(
+					'post_type'    => 'revision',
+					'post_status'  => 'inherit',
+					'post_parent'  => $post,
+					'post_title'   => "Autosave $i",
+					'post_content' => self::paragraph( 'Autosave' ),
+					'post_name'    => "$post-autosave-v1",
+				)
+			);
+		}
+
+		$out = $this->output_of( self::UNDO_TOOL, array( 'id' => $entry ) );
+
+		$this->assertTrue( $out['undone'] );
+		$this->assertSame( 'Before title', get_post( $post )->post_title );
+	}
+
+	public function test_a_newer_revision_backdated_to_look_older_still_refuses_the_undo(): void {
+		$post = $this->fixture();
+		$this->act_as_agent();
+		$entry = $this->changed( $post, array( 'title' => 'After' ) );
+
+		// A real revision created after the change, dated in the past, so that a date order would put it before the after-state.
+		wp_insert_post(
+			array(
+				'post_type'     => 'revision',
+				'post_status'   => 'inherit',
+				'post_parent'   => $post,
+				'post_title'    => 'After',
+				'post_content'  => self::paragraph( 'Before' ),
+				'post_excerpt'  => 'Before excerpt',
+				'post_name'     => "$post-revision-later",
+				'post_date'     => '2000-01-01 00:00:00',
+				'post_date_gmt' => '2000-01-01 00:00:00',
+			)
+		);
+		$before = $this->row( $post );
+
+		$this->assert_refused( $this->undo( $entry ), 'steadhand_refused_changed_since', self::CHANGED_SINCE );
+
+		$this->assert_nothing_changed( $before, $post, $entry );
+	}
+
+	public function test_a_failed_revision_query_refuses_the_undo_and_changes_nothing(): void {
+		$post = $this->fixture();
+		$this->act_as_agent();
+		$entry  = $this->changed( $post, array( 'title' => 'After' ) );
+		$before = $this->row( $post );
+
+		add_filter(
+			'query',
+			static function ( string $sql ): string {
+				return str_contains( $sql, "post_type = 'revision' AND post_parent" ) ? 'SELECT no_such_column FROM no_such_table' : $sql;
+			},
+			PHP_INT_MAX - 2
+		);
+
+		$this->assert_refused( $this->undo( $entry ), 'steadhand_refused_changed_since', self::CHANGED_SINCE );
+
+		$this->assert_nothing_changed( $before, $post, $entry );
+	}
+
+	public function test_an_abort_that_cannot_be_applied_is_reported_as_partial_and_the_overwrite_lands(): void {
+		$post = $this->fixture();
+		$this->act_as_agent();
+		$entry = $this->changed( $post, array( 'title' => 'After' ) );
+
+		// Changes the row just before the restore's pre_post_update check, then adds a harmless query right after that check.
+		$listener = static function (): void {
+			global $wpdb;
+
+			$wpdb->query( 'SELECT 1' ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching -- A harmless query, so the next query is not the post's UPDATE.
+		};
+
+		$fired  = false;
+		$inject = function ( array $data, array $postarr, array $unsanitized_postarr, bool $update ) use ( &$fired, $post, $listener ): array {
+			unset( $unsanitized_postarr );
+			if ( ! $fired && $update && (int) ( $postarr['ID'] ?? 0 ) === $post ) {
+				$fired = true;
+				$this->direct_content( $post, 'Changed before the check' );
+
+				// Added after the restore's own pre_post_update check, so it runs after it.
+				add_action( 'pre_post_update', $listener, PHP_INT_MAX );
+			}
+
+			return $data;
+		};
+		add_filter( 'wp_insert_post_data', $inject, PHP_INT_MAX - 1, 4 );
+
+		try {
+			$result = $this->undo( $entry );
+		} finally {
+			remove_filter( 'wp_insert_post_data', $inject, PHP_INT_MAX - 1 );
+			remove_action( 'pre_post_update', $listener, PHP_INT_MAX );
+		}
+
+		$this->assert_refused( $result, 'steadhand_update_partial', 'The post changed while the restore was being saved, and the restore could not be stopped. Check the post before you continue.' );
+		$this->assertSame( 'Before title', $this->row( $post )['post_title'], 'The overwrite landed, as the partial error says.' );
+		$this->assertSame( 0, (int) $this->stored( $entry )['undone_by'] );
+	}
+
+	public function test_a_nested_update_of_the_same_post_during_the_restore_is_not_a_false_success(): void {
+		$post = $this->fixture();
+		$this->act_as_agent();
+		$entry = $this->changed( $post, array( 'title' => 'After' ) );
+
+		// From an earlier hook, during the restore's save, a nested update of the same post.
+		$fired  = false;
+		$nested = function ( array $data, array $postarr, array $unsanitized_postarr, bool $update ) use ( &$fired, $post ): array {
+			unset( $unsanitized_postarr );
+			if ( ! $fired && $update && (int) ( $postarr['ID'] ?? 0 ) === $post ) {
+				$fired = true;
+				wp_update_post(
+					array(
+						'ID'           => $post,
+						'post_content' => 'Nested edit',
+					)
+				);
+			}
+
+			return $data;
+		};
+		add_filter( 'wp_insert_post_data', $nested, PHP_INT_MAX - 1, 4 );
+
+		try {
+			$result = $this->undo( $entry );
+		} finally {
+			remove_filter( 'wp_insert_post_data', $nested, PHP_INT_MAX - 1 );
+		}
+
+		$this->assertTrue( $fired, 'The nested update must have run.' );
+		if ( is_wp_error( $result ) ) {
+			$this->assertSame( 0, (int) $this->stored( $entry )['undone_by'], 'A refused or failed undo does not mark the entry.' );
+		} else {
+			$this->assertSame( 'Before title', $this->row( $post )['post_title'], 'A reported success must hold the restored text.' );
+			$this->assertGreaterThan( 0, (int) $this->stored( $entry )['undone_by'] );
+		}
+	}
 }

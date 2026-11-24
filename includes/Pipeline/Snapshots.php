@@ -183,6 +183,43 @@ final class Snapshots {
 	}
 
 	/**
+	 * Whether a revision of the post that is not an autosave was created after the given revision. Creation order is the
+	 * revision's ID, so this compares IDs and never dates (a date is site-local time, and can move with a clock or a time zone
+	 * change).
+	 *
+	 * The autosave test is core's: wp_is_post_autosave() (wp-includes/revision.php) calls a revision an autosave when its
+	 * post_name contains "{parent}-autosave". This query excludes exactly those rows, with the same substring rule, so an
+	 * autosave never counts. The query is a direct prepared read of the posts table, and it is not limited by the revision
+	 * limit, unlike wp_get_post_revisions().
+	 *
+	 * Fails closed: when the query fails, the answer is true, so the caller refuses.
+	 *
+	 * @param int $post_id     Post ID.
+	 * @param int $revision_id The revision whose successors are looked for.
+	 * @return bool True when a newer non-autosave revision exists, or when the query failed.
+	 */
+	public static function revision_after( int $post_id, int $revision_id ): bool {
+		global $wpdb;
+
+		$pattern = '%' . $wpdb->esc_like( $post_id . '-autosave' ) . '%';
+
+		$previous         = $wpdb->suppress_errors( true );
+		$wpdb->last_error = '';
+		$count            = $wpdb->get_var( // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching -- A live count of the revisions of one post, which must not be cached.
+			$wpdb->prepare( "SELECT COUNT(*) FROM {$wpdb->posts} WHERE post_type = %s AND post_parent = %d AND ID > %d AND post_name NOT LIKE %s", 'revision', $post_id, $revision_id, $pattern ) // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- The table name is core's; every value is bound by prepare().
+		);
+
+		$failed = '' !== (string) $wpdb->last_error || null === $count;
+		$wpdb->suppress_errors( $previous );
+
+		if ( $failed ) {
+			return true;
+		}
+
+		return (int) $count > 0;
+	}
+
+	/**
 	 * Opens the capture for a post: an empty list, and the listener on core's revision action, added once.
 	 *
 	 * @param int $post_id Post ID.
@@ -218,7 +255,7 @@ final class Snapshots {
 	 * @param \WP_Post $post The post.
 	 * @return \WP_Post|null The revision, or null when there is none.
 	 */
-	public static function newest_revision( \WP_Post $post ): ?\WP_Post {
+	private static function newest_revision( \WP_Post $post ): ?\WP_Post {
 		$revisions = wp_get_post_revisions(
 			$post->ID,
 			array(
