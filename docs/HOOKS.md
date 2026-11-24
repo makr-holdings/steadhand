@@ -1,10 +1,10 @@
 # Steadhand extension points
 
-**Status:** Steadhand defines four filters and four actions so far (see [Filters](#filters) and [Actions](#actions)), and the public guardrail classes in the [Guardrail API](#guardrail-api) section. This page is the reference for the public extension points that Steadhand Pro and third-party code will build on. It fills in as each extension point is built. The plan is in [SPEC.md](SPEC.md), section 9.1.
+**Status:** Steadhand defines four filters and seven actions so far (see [Filters](#filters) and [Actions](#actions)), and the public guardrail classes in the [Guardrail API](#guardrail-api) section. This page is the reference for the public extension points that Steadhand Pro and third-party code will build on. It fills in as each extension point is built. The plan is in [SPEC.md](SPEC.md), section 9.1.
 
 ## Current extension points
 
-Steadhand defines four filters, documented in [Filters](#filters), and four actions, documented in [Actions](#actions). The [Guardrail API](#guardrail-api) section documents the public classes that third-party guardrail rules use.
+Steadhand defines four filters, documented in [Filters](#filters), and seven actions, documented in [Actions](#actions). The [Guardrail API](#guardrail-api) section documents the public classes that third-party guardrail rules use.
 
 To check, run this from the repository root. It lists Steadhand's own hooks: the filters `steadhand_allowed_post_types`, `steadhand_log_read_calls`, `steadhand_log_retention_days` and `steadhand_rate_limit_per_minute`, and the actions `steadhand_admin_log_entry`, `steadhand_admin_log_toolbar`, `steadhand_log_entry_stored` and `steadhand_register_guardrails`. It also lists three WordPress hooks that Steadhand calls rather than attaches to: `the_content`, which `get-rendered` runs on purpose, and `wp_check_post_lock_window`, which the edit-lock rule reads, and `image_memory_limit`, which the media tools read. Today the output has eleven lines: one for each of the eight Steadhand hooks, and one for each of the three WordPress hooks. Any other `apply_filters()` or `do_action()` call in this output is a mistake, or a new extension point that needs a section here:
 
@@ -277,6 +277,60 @@ Runs on the single-entry view of the change-log screen, after the entry's stored
 
 This action is public API. The [stability policy](#stability-policy) above applies. Any new parameter will go at the end.
 
+### `steadhand_agent_created`
+
+Runs after the Agents screen (SPEC section 4.1) creates an agent and its first Application Password.
+
+- **Since:** unreleased (see [CHANGELOG.md](../CHANGELOG.md)).
+- **Type:** action.
+- **Parameters:** `$user_id` (`int`), the new agent's user ID; `$label` (`string`), the label of its first Application Password, which is the agent label in the change log.
+- **When it runs:** once for each agent created, after the agent and its password are saved and before the screen shows the password. It does not run when the creation is refused or fails, and a failed password step leaves no agent to report.
+- **Who gets it:** any code on the site. The action is reached only from the Agents screen, by an administrator who holds no agent role.
+- **The password is not passed.** Listeners get the user ID and the label, and nothing else of the secret.
+- **If a listener throws:** the exception is caught and ignored. The agent exists either way.
+- **What it does not do:** it cannot change the result or stop the creation. It has no return value.
+
+```php
+add_action(
+	'steadhand_agent_created',
+	static function ( int $user_id, string $label ): void {
+		error_log( sprintf( 'Steadhand agent %d created with label %s', $user_id, $label ) );
+	},
+	10,
+	2
+);
+```
+
+This action is public API. The [stability policy](#stability-policy) above applies. Any new parameter will go at the end.
+
+### `steadhand_agent_capabilities_changed`
+
+Runs after the Agents screen saves an agent's capabilities.
+
+- **Since:** unreleased (see [CHANGELOG.md](../CHANGELOG.md)).
+- **Type:** action.
+- **Parameters:** `$user_id` (`int`), the agent; `$capabilities` (`array<string, bool>`), each offered capability with the value it was saved with. The offered capabilities are the ones the Agents screen shows (`steadhand_connect` and every capability a registered ability uses). Capabilities that are not offered are not in the array and are not changed.
+- **When it runs:** after every offered capability is saved and read back as saved. It does not run when the save is refused or does not read back.
+- **If a listener throws:** the exception is caught and ignored. The capabilities stay saved.
+- **What it does not do:** it cannot change the values. It has no return value.
+
+This action is public API. The [stability policy](#stability-policy) above applies. Any new parameter will go at the end.
+
+### `steadhand_admin_agent_row`
+
+Runs on the Agents screen, after the block of one dedicated agent (a user whose only role is `steadhand_agent`).
+
+- **Since:** unreleased (see [CHANGELOG.md](../CHANGELOG.md)).
+- **Type:** action.
+- **Parameter:** `$agent` (`WP_User`), the dedicated agent.
+- **When it runs:** once for each dedicated agent listed, on each render of the screen, after the capability check has passed. It does not run for a user who holds the agent role and another role, who is shown with a warning instead, nor for a viewer who is refused.
+- **Who gets it:** the same viewers as the screen: an administrator who holds no agent role.
+- **If a listener throws:** the exception is caught and ignored, so the screen still renders.
+- **Trust and output:** listeners are trusted code, and they run inside an administrator's request. Whatever a listener prints appears inside the agent's block, so the listener must escape its own output.
+- **What it does not do:** it cannot change the agent or the screen. It has no return value.
+
+This action is public API. The [stability policy](#stability-policy) above applies. Any new parameter will go at the end.
+
 ## Guardrail API
 
 Third-party guardrail rules are written against four classes in `Steadhand\Guardrails`: `Rule`, `Context`, `Result` and `Registry`. They are public API under the [stability policy](#stability-policy). The engine (`Engine`) and the verdict (`Verdict`) are internal and may change.
@@ -397,6 +451,9 @@ Steadhand attaches to these hooks, or calls them where the row says so. Other pl
 | `wp_abilities_api_categories_init` | action | `includes/Plugin.php` | Registers the `steadhand` ability category |
 | `wp_abilities_api_init` | action | `includes/Plugin.php` | Registers the Steadhand abilities |
 | `mcp_adapter_init` | action | `includes/Plugin.php` | Registers the `steadhand` MCP server, from the MCP Adapter |
+| `load-{page}` | action | `includes/Admin/Admin.php` (the Agents screen's page hook) | Runs the Agents screen's POST actions, before the page renders, so a new password is shown in the response to the POST that made it |
+| `wp_is_application_passwords_available` | filter | called by `includes/Admin/AgentsHandler.php` and `includes/Admin/AgentsScreen.php` | Read only: the Agents screen offers no create or add form when it is false |
+| `wp_is_application_passwords_available_for_user` | filter | called by `includes/Admin/AgentsHandler.php` and `includes/Admin/AgentsScreen.php` | Read only: an agent that has no Application Passwords available gets no password |
 | `authenticate` | filter | `includes/Lockdown.php` (`register()`, called from `includes/Plugin.php` before the requirements check) | Refuses password sign-in by a dedicated agent, and Application Password sign-in by a user with the agent role and another role (XML-RPC), at the last priority (`PHP_INT_MAX`), so core's result is replaced |
 | `determine_current_user` | filter | `includes/Lockdown.php` | At `PHP_INT_MAX`. A dedicated agent resolves to no user unless the request is a REST request for the Steadhand endpoint, authenticated by its own Application Password. A user with the agent role and another role resolves to no user when authenticated by its own Application Password |
 | `rest_pre_dispatch` | filter | `includes/Lockdown.php` | At `PHP_INT_MIN` (was priority 0), so it runs before other plugins' callbacks on this filter. Refuses every REST route to a blocked user except the Steadhand MCP endpoint |

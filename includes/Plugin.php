@@ -85,7 +85,8 @@ final class Plugin {
 		$this->capability_guard = new CapabilityGuard();
 		$this->admin            = new Admin\Admin(
 			new Admin\LogScreen( $change_log, $this->registry ),
-			new Admin\UndoHandler( $pipeline, $change_log )
+			new Admin\UndoHandler( $pipeline, $change_log ),
+			new Admin\AgentsScreen( new Admin\AgentsHandler( $this->registry ) )
 		);
 	}
 
