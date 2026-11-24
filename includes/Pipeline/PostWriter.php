@@ -194,21 +194,28 @@ final class PostWriter {
 	 * steadhand/undo-change only.
 	 *
 	 * The post must still hold $expected, the text the change left, or nothing is written and the refusal is
-	 * steadhand_refused_changed_since (409). That is checked twice:
+	 * steadhand_refused_changed_since (409). That is checked in two places:
 	 * 1. before the save, with an uncached read of the row (holds_text());
-	 * 2. inside the save, in a wp_insert_post_data filter at PHP_INT_MAX for this post's own update (the same matching
-	 *    conditions as save()). The guard runs before the kept values are set, so when the row no longer holds $expected, the
-	 *    save stops there, and core's UPDATE and its revision are never reached. The exception that stops it is caught here.
-	 * Every filter is removed in finally, as in save().
+	 * 2. at the last point this code can reach before core writes the row. wp_insert_post() fires pre_post_update for an
+	 *    update immediately before its $wpdb->update() of the posts table (wp-includes/post.php, after the
+	 *    wp_insert_post_data filter, with nothing written before it). An action for this post reads the row again, uncached.
+	 *    When the row no longer holds $expected, the action arms a query filter for the very next query. That filter returns
+	 *    an empty query when the query is the UPDATE of the posts table: wpdb::query() then returns false (class-wpdb.php),
+	 *    wpdb::update() returns false, and wp_insert_post() returns a db_update_error WP_Error before it writes the row. No
+	 *    revision is made. The filter blanks that one query only. If the next query is anything else, nothing is blanked,
+	 *    and the call returns steadhand_update_partial, because the abort could not be applied.
+	 * Nothing is thrown through a hook. The action and the filter are removed in finally, on every path.
 	 *
-	 * The restored bytes are kept as $restore holds them, after the save filters have run, so the KSES filters never change
-	 * the text an administrator stored. The stored post_content_filtered is kept as it is. Status, slug, date, author and
-	 * terms are never sent.
+	 * The action runs at PHP_INT_MAX. Whether it ran for this post is recorded. When the save reports success and the action
+	 * never ran (a listener removed it, for example), the call returns steadhand_update_partial, never a success.
 	 *
-	 * The one limit that remains: the guard and core's UPDATE are separate steps. Core runs the rest of wp_insert_post() after
-	 * the filter (the unslashing, and any action it fires before the statement, such as pre_post_update), and a write to the
-	 * row during those steps is not caught here. UndoChange reads the row again after a successful save and reports
-	 * steadhand_update_partial when it does not hold $restore, so such a change is reported, not hidden.
+	 * The restored bytes are kept as $restore holds them, after the save filters have run (the keep filter in save()), so the
+	 * KSES filters never change the text an administrator stored. The stored post_content_filtered is kept as it is. Only the
+	 * three text fields are sent. The save itself is WordPress's, as it is for update-post.
+	 *
+	 * The window that remains: between the action's read of the row and core's UPDATE statement, a concurrent request can
+	 * change the row, and this save then overwrites that change. Nothing in this process can close that gap. UndoChange reads
+	 * the row again after a successful save and reports steadhand_update_partial when it does not hold $restore.
 	 *
 	 * A WP_Error from wp_update_post() is returned as it is. Whether anything changed is for the caller to read back.
 	 *
@@ -216,7 +223,6 @@ final class PostWriter {
 	 * @param array{post_title: string, post_content: string, post_excerpt: string} $expected The text the post must hold now.
 	 * @param array{post_title: string, post_content: string, post_excerpt: string} $restore  The text to store.
 	 * @return int|\WP_Error The post ID, or the refusal or error.
-	 * @throws \RuntimeException When the save is stopped by the guard, which the method catches; other failures are rethrown.
 	 */
 	public static function restore( int $post_id, array $expected, array $restore ): int|\WP_Error {
 		self::assert_writing();
@@ -232,26 +238,87 @@ final class PostWriter {
 			return self::changed_since();
 		}
 
-		$aborted = false;
-		$guard   = static function () use ( $post_id, $expected, &$aborted ): void {
+		$checked   = false;
+		$changed   = false;
+		$armed     = false;
+		$unstopped = false;
+
+		$guard = static function ( int $id ) use ( $post_id, $expected, &$checked, &$changed, &$armed ): void {
+			if ( $id !== $post_id || $checked ) {
+				return;
+			}
+
+			$checked = true;
 			if ( ! self::holds_text( $post_id, $expected ) ) {
-				$aborted = true;
-				throw new \RuntimeException( 'The post changed before the restore was saved.' );
+				$changed = true;
+				$armed   = true;
 			}
 		};
 
-		// The three restored fields, and the stored filtered content, are put back verbatim after the save filters.
-		$keep = $restore + array( 'post_content_filtered' => (string) $post->post_content_filtered );
+		$stop = static function ( string $sql ) use ( &$armed, &$unstopped ): string {
+			global $wpdb;
 
-		try {
-			return self::save( $post, $restore, $keep, $guard );
-		} catch ( \RuntimeException $error ) {
-			if ( ! $aborted ) {
-				throw $error;
+			if ( ! $armed ) {
+				return $sql;
 			}
 
-			return self::changed_since();
+			// One query only. The next query after the guard is the UPDATE. Nothing else is blanked.
+			$armed = false;
+			if ( str_starts_with( ltrim( $sql ), 'UPDATE `' . $wpdb->posts . '`' ) ) {
+				return '';
+			}
+
+			$unstopped = true;
+
+			return $sql;
+		};
+
+		$keep = $restore + array( 'post_content_filtered' => (string) $post->post_content_filtered );
+
+		add_action( 'pre_post_update', $guard, PHP_INT_MAX, 1 );
+		add_filter( 'query', $stop, PHP_INT_MAX, 1 );
+		try {
+			$saved = self::save( $post, $restore, $keep );
+		} finally {
+			remove_action( 'pre_post_update', $guard, PHP_INT_MAX );
+			remove_filter( 'query', $stop, PHP_INT_MAX );
 		}
+
+		if ( $changed ) {
+			return $unstopped ? self::abort_failed() : self::changed_since();
+		}
+
+		if ( ! $checked && is_int( $saved ) ) {
+			return self::unchecked_save();
+		}
+
+		return $saved;
+	}
+
+	/**
+	 * The refusal for a restore whose abort could not be applied: the post may have been written. The one text for it.
+	 *
+	 * @return \WP_Error
+	 */
+	private static function abort_failed(): \WP_Error {
+		return new \WP_Error(
+			'steadhand_update_partial',
+			__( 'The post changed while the restore was being saved, and the restore could not be stopped. Check the post before you continue.', 'steadhand' ),
+			array( 'status' => 500 )
+		);
+	}
+
+	/**
+	 * The error for a restore that reported success although the check before the save never ran. Nothing is trusted then.
+	 *
+	 * @return \WP_Error
+	 */
+	private static function unchecked_save(): \WP_Error {
+		return new \WP_Error(
+			'steadhand_update_partial',
+			__( 'The post was saved, but the check made just before the save did not run, so the restore cannot be confirmed. Check the post before you continue.', 'steadhand' ),
+			array( 'status' => 500 )
+		);
 	}
 
 	/**
@@ -512,12 +579,9 @@ final class PostWriter {
 	 * @param \WP_Post              $post   The post as read for this write.
 	 * @param array<string, string> $fields Fields to set.
 	 * @param array<string, string> $keep   Values to put back, by field.
-	 * @param callable|null         $guard  Optional. Runs in the same filter as the values are put back, before they are,
-	 *                                      and only for this post's own update. It may throw, which stops the save before
-	 *                                      core's UPDATE. Null for none.
 	 * @return int|\WP_Error
 	 */
-	private static function save( \WP_Post $post, array $fields, array $keep, ?callable $guard = null ): int|\WP_Error {
+	private static function save( \WP_Post $post, array $fields, array $keep ): int|\WP_Error {
 		$data       = self::dated( $fields );
 		$data['ID'] = $post->ID;
 
@@ -530,16 +594,11 @@ final class PostWriter {
 		$target_id = (int) $post->ID;
 		$post_type = (string) $post->post_type;
 		$armed     = true;
-		$restore   = static function ( array $data, array $postarr, array $unsanitized_postarr, bool $update ) use ( &$armed, $target_id, $post_type, $keep, $guard ): array {
+		$restore   = static function ( array $data, array $postarr, array $unsanitized_postarr, bool $update ) use ( &$armed, $target_id, $post_type, $keep ): array {
 			unset( $unsanitized_postarr );
 
 			if ( ! $armed || ! $update || (int) ( $postarr['ID'] ?? 0 ) !== $target_id || ( $data['post_type'] ?? null ) !== $post_type ) {
 				return $data;
-			}
-
-			// The guard runs first: when it throws, nothing is kept and core's UPDATE does not run.
-			if ( null !== $guard ) {
-				$guard();
 			}
 
 			// Once only: a nested update of this post, from a save_post listener, must not get these values again.

@@ -218,7 +218,7 @@ final class Snapshots {
 	 * @param \WP_Post $post The post.
 	 * @return \WP_Post|null The revision, or null when there is none.
 	 */
-	private static function newest_revision( \WP_Post $post ): ?\WP_Post {
+	public static function newest_revision( \WP_Post $post ): ?\WP_Post {
 		$revisions = wp_get_post_revisions(
 			$post->ID,
 			array(

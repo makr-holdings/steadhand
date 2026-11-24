@@ -37,7 +37,10 @@ final class UndoChangeTest extends PostWriteTestCase {
 	private const ALREADY = 'This change has already been undone, so it cannot be undone again. Nothing was changed.';
 
 	/** The refusal for a saved state that no longer exists. */
-	private const NO_SAVED_STATE = 'A saved state for this change no longer exists, so it cannot be undone. Nothing was changed.';
+	private const NO_SAVED_STATE = 'This change has no saved state that Steadhand can restore, so it cannot be undone. Nothing was changed.';
+
+	/** The refusal for a post whose page template the active theme does not have. */
+	private const TEMPLATE = 'This post uses a page template that the active theme does not have. WordPress would save the change and then report an error. Nothing was changed. An administrator must set a valid template for this post.';
 
 	/** The refusal for a post edited after the change. */
 	private const CHANGED_SINCE = 'The post was edited after that change, so it cannot be undone. Nothing was changed.';
@@ -154,6 +157,21 @@ final class UndoChangeTest extends PostWriteTestCase {
 		if ( '' !== $message ) {
 			$this->assertSame( $message, $result->get_error_message() );
 		}
+	}
+
+	/**
+	 * Makes the next UPDATE of the posts table fail: the query is blanked, so wpdb::update() returns false.
+	 */
+	private function fail_the_posts_update(): void {
+		add_filter(
+			'query',
+			static function ( string $sql ): string {
+				global $wpdb;
+
+				return str_starts_with( ltrim( $sql ), 'UPDATE `' . $wpdb->posts . '`' ) ? '' : $sql;
+			},
+			PHP_INT_MAX - 2
+		);
 	}
 
 	public function test_is_registered_with_strict_schemas_annotations_and_is_not_public(): void {
@@ -293,12 +311,12 @@ final class UndoChangeTest extends PostWriteTestCase {
 		$this->assertSame( $unbalanced, get_post( $post )->post_content );
 	}
 
-	public function test_a_change_that_went_back_and_forth_is_undone_to_the_first_state(): void {
+	public function test_a_change_that_went_back_and_forth_is_refused_because_a_newer_revision_exists(): void {
 		$post = $this->fixture( array( 'post_title' => 'A' ) );
 		$this->act_as_agent();
 		$entry = $this->changed( $post, array( 'title' => 'B' ) );
 
-		// A person edits to C, then back to B: the row holds the text the change left, so the undo is allowed.
+		// A person edits to C, then back to B: the row holds the text the change left, but newer revisions exist.
 		wp_update_post(
 			array(
 				'ID'         => $post,
@@ -311,10 +329,11 @@ final class UndoChangeTest extends PostWriteTestCase {
 				'post_title' => 'B',
 			)
 		);
+		$before = $this->row( $post );
 
-		$this->output_of( self::UNDO_TOOL, array( 'id' => $entry ) );
+		$this->assert_refused( $this->undo( $entry ), 'steadhand_refused_changed_since', self::CHANGED_SINCE );
 
-		$this->assertSame( 'A', get_post( $post )->post_title, 'By design the undo restores the state before the agent\'s change.' );
+		$this->assert_nothing_changed( $before, $post, $entry );
 	}
 
 	public function test_an_entry_of_another_agent_is_refused_with_the_same_text_as_a_missing_id(): void {
@@ -450,7 +469,7 @@ final class UndoChangeTest extends PostWriteTestCase {
 		$entry     = $this->changed( $post, array( 'title' => 'After' ) );
 		$revisions = $this->revision_ids( $post );
 
-		// Runs before the restore's own guard in the same save, for this post's update only, once.
+		// Runs before the restore's own check, for this post's update only, once.
 		$fired  = false;
 		$inject = function ( array $data, array $postarr, array $unsanitized_postarr, bool $update ) use ( &$fired, $post ): array {
 			unset( $unsanitized_postarr );
@@ -475,6 +494,20 @@ final class UndoChangeTest extends PostWriteTestCase {
 		$this->assertSame( 'After', get_post( $post )->post_title, 'The restore did not write the title.' );
 		$this->assertSame( $revisions, $this->revision_ids( $post ), 'No revision is made by an aborted save.' );
 		$this->assertSame( 0, (int) $this->stored( $entry )['undone_by'] );
+
+		$this->assertFalse( doing_action( 'pre_post_update' ), 'The abort leaves no action in progress.' );
+		$this->assertFalse( doing_filter( 'wp_insert_post_data' ), 'The abort leaves no filter in progress.' );
+		$this->assertNotSame( 'pre_post_update', current_filter() );
+
+		$out = $this->output_of(
+			self::UPDATE,
+			array(
+				'id'    => $post,
+				'title' => 'Normal after abort',
+			)
+		);
+		$this->assertTrue( $out['changed'] );
+		$this->assertSame( 'Normal after abort', get_post( $post )->post_title, 'A normal update-post right after the abort still works.' );
 	}
 
 	public function test_a_deleted_before_revision_is_refused_and_nothing_changes(): void {
@@ -551,11 +584,20 @@ final class UndoChangeTest extends PostWriteTestCase {
 	}
 
 	public function test_a_post_row_as_the_before_state_is_refused(): void {
-		$post  = $this->fixture();
-		$plain = $this->fixture( array( 'post_title' => 'Plain' ) );
+		$post = $this->fixture();
 		$this->act_as_agent();
 		$entry = $this->changed( $post, array( 'title' => 'After' ) );
-		$this->set_entry( $entry, array( 'snapshot_id' => $plain ) );
+
+		// A child page of the post: the same post parent, but not a revision. Its text differs, so only the type check refuses it.
+		$child = self::factory()->post->create(
+			array(
+				'post_type'   => 'page',
+				'post_parent' => $post,
+				'post_title'  => 'Child text',
+				'post_status' => 'publish',
+			)
+		);
+		$this->set_entry( $entry, array( 'snapshot_id' => $child ) );
 		$before = $this->row( $post );
 
 		$this->assert_refused( $this->undo( $entry ), 'steadhand_refused_not_undoable', self::NO_SAVED_STATE );
@@ -777,5 +819,233 @@ final class UndoChangeTest extends PostWriteTestCase {
 		$this->assertTrue( $outcome['threw'], 'A text array with other keys is an InvalidArgumentException.' );
 		$this->assertSame( $before, $this->row( $post ) );
 		$this->assertSame( $revisions, $this->revision_ids( $post ) );
+	}
+
+	public function test_an_agent_that_recreates_the_after_text_cannot_undo_its_older_change(): void {
+		$post = $this->fixture( array( 'post_title' => 'S0' ) );
+		$this->act_as_agent();
+		$first = $this->changed( $post, array( 'title' => 'S1' ) );
+		wp_update_post(
+			array(
+				'ID'         => $post,
+				'post_title' => 'S2',
+			)
+		);
+		$this->changed( $post, array( 'title' => 'S1' ) );
+		$before = $this->row( $post );
+
+		$this->assert_refused( $this->undo( $first ), 'steadhand_refused_changed_since', self::CHANGED_SINCE );
+
+		$this->assertSame( $before, $this->row( $post ), 'The current text stays.' );
+		$this->assertSame( 'S1', get_post( $post )->post_title );
+		$this->assertSame( 0, (int) $this->stored( $first )['undone_by'] );
+	}
+
+	public function test_undoing_the_newest_of_two_agent_changes_works_and_then_the_older_one_is_refused(): void {
+		$post = $this->fixture( array( 'post_title' => 'S0' ) );
+		$this->act_as_agent();
+		$first  = $this->changed( $post, array( 'title' => 'S1' ) );
+		$second = $this->changed( $post, array( 'title' => 'S2' ) );
+
+		$this->output_of( self::UNDO_TOOL, array( 'id' => $second ) );
+		$this->assertSame( 'S1', get_post( $post )->post_title, 'The newest change is undone to the text before it.' );
+
+		$before = $this->row( $post );
+		$this->assert_refused( $this->undo( $first ), 'steadhand_refused_changed_since', self::CHANGED_SINCE );
+		$this->assertSame( $before, $this->row( $post ) );
+		$this->assertSame( 0, (int) $this->stored( $first )['undone_by'] );
+	}
+
+	public function test_an_after_snapshot_equal_to_the_before_snapshot_is_not_undoable(): void {
+		$post = $this->fixture();
+		$this->act_as_agent();
+		$entry = $this->changed( $post, array( 'title' => 'After' ) );
+		$this->set_entry( $entry, array( 'after_snapshot_id' => (int) $this->stored( $entry )['snapshot_id'] ) );
+		$before = $this->row( $post );
+
+		$this->assert_refused( $this->undo( $entry ), 'steadhand_forbidden', self::NOT_UNDOABLE );
+
+		$this->assert_nothing_changed( $before, $post, $entry );
+	}
+
+	public function test_two_different_revisions_with_identical_text_are_refused(): void {
+		$post = $this->fixture();
+		$this->act_as_agent();
+		$entry = $this->changed( $post, array( 'title' => 'After' ) );
+
+		// A second revision whose text equals the after-state's: before and after then hold the same text.
+		$copy = wp_insert_post(
+			array(
+				'post_type'    => 'revision',
+				'post_status'  => 'inherit',
+				'post_parent'  => $post,
+				'post_title'   => 'After',
+				'post_content' => self::paragraph( 'Before' ),
+				'post_excerpt' => 'Before excerpt',
+				'post_name'    => "$post-revision-copy",
+			)
+		);
+		$this->assertNotSame( (int) $this->stored( $entry )['after_snapshot_id'], $copy );
+		$this->set_entry( $entry, array( 'snapshot_id' => $copy ) );
+		$before = $this->row( $post );
+
+		$this->assert_refused( $this->undo( $entry ), 'steadhand_refused_not_undoable', self::NO_SAVED_STATE );
+
+		$this->assert_nothing_changed( $before, $post, $entry );
+	}
+
+	public function test_with_revisions_turned_off_now_the_undo_is_refused_and_nothing_changes(): void {
+		$post = $this->fixture();
+		$this->act_as_agent();
+		$entry = $this->changed( $post, array( 'title' => 'After' ) );
+		add_filter( 'wp_revisions_to_keep', static fn(): int => 0 );
+		$before = $this->row( $post );
+
+		$this->assert_refused( $this->undo( $entry ), 'steadhand_refused_not_undoable', self::NO_SAVED_STATE );
+
+		$this->assert_nothing_changed( $before, $post, $entry );
+	}
+
+	public function test_with_one_revision_kept_now_the_undo_is_refused_and_nothing_changes(): void {
+		$post = $this->fixture();
+		$this->act_as_agent();
+		$entry = $this->changed( $post, array( 'title' => 'After' ) );
+		add_filter( 'wp_revisions_to_keep', static fn(): int => 1 );
+		$before = $this->row( $post );
+
+		$this->assert_refused( $this->undo( $entry ), 'steadhand_refused_not_undoable', self::NO_SAVED_STATE );
+
+		$this->assert_nothing_changed( $before, $post, $entry );
+	}
+
+	public function test_a_page_template_the_theme_no_longer_has_is_refused_before_the_write(): void {
+		$post = $this->fixture();
+		$this->act_as_agent();
+		$entry = $this->changed( $post, array( 'title' => 'After' ) );
+		update_post_meta( $post, '_wp_page_template', 'no-such-template.php' );
+		$before = $this->row( $post );
+
+		$this->assert_refused( $this->undo( $entry ), 'steadhand_refused_invalid_template', self::TEMPLATE );
+
+		$this->assert_nothing_changed( $before, $post, $entry );
+	}
+
+	public function test_a_refused_call_on_another_post_entry_names_no_object_in_the_log(): void {
+		$post   = $this->fixture();
+		$agent  = $this->act_as_agent();
+		$entry  = $this->insert_row(
+			array(
+				'user_id'           => $agent,
+				'ability'           => 'steadhand/set-post-terms',
+				'object_type'       => 'post',
+				'object_id'         => $post,
+				'result'            => 'ok',
+				'undoable'          => 1,
+				'snapshot_id'       => 1,
+				'after_snapshot_id' => 2,
+			)
+		);
+		$before = $this->row( $post );
+
+		$this->assert_refused( $this->undo( $entry ), 'steadhand_forbidden', self::NOT_UNDOABLE );
+
+		$row = $this->latest_row( $agent );
+		$this->assertSame( 'blocked', $row['result'] );
+		$this->assertSame( '', $row['object_type'], 'The blocked row names no post.' );
+		$this->assertSame( 0, (int) $row['object_id'] );
+		$this->assert_nothing_changed( $before, $post, $entry );
+	}
+
+	public function test_a_restore_that_fails_before_the_write_is_update_failed_and_keeps_the_entry_unmarked(): void {
+		$post = $this->fixture();
+		$this->act_as_agent();
+		$entry  = $this->changed( $post, array( 'title' => 'After' ) );
+		$before = $this->row( $post );
+		$this->fail_the_posts_update();
+
+		$result = $this->undo( $entry );
+
+		$this->assert_refused( $result, 'steadhand_update_failed' );
+		$this->assertSame( $before, $this->row( $post ) );
+		$this->assertSame( 0, (int) $this->stored( $entry )['undone_by'] );
+	}
+
+	public function test_a_restore_that_fails_after_another_write_is_update_partial(): void {
+		$post = $this->fixture();
+		$this->act_as_agent();
+		$entry = $this->changed( $post, array( 'title' => 'After' ) );
+
+		$done = false;
+		add_filter(
+			'query',
+			static function ( string $sql ) use ( &$done, $post ): string {
+				global $wpdb;
+
+				if ( $done || ! str_starts_with( ltrim( $sql ), 'UPDATE `' . $wpdb->posts . '`' ) ) {
+					return $sql;
+				}
+
+				// Another write lands first, then this UPDATE fails.
+				$done = true;
+				$wpdb->query( $wpdb->prepare( "UPDATE {$wpdb->posts} SET post_content = %s WHERE ID = %d", 'Other write', $post ) ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared,WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching -- Test: another request's write.
+
+				return '';
+			},
+			PHP_INT_MAX - 2
+		);
+
+		$result = $this->undo( $entry );
+
+		$this->assert_refused( $result, 'steadhand_update_partial' );
+		$this->assertSame( 'Other write', $this->row( $post )['post_content'], 'The other write stays in the row (read uncached).' );
+		$this->assertSame( 0, (int) $this->stored( $entry )['undone_by'] );
+	}
+
+	public function test_a_restored_post_whose_mark_fails_says_so_and_stays_restored(): void {
+		$post = $this->fixture();
+		$this->act_as_agent();
+		$entry = $this->changed( $post, array( 'title' => 'After' ) );
+		$table = Schema::table();
+
+		add_filter(
+			'query',
+			static function ( string $sql ) use ( $table ): string {
+				return str_starts_with( ltrim( $sql ), 'UPDATE ' . $table . ' SET undone_by' ) ? '' : $sql;
+			},
+			PHP_INT_MAX - 2
+		);
+
+		$result = $this->undo( $entry );
+
+		$this->assertWPError( $result );
+		$this->assertSame( 'steadhand_update_partial', $result->get_error_code() );
+		$this->assertStringContainsString( 'could not record the undo', $result->get_error_message() );
+		$this->assertSame( 'Before title', get_post( $post )->post_title, 'The post was restored.' );
+		$this->assertSame( 0, (int) $this->stored( $entry )['undone_by'], 'The entry was not marked.' );
+	}
+
+	public function test_a_restore_that_reports_success_without_its_check_running_is_partial_not_success(): void {
+		$post = $this->fixture();
+		$this->act_as_agent();
+		$entry = $this->changed( $post, array( 'title' => 'After' ) );
+
+		// A listener at a priority before the restore's own removes the restore's pre_post_update action.
+		$drop = static function ( array $data, array $postarr ) use ( $post ): array {
+			if ( (int) ( $postarr['ID'] ?? 0 ) === $post ) {
+				remove_all_actions( 'pre_post_update', PHP_INT_MAX );
+			}
+
+			return $data;
+		};
+		add_filter( 'wp_insert_post_data', $drop, PHP_INT_MAX - 1, 2 );
+
+		try {
+			$result = $this->undo( $entry );
+		} finally {
+			remove_filter( 'wp_insert_post_data', $drop, PHP_INT_MAX - 1 );
+		}
+
+		$this->assert_refused( $result, 'steadhand_update_partial' );
+		$this->assertSame( 0, (int) $this->stored( $entry )['undone_by'] );
 	}
 }
