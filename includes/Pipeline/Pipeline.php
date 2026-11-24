@@ -10,6 +10,7 @@ declare( strict_types=1 );
 namespace Steadhand\Pipeline;
 
 use Steadhand\Abilities\Ability;
+use Steadhand\Abilities\PostFields;
 use Steadhand\Agents;
 use Steadhand\Capabilities;
 use Steadhand\Guardrails\Context;
@@ -535,7 +536,7 @@ final class Pipeline {
 
 		// The state after the write. Asked only for an undoable call, and only when it can be used: an ID that is not
 		// positive, or that is the snapshot taken before the call, is recorded as 0 and the call is not undoable.
-		$after = $snapshot['undoable'] ? $this->snapshot_after_for( $ability, $final_input, $output ) : 0;
+		$after = $snapshot['undoable'] ? $this->snapshot_after_for( $ability, $final_input, $output, $snapshot['id'] ) : 0;
 		if ( $after === $snapshot['id'] ) {
 			$after = 0;
 		}
@@ -546,9 +547,13 @@ final class Pipeline {
 			return $this->log_incomplete();
 		}
 
-		// (6) Return the output, with what the guardrails said.
+		// (6) Return the output, with what the guardrails said, and say so when the change could not be undone after all.
 		if ( is_array( $output ) ) {
 			$output['guardrail_notes'] = $notes;
+
+			if ( $snapshot['undoable'] && ! $undoable ) {
+				$output = $this->with_unundoable_warning( $output );
+			}
 		}
 
 		return $output;
@@ -648,19 +653,42 @@ final class Pipeline {
 	 * Asks the ability for the snapshot that holds the state after a successful write, inside the write bracket. A throw,
 	 * or a value that is not a positive integer, is 0.
 	 *
-	 * @param Ability              $ability Ability being called.
-	 * @param array<string, mixed> $input   Final input.
-	 * @param mixed                $output  What execute() returned.
+	 * @param Ability              $ability     Ability being called.
+	 * @param array<string, mixed> $input       Final input.
+	 * @param mixed                $output      What execute() returned.
+	 * @param int                  $snapshot_id The snapshot taken before the call.
 	 * @return int The snapshot ID, or 0.
 	 */
-	private function snapshot_after_for( Ability $ability, array $input, mixed $output ): int {
+	private function snapshot_after_for( Ability $ability, array $input, mixed $output, int $snapshot_id ): int {
 		try {
-			$id = $this->within_write( fn(): mixed => $ability->snapshot_after( $input, $output ) );
+			$id = $this->within_write( fn(): mixed => $ability->snapshot_after( $input, $output, $snapshot_id ) );
 		} catch ( \Throwable ) {
 			return 0;
 		}
 
 		return is_int( $id ) && $id > 0 ? $id : 0;
+	}
+
+	/**
+	 * Adds the warning that a change was made but cannot be undone, because the state after it could not be saved. The
+	 * warning is added only when the output already has a warnings list with room in it, within the same cap the
+	 * abilities keep (PostFields::MAX_WARNINGS). An output without a warnings list is returned as it is.
+	 *
+	 * @param array<string, mixed> $output What the ability returned.
+	 * @return array<string, mixed>
+	 */
+	private function with_unundoable_warning( array $output ): array {
+		if ( ! isset( $output['warnings'] ) || ! is_array( $output['warnings'] ) ) {
+			return $output;
+		}
+
+		$warnings = array_values( $output['warnings'] );
+		if ( count( $warnings ) < PostFields::MAX_WARNINGS ) {
+			$warnings[] = __( 'Steadhand could not save the state after this change, so it cannot be undone.', 'steadhand' );
+		}
+		$output['warnings'] = $warnings;
+
+		return $output;
 	}
 
 	/**

@@ -313,13 +313,14 @@ final class WriteProbeAbility extends Ability {
 	 * Records the write bracket, then returns the after-state snapshot, throws, or returns a value the parent's int
 	 * return type refuses.
 	 *
-	 * @param array<string, mixed> $input  Input.
-	 * @param mixed                $output Output.
+	 * @param array<string, mixed> $input       Input.
+	 * @param mixed                $output      Output.
+	 * @param int                  $snapshot_id The before-snapshot ID.
 	 * @return int
 	 * @throws \RuntimeException When throw_in_snapshot_after is set.
 	 */
-	public function snapshot_after( array $input, mixed $output ): int {
-		unset( $input, $output );
+	public function snapshot_after( array $input, mixed $output, int $snapshot_id ): int {
+		unset( $input, $output, $snapshot_id );
 		$this->writing_in_snapshot_after = Pipeline::is_writing();
 		if ( $this->throw_in_snapshot_after ) {
 			throw new \RuntimeException( 'Probe snapshot_after failed.' );

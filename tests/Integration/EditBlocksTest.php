@@ -1029,6 +1029,23 @@ final class EditBlocksTest extends PostWriteTestCase {
 		$this->assertStringContainsString( 'Changed', $revision->post_content );
 	}
 
+	/**
+	 * The state after an edit is a revision of the edited post, so undo can find it by its parent.
+	 */
+	public function test_the_after_revision_is_a_revision_of_the_edited_post(): void {
+		$post  = $this->fixture();
+		$agent = $this->act_as_agent();
+
+		$this->output_of( self::TOOL_NAME, $this->replace_two( $post ) );
+
+		$row = $this->latest_row( $agent );
+		$this->assertSame( 1, (int) $row['undoable'] );
+		$revision = get_post( (int) $row['after_snapshot_id'] );
+		$this->assertInstanceOf( \WP_Post::class, $revision );
+		$this->assertSame( 'revision', $revision->post_type );
+		$this->assertSame( $post, (int) $revision->post_parent );
+	}
+
 	public function test_the_log_keeps_a_digest_of_the_markup_and_never_its_text(): void {
 		$post   = $this->fixture();
 		$agent  = $this->act_as_agent();

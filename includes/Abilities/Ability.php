@@ -210,12 +210,16 @@ abstract class Ability {
 	 * state after the call (for posts, a core revision), or 0 for none. A throw is treated as 0. The result is stored with
 	 * the change log entry, and the entry is undoable only when this returns an ID other than the snapshot's.
 	 *
-	 * @param array<string, mixed> $input  Validated, sanitized input, as execute() received it.
-	 * @param mixed                $output What execute() returned.
+	 * $snapshot_id is the ID snapshot() returned for this call (the before-state). An ability that names the after-state
+	 * should check that it is newer than that and was made by this call.
+	 *
+	 * @param array<string, mixed> $input       Validated, sanitized input, as execute() received it.
+	 * @param mixed                $output      What execute() returned.
+	 * @param int                  $snapshot_id The snapshot ID snapshot() returned for this call.
 	 * @return int The snapshot ID, or 0.
 	 */
-	public function snapshot_after( array $input, mixed $output ): int {
-		unset( $input, $output );
+	public function snapshot_after( array $input, mixed $output, int $snapshot_id ): int {
+		unset( $input, $output, $snapshot_id );
 		return 0;
 	}
 
