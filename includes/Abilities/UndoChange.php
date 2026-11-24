@@ -12,8 +12,6 @@ namespace Steadhand\Abilities;
 use Steadhand\Capabilities;
 use Steadhand\Guardrails\Engine;
 use Steadhand\Log\DbLogger;
-use Steadhand\Log\Schema;
-use Steadhand\Log\SnapshotStore;
 use Steadhand\PostTypes;
 use Steadhand\Pipeline\MediaWriter;
 use Steadhand\Pipeline\Pipeline;
@@ -43,17 +41,6 @@ defined( 'ABSPATH' ) || exit;
  *   snapshots table (SnapshotStore). Writes go through TermWriter and MediaWriter only.
  */
 final class UndoChange extends Ability {
-
-	/** The abilities whose changes can be undone. */
-	private const UNDOABLE_ABILITIES = array( 'steadhand/update-post', 'steadhand/edit-blocks', 'steadhand/set-post-terms', 'steadhand/set-featured-image' );
-
-	/** The kinds of change an entry can be: post text, terms, or the featured image. */
-	private const KIND_TEXT     = 'text';
-	private const KIND_TERMS    = 'terms';
-	private const KIND_FEATURED = 'featured';
-
-	/** The results that mean the change was made. */
-	private const MADE_RESULTS = array( 'ok', 'fixed' );
 
 	/**
 	 * The object rules of update-post, used for the post the entry names, so the two tools cannot drift.
@@ -281,8 +268,8 @@ final class UndoChange extends Ability {
 			throw new \RuntimeException( 'The undo has no eligible entry to check.' );
 		}
 
-		$kind = $this->kind_of( $row );
-		if ( self::KIND_TEXT === $kind ) {
+		$kind = UndoRules::kind_of( $row );
+		if ( UndoRules::KIND_TEXT === $kind ) {
 			$made_by = $this->ability_for( $row );
 
 			return array(
@@ -293,12 +280,12 @@ final class UndoChange extends Ability {
 			);
 		}
 
-		$states = $this->saved_states( $row );
+		$states = UndoRules::saved_states( $row );
 		if ( null === $states ) {
 			throw new \RuntimeException( 'The saved state of the undo cannot be read.' );
 		}
 
-		$target   = self::KIND_TERMS === $kind ? $this->set_terms : $this->set_featured;
+		$target   = UndoRules::KIND_TERMS === $kind ? $this->set_terms : $this->set_featured;
 		$prepared = Pipeline::prepare_input( $target, $this->synthetic_input( $row, $states ) );
 		if ( is_wp_error( $prepared ) ) {
 			throw new \RuntimeException( 'The restore does not pass the input rules of the call it amounts to.' );
@@ -389,7 +376,7 @@ final class UndoChange extends Ability {
 			);
 		}
 
-		if ( ! $this->structurally_eligible( $row ) ) {
+		if ( ! $this->owned_and_eligible( $row ) ) {
 			return new \WP_Error(
 				'steadhand_forbidden',
 				__( 'Steadhand cannot undo this change. Only a change that update-post, edit-blocks, set-post-terms or set-featured-image made, and that was saved with the state it needs, can be undone. Nothing was changed.', 'steadhand' ),
@@ -403,7 +390,7 @@ final class UndoChange extends Ability {
 			return null;
 		}
 
-		if ( self::KIND_TEXT === $this->kind_of( $row ) ) {
+		if ( UndoRules::KIND_TEXT === UndoRules::kind_of( $row ) ) {
 			return PostFields::publish_needed_refusal( (int) $row['object_id'] );
 		}
 
@@ -416,7 +403,7 @@ final class UndoChange extends Ability {
 			return null;
 		}
 
-		$states = $this->saved_states( $row );
+		$states = UndoRules::saved_states( $row );
 		if ( null === $states ) {
 			return $this->no_saved_state();
 		}
@@ -434,7 +421,7 @@ final class UndoChange extends Ability {
 	 */
 	public function log_object( array $input ): array {
 		$row = $this->own_entry( (int) $input['id'] );
-		if ( null === $row || ! in_array( (string) $row['ability'], self::UNDOABLE_ABILITIES, true ) || 'post' !== (string) $row['object_type'] || (int) $row['object_id'] <= 0 ) {
+		if ( null === $row || ! in_array( (string) $row['ability'], UndoRules::UNDOABLE_ABILITIES, true ) || 'post' !== (string) $row['object_type'] || (int) $row['object_id'] <= 0 ) {
 			return array(
 				'type' => '',
 				'id'   => 0,
@@ -481,9 +468,9 @@ final class UndoChange extends Ability {
 			return PostReader::not_found();
 		}
 
-		return match ( $this->kind_of( $row ) ) {
-			self::KIND_TERMS    => $this->restore_terms( $entry_id, $row ),
-			self::KIND_FEATURED => $this->restore_featured( $entry_id, $row ),
+		return match ( UndoRules::kind_of( $row ) ) {
+			UndoRules::KIND_TERMS    => $this->restore_terms( $entry_id, $row ),
+			UndoRules::KIND_FEATURED => $this->restore_featured( $entry_id, $row ),
 			default             => $this->restore_text( $entry_id, $row ),
 		};
 	}
@@ -503,12 +490,12 @@ final class UndoChange extends Ability {
 		$post_id = (int) $row['object_id'];
 		$before  = get_post( (int) $row['snapshot_id'] );
 		$after   = get_post( (int) $row['after_snapshot_id'] );
-		if ( ! $this->is_revision_of( $before, $post_id ) || ! $this->is_revision_of( $after, $post_id ) ) {
+		if ( ! UndoRules::is_revision_of( $before, $post_id ) || ! UndoRules::is_revision_of( $after, $post_id ) ) {
 			return $this->no_saved_state();
 		}
 
-		$restore  = $this->text_of( $before );
-		$expected = $this->text_of( $after );
+		$restore  = UndoRules::text_of( $before );
+		$expected = UndoRules::text_of( $after );
 		if ( $restore === $expected ) {
 			return $this->no_saved_state();
 		}
@@ -566,14 +553,14 @@ final class UndoChange extends Ability {
 	 */
 	private function restore_terms( int $entry_id, array $row ): array|\WP_Error {
 		$post_id = (int) $row['object_id'];
-		$states  = $this->saved_states( $row );
+		$states  = UndoRules::saved_states( $row );
 		if ( null === $states ) {
 			return $this->no_saved_state();
 		}
 
 		$taxonomy = (string) $states['before']['taxonomy'];
-		$before   = self::sorted( $states['before']['term_ids'] );
-		$after    = self::sorted( $states['after']['term_ids'] );
+		$before   = UndoRules::sorted( $states['before']['term_ids'] );
+		$after    = UndoRules::sorted( $states['after']['term_ids'] );
 
 		if ( TermReader::assigned_count( $post_id, $taxonomy ) > TermReader::MAX_TERMS_PER_TAXONOMY ) {
 			return $this->restore_blocked();
@@ -637,7 +624,7 @@ final class UndoChange extends Ability {
 	 */
 	private function restore_featured( int $entry_id, array $row ): array|\WP_Error {
 		$post_id = (int) $row['object_id'];
-		$states  = $this->saved_states( $row );
+		$states  = UndoRules::saved_states( $row );
 		if ( null === $states ) {
 			return $this->no_saved_state();
 		}
@@ -687,7 +674,7 @@ final class UndoChange extends Ability {
 	 * Returns true, false (the generic refusal), or a WP_Error that says why: a refusal the caller may see (steadhand_forbidden from
 	 * the ability's own validation, steadhand_refused_not_undoable when the saved state or what it names is no longer usable).
 	 *
-	 * @param array<string, mixed> $row A row that passed structurally_eligible().
+	 * @param array<string, mixed> $row A row that passed owned_and_eligible().
 	 * @return bool|\WP_Error
 	 */
 	private function restore_allowed( array $row ): bool|\WP_Error {
@@ -695,8 +682,8 @@ final class UndoChange extends Ability {
 			return false;
 		}
 
-		$kind = $this->kind_of( $row );
-		if ( self::KIND_TEXT === $kind ) {
+		$kind = UndoRules::kind_of( $row );
+		if ( UndoRules::KIND_TEXT === $kind ) {
 			return $this->update_post->authorize_object( array( 'id' => (int) $row['object_id'] ) );
 		}
 
@@ -706,7 +693,7 @@ final class UndoChange extends Ability {
 			return false;
 		}
 
-		$states = $this->saved_states( $row );
+		$states = UndoRules::saved_states( $row );
 		if ( null === $states ) {
 			return $this->no_saved_state();
 		}
@@ -759,20 +746,6 @@ final class UndoChange extends Ability {
 	}
 
 	/**
-	 * The kind of change an entry is.
-	 *
-	 * @param array<string, mixed> $row A change-log row.
-	 * @return string One of the KIND_ constants.
-	 */
-	private function kind_of( array $row ): string {
-		return match ( (string) $row['ability'] ) {
-			'steadhand/set-post-terms'     => self::KIND_TERMS,
-			'steadhand/set-featured-image' => self::KIND_FEATURED,
-			default                        => self::KIND_TEXT,
-		};
-	}
-
-	/**
 	 * The input the equivalent direct call would send: set-post-terms in replace mode with the before term IDs, or
 	 * set-featured-image with the before attachment (0 removes it).
 	 *
@@ -783,7 +756,7 @@ final class UndoChange extends Ability {
 	private function synthetic_input( array $row, array $states ): array {
 		$post_id = (int) $row['object_id'];
 
-		if ( self::KIND_TERMS === $this->kind_of( $row ) ) {
+		if ( UndoRules::KIND_TERMS === UndoRules::kind_of( $row ) ) {
 			return array(
 				'id'       => $post_id,
 				'taxonomy' => (string) $states['before']['taxonomy'],
@@ -796,111 +769,6 @@ final class UndoChange extends Ability {
 			'id'       => $post_id,
 			'media_id' => (int) $states['before']['featured_media'],
 		);
-	}
-
-	/**
-	 * The two saved states of a terms or featured-image entry, decoded, when every rule holds: both rows exist; each has the
-	 * kind the entry needs, names the entry's post, belongs to the entry's user, and decodes to exactly the expected shape; and
-	 * the two states differ (and, for terms, name the same taxonomy). Returns null otherwise.
-	 *
-	 * @param array<string, mixed> $row A terms or featured-image row.
-	 * @return array{before: array<string, mixed>, after: array<string, mixed>}|null
-	 */
-	private function saved_states( array $row ): ?array {
-		$kind     = $this->kind_of( $row );
-		$expected = self::KIND_TERMS === $kind ? SnapshotStore::KIND_POST_TERMS : SnapshotStore::KIND_FEATURED_IMAGE;
-
-		$before = SnapshotStore::find( (int) $row['snapshot_id'] );
-		$after  = SnapshotStore::find( (int) $row['after_snapshot_id'] );
-		if ( null === $before || null === $after ) {
-			return null;
-		}
-
-		foreach ( array( $before, $after ) as $snapshot ) {
-			if (
-				$expected !== $snapshot['kind']
-				|| 'post' !== $snapshot['object_type']
-				|| (int) $row['object_id'] !== $snapshot['object_id']
-				|| (int) $row['user_id'] !== $snapshot['user_id']
-				|| ! self::valid_state( $kind, $snapshot['state'] )
-			) {
-				return null;
-			}
-		}
-
-		$b = $before['state'];
-		$a = $after['state'];
-
-		if ( self::KIND_TERMS === $kind ) {
-			if ( $b['taxonomy'] !== $a['taxonomy'] || self::sorted( $b['term_ids'] ) === self::sorted( $a['term_ids'] ) ) {
-				return null;
-			}
-
-			return array(
-				'before' => $b,
-				'after'  => $a,
-			);
-		}
-
-		if ( $b['featured_media'] === $a['featured_media'] ) {
-			return null;
-		}
-
-		return array(
-			'before' => $b,
-			'after'  => $a,
-		);
-	}
-
-	/**
-	 * Whether a decoded saved state has exactly the shape the entry's kind needs. Terms: exactly the keys taxonomy (a string) and
-	 * term_ids (a list of distinct positive integers, at most set-post-terms' cap). Featured image: exactly the key featured_media,
-	 * an integer of at least 0.
-	 *
-	 * @param string               $kind  The entry's kind.
-	 * @param array<string, mixed> $state The decoded state.
-	 * @return bool
-	 */
-	private static function valid_state( string $kind, array $state ): bool {
-		$keys = array_keys( $state );
-		sort( $keys );
-
-		if ( self::KIND_TERMS !== $kind ) {
-			return array( 'featured_media' ) === $keys
-				&& is_int( $state['featured_media'] )
-				&& $state['featured_media'] >= 0
-				&& $state['featured_media'] <= PostReader::MAX_ID;
-		}
-
-		if ( array( 'taxonomy', 'term_ids' ) !== $keys || ! is_string( $state['taxonomy'] ) || '' === $state['taxonomy'] ) {
-			return false;
-		}
-
-		$ids = $state['term_ids'];
-		if ( ! is_array( $ids ) || ! array_is_list( $ids ) || count( $ids ) > SetPostTerms::MAX_RESULT_TERMS ) {
-			return false;
-		}
-
-		foreach ( $ids as $id ) {
-			if ( ! is_int( $id ) || $id < 1 ) {
-				return false;
-			}
-		}
-
-		return count( array_unique( $ids ) ) === count( $ids );
-	}
-
-	/**
-	 * The integers of a list, ascending. Used only on values valid_state() has checked.
-	 *
-	 * @param mixed $ids The IDs.
-	 * @return int[]
-	 */
-	private static function sorted( mixed $ids ): array {
-		$ids = array_values( array_map( 'intval', (array) $ids ) );
-		sort( $ids, SORT_NUMERIC );
-
-		return $ids;
 	}
 
 	/**
@@ -1055,7 +923,7 @@ final class UndoChange extends Ability {
 	}
 
 	/**
-	 * The caller's entry, when it passes every rule that makes a change undoable (see structurally_eligible()).
+	 * The caller's entry, when it passes every rule that makes a change undoable (see owned_and_eligible()).
 	 *
 	 * @param int $id Entry ID.
 	 * @return array<string, mixed>|null
@@ -1063,60 +931,20 @@ final class UndoChange extends Ability {
 	private function undoable_entry( int $id ): ?array {
 		$row = $this->own_entry( $id );
 
-		return null !== $row && $this->structurally_eligible( $row ) ? $row : null;
+		return null !== $row && $this->owned_and_eligible( $row ) ? $row : null;
 	}
 
 	/**
-	 * Whether a change-log row can be undone, without looking at the post. Every rule must hold: the schema is ready; the row
-	 * is the caller's; the ability is one of UNDOABLE_ABILITIES; the object is a post; the result is ok or fixed; the row is
-	 * undoable and not yet undone; the before-snapshot and the after-snapshot are both named, and they differ.
+	 * Whether a row is the caller's and passes every rule that makes a change undoable (UndoRules::structurally_eligible()). The
+	 * ownership rule stays here, because it depends on the caller.
 	 *
-	 * @param array<string, mixed> $row A row from DbLogger::find().
+	 * @param array<string, mixed> $row A change-log row.
 	 * @return bool
 	 */
-	private function structurally_eligible( array $row ): bool {
+	private function owned_and_eligible( array $row ): bool {
 		$user_id = get_current_user_id();
 
-		return Schema::ready()
-			&& $user_id > 0
-			&& (int) $row['user_id'] === $user_id
-			&& in_array( (string) $row['ability'], self::UNDOABLE_ABILITIES, true )
-			&& 'post' === (string) $row['object_type']
-			&& (int) $row['object_id'] > 0
-			&& in_array( (string) $row['result'], self::MADE_RESULTS, true )
-			&& 1 === (int) $row['undoable']
-			&& 0 === (int) $row['undone_by']
-			&& (int) $row['snapshot_id'] > 0
-			&& (int) $row['after_snapshot_id'] > 0
-			&& (int) $row['after_snapshot_id'] !== (int) $row['snapshot_id'];
-	}
-
-	/**
-	 * Whether a loaded revision is a usable saved state of the post: a revision of that post, and not an autosave.
-	 *
-	 * @param mixed $revision The loaded post, or false or null.
-	 * @param int   $post_id  The post.
-	 * @return bool
-	 */
-	private function is_revision_of( mixed $revision, int $post_id ): bool {
-		return $revision instanceof \WP_Post
-			&& 'revision' === $revision->post_type
-			&& $post_id === (int) $revision->post_parent
-			&& ! wp_is_post_autosave( $revision );
-	}
-
-	/**
-	 * The title, content and excerpt of a revision, as stored.
-	 *
-	 * @param \WP_Post $revision The revision.
-	 * @return array{post_title: string, post_content: string, post_excerpt: string}
-	 */
-	private function text_of( \WP_Post $revision ): array {
-		return array(
-			'post_title'   => (string) $revision->post_title,
-			'post_content' => (string) $revision->post_content,
-			'post_excerpt' => (string) $revision->post_excerpt,
-		);
+		return $user_id > 0 && (int) $row['user_id'] === $user_id && UndoRules::structurally_eligible( $row );
 	}
 
 	/**

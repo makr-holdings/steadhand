@@ -60,7 +60,7 @@ final class EntryDiff {
 	 */
 	public static function for_entry( array $row ): array {
 		// An undo writes no state of its own to show. It names the entry it reversed, which shows the change.
-		if ( 'steadhand/undo-change' === ( $row['ability'] ?? '' ) ) {
+		if ( in_array( $row['ability'] ?? '', array( 'steadhand/undo-change', UndoEntry::NAME ), true ) ) {
 			return self::result( self::STATUS_UNDO, '', array() );
 		}
 

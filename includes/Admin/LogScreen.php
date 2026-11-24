@@ -10,6 +10,7 @@ declare( strict_types=1 );
 namespace Steadhand\Admin;
 
 use Steadhand\Abilities\Registry;
+use Steadhand\Abilities\UndoRules;
 use Steadhand\Agents;
 use Steadhand\Log\DbLogger;
 use Steadhand\Log\Schema;
@@ -60,7 +61,7 @@ final class LogScreen {
 		if ( ! Schema::ready() ) {
 			$this->notice( 'error', __( 'The change log table is missing or incomplete. Deactivate and reactivate Steadhand to recreate it.', 'steadhand' ) );
 		} elseif ( $filters->entry_id() > 0 ) {
-			$this->render_entry( $filters );
+			$this->render_entry( $filters, LogFilters::undo_code( is_array( $query ) ? $query : array() ) );
 		} else {
 			$this->render_list( $filters );
 		}
@@ -214,7 +215,9 @@ final class LogScreen {
 	 */
 	private function tool_options(): array {
 		$options = array( '' => __( 'All tools', 'steadhand' ) );
-		foreach ( $this->registry->names() as $name ) {
+		$names   = $this->registry->names();
+		$names[] = UndoEntry::NAME;
+		foreach ( $names as $name ) {
 			$options[ $name ] = $name;
 		}
 
@@ -307,12 +310,13 @@ final class LogScreen {
 	}
 
 	/**
-	 * The single view of one entry: the details, the stored input, the diff.
+	 * The single view of one entry: the details, the stored input, the undo button, the diff.
 	 *
 	 * @param LogFilters $filters The validated filters, for the back link.
+	 * @param string     $undo    The outcome code of an undo that redirected here (UndoHandler::CODES), or ''.
 	 * @return void
 	 */
-	private function render_entry( LogFilters $filters ): void {
+	private function render_entry( LogFilters $filters, string $undo ): void {
 		printf( '<p><a href="%s">%s</a></p>', esc_url( $this->url( $filters, array() ) ), esc_html__( 'Back to the change log', 'steadhand' ) );
 
 		$row = $this->logger->find_any( $filters->entry_id() );
@@ -321,8 +325,13 @@ final class LogScreen {
 			return;
 		}
 
+		if ( '' !== $undo ) {
+			$this->undo_notice( $undo );
+		}
+
 		$this->details( $row );
 		$this->announce_entry( $row );
+		$this->undo_form( $row );
 
 		echo '<h2>' . esc_html__( 'Change', 'steadhand' ) . '</h2>';
 		$this->diff( $row );
@@ -560,6 +569,73 @@ final class LogScreen {
 		}
 
 		return sprintf( '%s (#%d)', $image['title'], $image['id'] );
+	}
+
+	/**
+	 * The Undo form of an entry, when the administrator may undo it: the entry is one an undo can reverse (UndoRules), the viewer
+	 * may see the entry's post, and may edit it. The form posts to admin-post.php, with the entry ID and a nonce bound to that ID.
+	 * Nothing is shown for any other entry.
+	 *
+	 * @param array<string, mixed> $row The entry.
+	 * @return void
+	 */
+	private function undo_form( array $row ): void {
+		$id = (int) $row['id'];
+		// A dedicated agent or an administrator who holds the agent role never sees the button; the handler refuses them too.
+		if ( Agents::holds_agent_role( wp_get_current_user() ) || ! UndoRules::structurally_eligible( $row ) || ! $this->may_see_object( $row ) || ! current_user_can( 'edit_post', (int) $row['object_id'] ) ) {
+			return;
+		}
+
+		echo '<h2>' . esc_html__( 'Undo', 'steadhand' ) . '</h2>';
+		printf( '<p>%s</p>', esc_html( $this->undo_sentence( UndoRules::kind_of( $row ) ) ) );
+
+		printf( '<form method="post" action="%s">', esc_url( admin_url( 'admin-post.php' ) ) );
+		printf( '<input type="hidden" name="action" value="%s">', esc_attr( UndoHandler::ACTION ) );
+		printf( '<input type="hidden" name="entry" value="%s">', esc_attr( (string) $id ) );
+		wp_nonce_field( UndoHandler::NONCE_PREFIX . $id );
+		printf( '<p><button type="submit" class="button button-secondary">%s</button></p>', esc_html__( 'Undo this change', 'steadhand' ) );
+		echo '</form>';
+	}
+
+	/**
+	 * What the Undo button will do, for a kind of change.
+	 *
+	 * @param string $kind One of the UndoRules::KIND_ constants.
+	 * @return string
+	 */
+	private function undo_sentence( string $kind ): string {
+		return match ( $kind ) {
+			UndoRules::KIND_TERMS    => __( "Puts the post's terms in this taxonomy back to the set they had before this change.", 'steadhand' ),
+			UndoRules::KIND_FEATURED => __( "Sets the post's featured image back to the one it had before this change, or removes it when it had none.", 'steadhand' ),
+			default                  => __( "Puts the post's title, content and excerpt back to what they were before this change.", 'steadhand' ),
+		};
+	}
+
+	/**
+	 * The fixed notice for an undo outcome. Only the code is read from the request; the text is always one of these.
+	 *
+	 * @param string $code One of UndoHandler::CODES.
+	 * @return void
+	 */
+	private function undo_notice( string $code ): void {
+		$text = match ( $code ) {
+			'done'         => __( 'The change was undone. The undo is recorded in the change log.', 'steadhand' ),
+			'changed'      => __( 'The change was not undone, because the post, its terms or its image changed after it. Nothing was changed.', 'steadhand' ),
+			'not_undoable' => __( 'The change was not undone, because Steadhand cannot restore its saved state, or it was already undone. Nothing was changed.', 'steadhand' ),
+			'forbidden'    => __( 'The change was not undone. The entry does not exist, or you may not edit its post. Nothing was changed.', 'steadhand' ),
+			'partial'      => __( 'The undo did not finish as expected, so the post may have been changed. Check the post before you continue.', 'steadhand' ),
+			'log'          => __( 'The change log could not record the undo. If the post was changed, check it before you continue.', 'steadhand' ),
+			'locked'       => __( 'Someone is editing this post right now. Try again when they have finished.', 'steadhand' ),
+			default        => __( 'The undo did not complete. Check the post before you try again.', 'steadhand' ),
+		};
+
+		$type = match ( $code ) {
+			'done'                    => 'success',
+			'partial', 'log', 'failed' => 'warning',
+			default                    => 'error',
+		};
+
+		$this->notice( $type, $text );
 	}
 
 	/**

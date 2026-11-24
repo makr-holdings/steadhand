@@ -26,9 +26,11 @@ final class Admin {
 	/**
 	 * Constructor.
 	 *
-	 * @param LogScreen $log_screen The change-log screen.
+	 * @param LogScreen        $log_screen   The change-log screen.
+	 * @param UndoHandler|null $undo_handler The handler of the screen's Undo button. Null leaves the button's action unregistered;
+	 *                                       Plugin always passes one.
 	 */
-	public function __construct( private LogScreen $log_screen ) {}
+	public function __construct( private LogScreen $log_screen, private ?UndoHandler $undo_handler = null ) {}
 
 	/**
 	 * Hooks the menu and the styles into WordPress.
@@ -38,6 +40,11 @@ final class Admin {
 	public function register(): void {
 		add_action( 'admin_menu', array( $this, 'add_menu' ) );
 		add_action( 'admin_enqueue_scripts', array( $this, 'enqueue_styles' ) );
+
+		// Logged-in only: there is no nopriv variant, so a visitor cannot reach the undo.
+		if ( null !== $this->undo_handler ) {
+			add_action( 'admin_post_' . UndoHandler::ACTION, array( $this->undo_handler, 'handle' ) );
+		}
 	}
 
 	/**
