@@ -83,7 +83,10 @@ final class Plugin {
 		$this->lockdown         = new Lockdown();
 		$this->meta_caps        = new MetaCaps();
 		$this->capability_guard = new CapabilityGuard();
-		$this->admin            = new Admin\Admin( new Admin\LogScreen( $change_log, $this->registry ) );
+		$this->admin            = new Admin\Admin(
+			new Admin\LogScreen( $change_log, $this->registry ),
+			new Admin\UndoHandler( $pipeline, $change_log )
+		);
 	}
 
 	/**

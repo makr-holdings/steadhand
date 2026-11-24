@@ -203,6 +203,25 @@ final class EditLockRuleTest extends TestCase {
 	}
 
 
+	public function test_is_locked_sees_every_live_lock_while_the_rule_keeps_its_own_exemptions(): void {
+		$agent = $this->make_agent();
+
+		// The agent's own lock and a lock held by user 0 are live for is_locked() (the administrator's undo refuses them), and the
+		// rule still lets the agent write through them.
+		$own = $this->locked_post( $agent );
+		$this->assertTrue( EditLock::is_locked( $own ) );
+		$this->assertSame( Result::MODE_ALLOW, $this->evaluate( $own, $agent )->mode() );
+
+		$zero = $this->locked_post( 0 );
+		$this->assertTrue( EditLock::is_locked( $zero ) );
+		$this->assertSame( Result::MODE_ALLOW, $this->evaluate( $zero, $agent )->mode() );
+
+		// A stale lock is not live for either.
+		$stale = $this->locked_post( $agent, 1000 );
+		$this->assertFalse( EditLock::is_locked( $stale ) );
+		$this->assertFalse( EditLock::is_locked( self::factory()->post->create() ) );
+	}
+
 	public function test_a_lock_with_a_leading_space_is_read_as_core_reads_it_and_blocks_another_users_lock(): void {
 		$agent = $this->make_agent();
 		$human = self::factory()->user->create( array( 'role' => 'editor' ) );

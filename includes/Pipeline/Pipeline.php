@@ -50,13 +50,20 @@ defined( 'ABSPATH' ) || exit;
  * A successful call to a read-only ability that needs steadhand_read is not logged by default. The steadhand_log_read_calls
  * filter turns that on. Refused and failed read calls are always logged.
  *
- * Pipeline::is_running() is true from the start of authorize() until the end of execute() in run(), and around
- * authorize() in check(). MetaCaps uses it to limit the post capability mapping to Steadhand calls (SPEC §14.1).
+ * Pipeline::is_running() is true from the start of authorize() until the end of execute() in run(), around
+ * authorize() in check(), and in run_admin() from after its input is prepared until the call returns. MetaCaps uses it to limit the post capability mapping to Steadhand calls (SPEC §14.1).
  * Pipeline::is_writing() is true only while a write ability's snapshot() or execute() runs. PostWriter and Snapshots
  * refuse to run outside it.
  *
  * Input rejected by core's own schema validation, before the permission callback runs, is not logged. This gap is still
  * open.
+ *
+ * A third entry point, run_admin(), serves an administrator's action on the log screen (an undo). It is for an ability that
+ * implements AdminAction only, and run() and check() refuse such an ability. It checks that the caller is an administrator
+ * who holds no agent role, then the ability's own input rule and object check. It runs no guardrail rules and no equivalent-call
+ * evaluation, because the rules limit agents. It writes its log row and runs the same write steps as run() (reserve, snapshot,
+ * execute, complete; see write_logged()). The Steadhand capabilities, MetaCaps and CapabilityGuard grant nothing to an
+ * administrator, so the bracket changes no answer for it (see SPEC §7).
  */
 final class Pipeline {
 
@@ -86,8 +93,8 @@ final class Pipeline {
 	private static int $writing = 0;
 
 	/**
-	 * The change-log row IDs of the write calls that are running now, outermost first. run_write() pushes the ID of the row
-	 * it reserved, and pops it on every path once the write's outcome is decided. A nested write pushes and pops its own
+	 * The change-log row IDs of the write calls that are running now, outermost first. write_logged() pushes the ID of the row
+	 * it reserved, and pops it on every path once the write's outcome is decided. Both run() and run_admin() reach it. A nested write pushes and pops its own
 	 * ID, so the outer write's ID is current again when the nested write returns.
 	 *
 	 * @var int[]
@@ -95,10 +102,10 @@ final class Pipeline {
 	private static array $log_ids = array();
 
 	/**
-	 * Whether a Steadhand call is authorizing or executing an ability right now.
+	 * Whether a Steadhand call is authorizing or executing an ability right now: in run(), check() or run_admin().
 	 *
 	 * The metacap mapping (MetaCaps) applies only while this is true (SPEC §14.1, D6). It is true only between
-	 * enter() and leave(), which run() and check() call around authorize() and execute(). Nothing else can set it.
+	 * enter() and leave(), which run(), check() and run_admin() call around authorize() and execute(). Nothing else can set it.
 	 *
 	 * @return bool
 	 */
@@ -344,6 +351,12 @@ final class Pipeline {
 	 *                        when the check threw or returned something other than true.
 	 */
 	public function check( Ability $ability, array $input ): bool|\WP_Error {
+		// An administrator's action is never an agent's call. It goes through run_admin(), so this path refuses it.
+		if ( $ability instanceof AdminAction ) {
+			$this->write_entry( $ability, Entry::RESULT_BLOCKED, $this->check_failed()->get_error_message() );
+			return $this->check_failed();
+		}
+
 		// A throw from prepare() or authorize() (a third-party capability filter, for one) fails closed: the call is
 		// refused with a fixed message, logged as blocked, and never allowed. The call never ran, so the rate limits do
 		// not count it (a refused call is not counted).
@@ -391,6 +404,11 @@ final class Pipeline {
 	 * @return mixed The ability's output, or a WP_Error describing why the call was refused or failed.
 	 */
 	public function run( Ability $ability, mixed $input ): mixed {
+		// An administrator's action is never an agent's call. It goes through run_admin(), so this path refuses it, logged as blocked.
+		if ( $ability instanceof AdminAction ) {
+			return $this->finish( $ability, Entry::RESULT_BLOCKED, $this->check_failed() );
+		}
+
 		// (a) Normalize. (b) Fill defaults, validate against the strict schema, then sanitize.
 		$input = $input ?? array();
 		if ( ! is_array( $input ) ) {
@@ -461,6 +479,87 @@ final class Pipeline {
 		} finally {
 			self::leave();
 		}
+	}
+
+	/**
+	 * Runs an administrator's action (an AdminAction ability) through the pipeline.
+	 *
+	 * The order: the input is prepared against the schema; the caller must be logged in, hold manage_options and hold no
+	 * Steadhand agent role, with one fixed refusal otherwise; the ability's input rule and object check run (check_object());
+	 * then the write steps run (write_logged()). The guardrail engine is not evaluated, and neither is the equivalent call:
+	 * the rules limit agents, not administrators. Every refusal is logged as blocked, and only an exact true authorizes.
+	 *
+	 * Throws \LogicException for an ability that is not an AdminAction, so no agent ability can take this path.
+	 *
+	 * @param Ability              $ability AdminAction ability being called.
+	 * @param array<string, mixed> $input   Input from the caller.
+	 * @return mixed The ability's output, or a WP_Error describing why the call was refused or failed.
+	 * @throws \LogicException When the ability does not implement AdminAction.
+	 */
+	public function run_admin( Ability $ability, array $input ): mixed {
+		if ( ! $ability instanceof AdminAction ) {
+			throw new \LogicException( 'run_admin() takes only an AdminAction ability.' );
+		}
+
+		try {
+			$prepared = self::prepare_input( $ability, $input );
+		} catch ( \Throwable ) {
+			return $this->finish( $ability, Entry::RESULT_BLOCKED, $this->check_failed(), $this->loggable( $ability, $input ) );
+		}
+
+		if ( is_wp_error( $prepared ) ) {
+			return $this->finish( $ability, Entry::RESULT_BLOCKED, $prepared, $this->loggable( $ability, $input ) );
+		}
+
+		self::enter( true );
+		try {
+			// The caller check reads the user and its capabilities, which a filter may throw from: it fails closed like authorize().
+			try {
+				$admin = $this->authorize_admin_caller();
+			} catch ( \Throwable ) {
+				return $this->finish( $ability, Entry::RESULT_BLOCKED, $this->check_failed(), $this->loggable( $ability, $prepared ) );
+			}
+
+			if ( is_wp_error( $admin ) ) {
+				return $this->finish( $ability, Entry::RESULT_BLOCKED, $admin, $this->loggable( $ability, $prepared ) );
+			}
+
+			$target = $this->target_for( $ability, $prepared );
+
+			try {
+				$authorized = $this->check_object( $ability, $prepared );
+			} catch ( \Throwable ) {
+				return $this->finish( $ability, Entry::RESULT_BLOCKED, $this->check_failed(), $this->loggable( $ability, $prepared ), $target );
+			}
+
+			if ( is_wp_error( $authorized ) ) {
+				return $this->finish( $ability, Entry::RESULT_BLOCKED, $authorized, $this->loggable( $ability, $prepared ), $target );
+			}
+
+			// Only the exact true allows the call (see check()).
+			if ( true !== $authorized ) {
+				return $this->finish( $ability, Entry::RESULT_BLOCKED, $this->check_failed(), $this->loggable( $ability, $prepared ), $target );
+			}
+
+			return $this->write_logged( $ability, $prepared, $target, array(), Entry::RESULT_OK );
+		} finally {
+			self::leave();
+		}
+	}
+
+	/**
+	 * Checks that the current user is an administrator who holds no Steadhand agent role. Uses current_user_can() for
+	 * manage_options: it is a core capability, not a Steadhand one.
+	 *
+	 * @return bool|\WP_Error True when the caller may proceed, otherwise a steadhand_forbidden WP_Error with one fixed text.
+	 */
+	private function authorize_admin_caller(): bool|\WP_Error {
+		$user = wp_get_current_user();
+		if ( ! $user->exists() || ! current_user_can( 'manage_options' ) || Agents::holds_agent_role( $user ) ) {
+			return $this->forbidden( __( 'Only an administrator who does not hold the Steadhand agent role may do this. Nothing was changed.', 'steadhand' ) );
+		}
+
+		return true;
 	}
 
 	/**
@@ -555,6 +654,25 @@ final class Pipeline {
 			$notes = $this->merged_notes( $notes, $direct->notes, false );
 		}
 
+		return $this->write_logged( $ability, $final_input, $target, $notes, $outcome );
+	}
+
+	/**
+	 * The write steps shared by run_write() and run_admin(), after the call has been authorized and, for run(), checked by the
+	 * guardrails: (2) reserve the log row, (3) snapshot, (4) execute, (5) complete the row, and (6) return the output. The same
+	 * guarantees hold on both paths: no row, no write; a failed snapshot or execute completes the row as an error; the
+	 * after-state is asked for only inside the write; the current log ID and the written text are cleared on every path.
+	 *
+	 * Called inside the enter() bracket of run() or run_admin().
+	 *
+	 * @param Ability                      $ability     Ability being called.
+	 * @param array<string, mixed>         $final_input The input the ability executes with.
+	 * @param array{type: string, id: int} $target      The object the call is about.
+	 * @param string[]                     $notes       Guardrail notes (empty for run_admin()).
+	 * @param string                       $outcome     Entry::RESULT_OK or Entry::RESULT_FIXED, the result when execute() succeeds.
+	 * @return mixed The ability's output with guardrail_notes added, or a WP_Error.
+	 */
+	private function write_logged( Ability $ability, array $final_input, array $target, array $notes, string $outcome ): mixed {
 		// (2) Reserve the log row. No row, no write.
 		$logged = $this->loggable( $ability, $final_input );
 		$id     = $this->reserve( fn(): Entry => $this->entry_for( $ability, Entry::RESULT_ERROR, '', $logged, $target, $this->join_notes( $notes ) ) );

@@ -46,7 +46,7 @@ final class PostWriter {
 	/**
 	 * The title, content and excerpt that each post's last Steadhand save stored, by post ID, as the row holds them (unslashed,
 	 * after the save filters). Recorded by save(). An entry is cleared when a capture for the post opens and when it closes
-	 * (Snapshots), and every write clears all entries once its outcome is decided (Pipeline::run_write()), so no entry outlives
+	 * (Snapshots), and every write clears all entries once its outcome is decided (Pipeline::write_logged(), which run() and run_admin() both reach), so no entry outlives
 	 * the write that made it, whether or not the write was undoable, failed or threw.
 	 *
 	 * @var array<int, array{post_title: string, post_content: string, post_excerpt: string}>
@@ -447,7 +447,7 @@ final class PostWriter {
 
 	/**
 	 * Forgets the text recorded for a post, or for every post when no ID is given. Snapshots calls it with a post ID when a
-	 * capture for the post opens and when it closes. Pipeline::run_write() calls it with no ID once a write's outcome is
+	 * capture for the post opens and when it closes. Pipeline::write_logged() calls it with no ID once a write's outcome is
 	 * decided.
 	 *
 	 * A nested write clears every entry when it ends, including the outer write's entry. The outer call then names no

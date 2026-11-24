@@ -123,6 +123,19 @@ final class LogFilters {
 	}
 
 	/**
+	 * The notice code the request carries after an undo, from the redirect of UndoHandler. It is not a filter: it is not in values()
+	 * and does not make the set invalid. A value that is not one of UndoHandler::CODES is ignored, so it prints nothing.
+	 *
+	 * @param array<string, mixed> $query The request's query values, unslashed.
+	 * @return string One of UndoHandler::CODES, or ''.
+	 */
+	public static function undo_code( array $query ): string {
+		$raw = $query['undo'] ?? '';
+
+		return is_string( $raw ) && in_array( $raw, UndoHandler::CODES, true ) ? $raw : '';
+	}
+
+	/**
 	 * Whether every set filter is valid. An unset filter is valid.
 	 *
 	 * @return bool
