@@ -89,7 +89,7 @@ Use the table prefix from `wp-config.php`. The table holds every agent's entries
 
 ## Change log screen
 
-Administrators find the change log under **Steadhand** in the admin menu. The list filters by agent, tool, result and date (days are read in the site's timezone), and shows 50 entries a page. Open an entry to see its stored fields, its input and a diff of the change: the title, content and excerpt for a post edit, the terms added and removed, or the featured image before and after. The diff needs the right to edit that post; without it, the diff is not shown. Agents cannot open the screen. The screen only reads. The undo button is not built yet.
+Administrators find the change log under **Steadhand** in the admin menu. The list filters by agent, tool, result and date (days are read in the site's timezone), and shows 50 entries a page. Open an entry to see its stored fields, its input and a diff of the change: the title, content and excerpt for a post edit, the terms added and removed, or the featured image before and after. The diff needs the right to edit that post; without it, the diff is not shown. The message, the guardrail notes and the input of an entry about a post are hidden from a viewer who may not edit that post, and the screen shows a short note in their place. Entries about no post are always shown. Agents cannot open the screen. The screen only reads. The undo button is not built yet.
 
 ## Guardrails
 

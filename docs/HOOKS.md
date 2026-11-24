@@ -271,6 +271,7 @@ Runs on the single-entry view of the change-log screen, after the entry's stored
 - **Who gets it:** the same viewers as `steadhand_admin_log_toolbar`.
 - **If a listener throws:** the exception is caught and ignored, so the screen still renders.
 - **Trust and output:** the same as `steadhand_admin_log_toolbar`. The listener must escape what it prints, and `input` is an agent's data.
+- **Hidden fields:** the screen hides `message`, `guardrail_notes` and `input` from a viewer who may not edit the post the entry names (SPEC section 7). This action still receives the full row, including those fields, because listeners are trusted code. A listener that prints them must check `edit_post` for that post itself.
 - **What it does not do:** it cannot change the entry, the diff, or what the screen shows. It has no return value.
 
 This action is public API. The [stability policy](#stability-policy) above applies. Any new parameter will go at the end.

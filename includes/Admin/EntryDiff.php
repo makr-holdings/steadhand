@@ -32,6 +32,9 @@ final class EntryDiff {
 	/** The data is in sections. */
 	public const STATUS_OK = 'ok';
 
+	/** The entry is an undo, which has no diff of its own: it reverses another entry, which shows the change. */
+	public const STATUS_UNDO = 'undo';
+
 	/** A text change: title, content and excerpt, from core revisions. */
 	public const KIND_TEXT = 'text';
 
@@ -56,6 +59,11 @@ final class EntryDiff {
 	 * @return array{status: string, kind: string, sections: array<int, array<string, mixed>>}
 	 */
 	public static function for_entry( array $row ): array {
+		// An undo writes no state of its own to show. It names the entry it reversed, which shows the change.
+		if ( 'steadhand/undo-change' === ( $row['ability'] ?? '' ) ) {
+			return self::result( self::STATUS_UNDO, '', array() );
+		}
+
 		$kind = self::kind_of( $row );
 		if ( '' === $kind ) {
 			return self::result( self::STATUS_NONE, '', array() );
@@ -298,9 +306,12 @@ final class EntryDiff {
 	private static function image( int $id ): array {
 		$post = $id > 0 ? get_post( $id ) : null;
 
+		// Only an attachment's title is shown. Any other post that the meta points at is treated as missing.
+		$is_attachment = $post instanceof \WP_Post && 'attachment' === $post->post_type;
+
 		return array(
 			'id'    => $id,
-			'title' => $post instanceof \WP_Post ? (string) $post->post_title : null,
+			'title' => $is_attachment ? (string) $post->post_title : null,
 		);
 	}
 

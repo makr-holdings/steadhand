@@ -89,8 +89,8 @@ final class LogFilters {
 		$user_id = self::agent_id( $raw['agent'] ?? '', $valid, $values );
 		$ability = self::ability( $raw['ability'] ?? '', $valid, $values );
 		$result  = self::result( $raw['result'] ?? '', $valid, $values );
-		$after   = self::day_bound( $raw['from'] ?? '', '00:00:00', 'from', $valid, $values );
-		$before  = self::day_bound( $raw['to'] ?? '', '23:59:59', 'to', $valid, $values );
+		$after   = self::day_bound( $raw['from'] ?? '', 'from', $valid, $values );
+		$before  = self::day_bound( $raw['to'] ?? '', 'to', $valid, $values );
 		$page    = self::number( $raw['paged'] ?? '', 1, 1, self::MAX_PAGE, 'paged', $valid, $values );
 		$entry   = self::number( $raw['entry'] ?? '', 0, 0, PHP_INT_MAX, 'entry', $valid, $values );
 
@@ -239,16 +239,17 @@ final class LogFilters {
 	}
 
 	/**
-	 * Checks a date filter (Y-m-d, in the site's timezone) and converts it to a UTC bound, 'Y-m-d H:i:s'.
+	 * Checks a date filter (Y-m-d, in the site's timezone) and converts it to a UTC bound, 'Y-m-d H:i:s'. A 'from' is the start
+	 * of that local day. A 'to' is the last second of that local day: the start of the next local day, minus one second, taken
+	 * in UTC. A local day can be 23 or 25 hours long, so this never leaves an hour out.
 	 *
 	 * @param string                $raw    The request value.
-	 * @param string                $time   The time of day in the site's timezone: 00:00:00 for a start, 23:59:59 for an end.
 	 * @param string                $key    The request key: 'from' or 'to'.
 	 * @param bool                  $valid  Validity, cleared on failure.
 	 * @param array<string, string> $values Validated strings, set on success.
 	 * @return string The UTC bound, or '' when not set.
 	 */
-	private static function day_bound( string $raw, string $time, string $key, bool &$valid, array &$values ): string {
+	private static function day_bound( string $raw, string $key, bool &$valid, array &$values ): string {
 		if ( '' === $raw ) {
 			return '';
 		}
@@ -267,7 +268,11 @@ final class LogFilters {
 		}
 
 		try {
-			$local = new \DateTimeImmutable( $raw . ' ' . $time, wp_timezone() );
+			$utc   = new \DateTimeZone( 'UTC' );
+			$day   = new \DateTimeImmutable( $raw . ' 00:00:00', wp_timezone() );
+			$bound = 'to' === $key
+				? $day->modify( '+1 day' )->setTimezone( $utc )->modify( '-1 second' )
+				: $day->setTimezone( $utc );
 		} catch ( \Exception ) {
 			$valid = false;
 			return '';
@@ -275,7 +280,7 @@ final class LogFilters {
 
 		$values[ $key ] = $raw;
 
-		return $local->setTimezone( new \DateTimeZone( 'UTC' ) )->format( 'Y-m-d H:i:s' );
+		return $bound->format( 'Y-m-d H:i:s' );
 	}
 
 	/**

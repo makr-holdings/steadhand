@@ -123,7 +123,7 @@ final class LogScreen {
 		printf( '<form method="get" action="%s">', esc_url( admin_url( 'admin.php' ) ) );
 		printf( '<input type="hidden" name="page" value="%s">', esc_attr( self::SLUG ) );
 
-		$this->select( 'agent', __( 'Agent', 'steadhand' ), $this->agent_options(), $values['agent'] );
+		$this->select( 'agent', __( 'Agent', 'steadhand' ), $this->agent_options( $values['agent'] ), $values['agent'] );
 		$this->select( 'ability', __( 'Tool', 'steadhand' ), $this->tool_options(), $values['ability'] );
 		$this->select(
 			'result',
@@ -180,13 +180,19 @@ final class LogScreen {
 	}
 
 	/**
-	 * The agent choices: every user that appears in the log. A deleted user is named by its ID.
+	 * The agent choices: every user that appears in the log, and the selected agent even when it does not appear there, so the
+	 * select never shows "All agents" under an active filter. A deleted user is named by its ID.
 	 *
+	 * @param string $selected The agent ID the filter selects, or ''.
 	 * @return array<string,string>
 	 */
-	private function agent_options(): array {
+	private function agent_options( string $selected ): array {
 		$options = array( '' => __( 'All agents', 'steadhand' ) );
-		foreach ( $this->logger->users() as $user_id ) {
+		$ids     = $this->logger->users();
+		if ( '' !== $selected && ! in_array( (int) $selected, $ids, true ) ) {
+			$ids[] = (int) $selected;
+		}
+		foreach ( $ids as $user_id ) {
 			$user = get_userdata( $user_id );
 
 			$options[ (string) $user_id ] = $user instanceof \WP_User
@@ -261,7 +267,8 @@ final class LogScreen {
 		printf( '<td>%s</td>', esc_html( (string) $item['ability'] ) );
 		printf( '<td>%s</td>', esc_html( $this->object_label( (string) $item['object_type'], (int) $item['object_id'] ) ) );
 		printf( '<td>%s</td>', esc_html( $result ) );
-		printf( '<td>%s</td>', esc_html( $this->excerpt( (string) $item['message'] ) ) );
+		$message = $this->may_see_object( $item ) ? $this->excerpt( (string) $item['message'] ) : $this->hidden();
+		printf( '<td>%s</td>', esc_html( $message ) );
 		printf(
 			'<td><a href="%s">%s</a></td>',
 			esc_url( $this->url( $filters, array( 'entry' => (string) $item['id'] ) ) ),
@@ -286,7 +293,8 @@ final class LogScreen {
 		$base = add_query_arg( 'paged', '%#%', $this->url( $filters, array() ) );
 
 		echo '<div class="tablenav"><div class="tablenav-pages">';
-		// paginate_links() returns HTML that core has escaped, and its links carry the filters from $base.
+		// paginate_links() returns HTML that core has escaped. Its links are built from $base, and core also merges in every
+		// query argument of the current request URI (general-template.php), with the values url-encoded.
 		echo paginate_links( // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped -- paginate_links() returns escaped HTML.
 			array(
 				'base'    => $base,
@@ -355,6 +363,7 @@ final class LogScreen {
 	 * @return void
 	 */
 	private function details( array $row ): void {
+		$visible = $this->may_see_object( $row );
 		$created = (string) $row['created_at'];
 		$user_id = (int) $row['user_id'];
 		$user    = get_userdata( $user_id );
@@ -372,8 +381,8 @@ final class LogScreen {
 		$this->detail( __( 'Tool', 'steadhand' ), (string) $row['ability'] );
 		$this->detail( __( 'Object', 'steadhand' ), $this->object_label( (string) $row['object_type'], (int) $row['object_id'] ) );
 		$this->detail( __( 'Result', 'steadhand' ), (string) $row['result'] );
-		$this->detail( __( 'Message', 'steadhand' ), $this->or_none( (string) $row['message'] ) );
-		$this->detail( __( 'Guardrail notes', 'steadhand' ), $this->or_none( (string) $row['guardrail_notes'] ) );
+		$this->detail( __( 'Message', 'steadhand' ), $visible ? $this->or_none( (string) $row['message'] ) : $this->hidden() );
+		$this->detail( __( 'Guardrail notes', 'steadhand' ), $visible ? $this->or_none( (string) $row['guardrail_notes'] ) : $this->hidden() );
 		$this->detail( __( 'Snapshot ID', 'steadhand' ), $this->id_or_none( (int) $row['snapshot_id'] ) );
 		$this->detail( __( 'After-state snapshot ID', 'steadhand' ), $this->id_or_none( (int) $row['after_snapshot_id'] ) );
 		$this->detail( __( 'Undoable', 'steadhand' ), (int) $row['undoable'] > 0 ? __( 'Yes', 'steadhand' ) : __( 'No', 'steadhand' ) );
@@ -389,11 +398,15 @@ final class LogScreen {
 			$this->detail( __( 'Undone by', 'steadhand' ), __( 'Not undone', 'steadhand' ) );
 		}
 
-		printf(
-			'<tr><th scope="row">%s</th><td><pre>%s</pre></td></tr>',
-			esc_html__( 'Input', 'steadhand' ),
-			esc_html( $this->pretty_input( (string) $row['input'] ) )
-		);
+		if ( $visible ) {
+			printf(
+				'<tr><th scope="row">%s</th><td><pre>%s</pre></td></tr>',
+				esc_html__( 'Input', 'steadhand' ),
+				esc_html( $this->pretty_input( (string) $row['input'] ) )
+			);
+		} else {
+			$this->detail( __( 'Input', 'steadhand' ), $this->hidden() );
+		}
 		echo '</tbody></table>';
 	}
 
@@ -424,6 +437,10 @@ final class LogScreen {
 
 			case EntryDiff::STATUS_UNAVAILABLE:
 				printf( '<p>%s</p>', esc_html__( 'The saved states for this change cannot be read, or do not belong to it, so no change is shown.', 'steadhand' ) );
+				return;
+
+			case EntryDiff::STATUS_UNDO:
+				printf( '<p>%s</p>', esc_html__( 'An undo has no diff of its own. See the entry it reversed.', 'steadhand' ) );
 				return;
 
 			case EntryDiff::STATUS_FORBIDDEN:
@@ -655,6 +672,36 @@ final class LogScreen {
 		}
 
 		return mb_substr( $text, 0, self::MESSAGE_CHARS ) . '…';
+	}
+
+	/**
+	 * Whether the viewer may see the fields that can carry post text: the message, the guardrail notes and the input. An entry
+	 * about no post (another object type, or object ID 0) is always shown. An entry about a post is shown only when the viewer
+	 * may edit that post, and an entry whose post no longer exists is not shown.
+	 *
+	 * @param array<string, mixed> $row The entry.
+	 * @return bool
+	 */
+	private function may_see_object( array $row ): bool {
+		$object_id = (int) ( $row['object_id'] ?? 0 );
+		if ( 'post' !== ( $row['object_type'] ?? '' ) || $object_id <= 0 ) {
+			return true;
+		}
+
+		if ( ! get_post( $object_id ) instanceof \WP_Post ) {
+			return false;
+		}
+
+		return current_user_can( 'edit_post', $object_id );
+	}
+
+	/**
+	 * The text shown in place of a field the viewer may not see.
+	 *
+	 * @return string
+	 */
+	private function hidden(): string {
+		return __( 'Hidden: you are not allowed to edit this post.', 'steadhand' );
 	}
 
 	/**

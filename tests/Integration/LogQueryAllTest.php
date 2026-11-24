@@ -147,6 +147,17 @@ final class LogQueryAllTest extends LogTestCase {
 		$this->assertArrayNotHasKey( 'user_id', $page['items'][0] );
 	}
 
+	public function test_a_user_id_filter_given_to_query_does_not_widen_the_per_user_read(): void {
+		[ $a, $b, $c ] = $this->fixtures();
+
+		// Only query_all() reads a user_id filter. query() reads the owner it is given, and nothing else.
+		$page = $this->logger()->query( 5, array( 'user_id' => 6 ), 1, 50 );
+
+		$this->assertSame( 2, $page['total'] );
+		$this->assertEqualsCanonicalizing( array( $a, $c ), $this->ids( $page ) );
+		$this->assertNotContains( $b, $this->ids( $page ) );
+	}
+
 	public function test_query_all_is_unavailable_when_the_table_is_missing(): void {
 		$this->make_table_look_missing();
 

@@ -171,6 +171,18 @@ final class LogFiltersTest extends TestCase {
 		$this->assertFalse( $filters->is_valid(), '2027 is not a leap year.' );
 	}
 
+	public function test_a_day_with_a_clock_change_at_midnight_is_covered_to_its_last_second(): void {
+		// Santiago's clocks go back at midnight on 2026-04-05, so local 2026-04-04 is 25 hours long and an hour of it
+		// would be left out by an end bound of 23:59:59 local.
+		update_option( 'timezone_string', 'America/Santiago' );
+
+		$to   = LogFilters::from_request( array( 'to' => '2026-04-04' ) );
+		$from = LogFilters::from_request( array( 'from' => '2026-04-05' ) );
+
+		$this->assertSame( '2026-04-05 03:59:59', $to->to_query()['before'] );
+		$this->assertSame( '2026-04-05 04:00:00', $from->to_query()['after'] );
+	}
+
 	public function test_the_page_is_read_and_capped(): void {
 		$this->assertSame( 3, LogFilters::from_request( array( 'paged' => '3' ) )->page() );
 		$this->assertSame( 100000, LogFilters::from_request( array( 'paged' => '100000' ) )->page() );

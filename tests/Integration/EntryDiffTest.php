@@ -495,6 +495,56 @@ final class EntryDiffTest extends PostWriteTestCase {
 		$this->assertStringNotContainsString( 'After title', (string) wp_json_encode( $diff ) );
 	}
 
+	public function test_a_featured_image_that_is_not_an_attachment_shows_no_title(): void {
+		$hidden = $this->admin_post(
+			array(
+				'post_status' => 'private',
+				'post_title'  => 'Private post title XYZ',
+			)
+		);
+		$post   = $this->admin_post( array( 'post_status' => 'draft' ) );
+		$before = $this->snapshot( SnapshotStore::KIND_FEATURED_IMAGE, 'post', $post, array( 'featured_media' => $hidden ) );
+		$after  = $this->snapshot( SnapshotStore::KIND_FEATURED_IMAGE, 'post', $post, array( 'featured_media' => 0 ) );
+		$entry  = $this->stored_entry(
+			array(
+				'user_id'           => $this->admin_id(),
+				'ability'           => self::FEATURED,
+				'object_type'       => 'post',
+				'object_id'         => $post,
+				'result'            => Entry::RESULT_OK,
+				'snapshot_id'       => $before,
+				'after_snapshot_id' => $after,
+			)
+		);
+
+		$this->view_as_admin();
+		$diff = EntryDiff::for_entry( $entry );
+
+		$this->assertSame( EntryDiff::STATUS_OK, $diff['status'] );
+		$this->assertSame( $hidden, $diff['sections'][0]['before']['id'] );
+		$this->assertNull( $diff['sections'][0]['before']['title'], 'A post that is not an attachment must not supply a title.' );
+		$this->assertStringNotContainsString( 'Private post title XYZ', (string) wp_json_encode( $diff ) );
+	}
+
+	public function test_an_undo_entry_has_the_undo_status_and_no_sections(): void {
+		$entry = $this->stored_entry(
+			array(
+				'ability'           => 'steadhand/undo-change',
+				'object_type'       => 'post',
+				'object_id'         => $this->admin_post(),
+				'result'            => Entry::RESULT_OK,
+				'snapshot_id'       => 5,
+				'after_snapshot_id' => 6,
+			)
+		);
+
+		$diff = EntryDiff::for_entry( $entry );
+
+		$this->assertSame( EntryDiff::STATUS_UNDO, $diff['status'] );
+		$this->assertSame( '', $diff['kind'] );
+		$this->assertSame( array(), $diff['sections'] );
+	}
+
 	public function test_a_missing_post_is_unavailable(): void {
 		$entry = $this->update_entry();
 		wp_delete_post( (int) $entry['object_id'], true );

@@ -103,7 +103,7 @@ final class LogScreenTest extends PostWriteTestCase {
 					'agent_label' => 'Editor bot',
 					'ability'     => 'steadhand/get-post',
 					'object_type' => 'post',
-					'object_id'   => 1,
+					'object_id'   => 0,
 					'result'      => Entry::RESULT_OK,
 					'message'     => 'Read a post',
 				),
@@ -545,28 +545,156 @@ final class LogScreenTest extends PostWriteTestCase {
 
 		$result = $this->render_as( $this->admin_id(), array( 'result' => 'ok' ) );
 
-		$this->assertStringContainsString( 'paged=2', $result['html'] );
-		$this->assertStringContainsString( 'result=ok', $result['html'] );
+		// Asserted inside the pagination only, so the View links cannot make the check pass.
+		$pages = $this->pagination_html( $result['html'] );
+		$this->assertStringContainsString( 'paged=2', $pages );
+		$this->assertStringContainsString( 'result=ok', $pages );
 	}
 
-	public function test_a_diff_the_viewer_may_not_see_shows_no_post_text(): void {
-		$id   = $this->text_change( 'Private before title', '<p>Private before</p>', 'Private after title', '<p>Private after</p>' );
-		$post = (int) $this->entry_row( $id )['object_id'];
+	/**
+	 * The pagination block of a rendered list.
+	 *
+	 * @param string $html The rendered page.
+	 */
+	private function pagination_html( string $html ): string {
+		$start = strpos( $html, '<div class="tablenav-pages">' );
+		$this->assertIsInt( $start, 'The pagination must be rendered.' );
+		$end = strpos( $html, '</div></div>', (int) $start );
 
+		return substr( $html, (int) $start, (int) $end - (int) $start );
+	}
+
+	/**
+	 * Denies edit_post for one post, or for every post when $post is null. Returns the filter, which the caller removes.
+	 *
+	 * @param int|null $post The post, or null for all.
+	 */
+	private function deny_edit( ?int $post ): \Closure {
 		$deny = static function ( array $caps, string $cap, int $user_id, array $args ) use ( $post ): array {
 			unset( $user_id );
-			return ( 'edit_post' === $cap && isset( $args[0] ) && (int) $args[0] === $post ) ? array( 'do_not_allow' ) : $caps;
+			$matches = null === $post || ( isset( $args[0] ) && (int) $args[0] === $post );
+
+			return ( 'edit_post' === $cap && $matches ) ? array( 'do_not_allow' ) : $caps;
 		};
 		add_filter( 'map_meta_cap', $deny, 10, 4 );
 
+		return $deny;
+	}
+
+	/**
+	 * Sets columns of an existing change-log row, as a fixture.
+	 *
+	 * @param int                  $id     Row ID.
+	 * @param array<string, mixed> $fields Columns to set.
+	 */
+	private function set_row_fields( int $id, array $fields ): void {
+		global $wpdb;
+
+		$wpdb->update( Schema::table(), $fields, array( 'id' => $id ) ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching -- Test fixture: the row is set as a write would leave it.
+	}
+
+	/**
+	 * A post edit whose message, guardrail notes and input all carry the word "Private". Returns the entry ID.
+	 */
+	private function private_edit(): int {
+		$id   = $this->text_change( 'Private before title', '<p>Private before</p>', 'Private after title', '<p>Private after</p>' );
+		$post = (int) $this->entry_row( $id )['object_id'];
+
+		$this->set_row_fields(
+			$id,
+			array(
+				'input'           => (string) wp_json_encode(
+					array(
+						'id'      => $post,
+						'title'   => 'Private after title',
+						'content' => '<p>Private after</p>',
+					)
+				),
+				'message'         => 'Private message MARKER',
+				'guardrail_notes' => 'Private note MARKER',
+			)
+		);
+
+		return $id;
+	}
+
+	public function test_a_viewer_who_may_not_edit_the_post_sees_no_message_notes_or_input(): void {
+		$id   = $this->private_edit();
+		$post = (int) $this->entry_row( $id )['object_id'];
+
+		$deny = $this->deny_edit( $post );
 		try {
-			$result = $this->render_as( $this->admin_id(), array( 'entry' => (string) $id ) );
+			$list  = $this->render_as( $this->admin_id() );
+			$entry = $this->render_as( $this->admin_id(), array( 'entry' => (string) $id ) );
 		} finally {
 			remove_filter( 'map_meta_cap', $deny, 10 );
 		}
 
-		$this->assertStringContainsString( 'You may not edit this post', $result['html'] );
-		$this->assertStringNotContainsString( 'Private', $result['html'] );
+		$hidden = 'Hidden: you are not allowed to edit this post.';
+		$this->assertStringContainsString( $hidden, $list['html'] );
+		$this->assertStringNotContainsString( 'Private', $list['html'] );
+		$this->assertStringNotContainsString( 'MARKER', $list['html'] );
+
+		$this->assertSame( 3, substr_count( $entry['html'], $hidden ), 'Message, guardrail notes and input must each be hidden.' );
+		$this->assertStringContainsString( 'You may not edit this post', $entry['html'] );
+		$this->assertStringNotContainsString( 'Private', $entry['html'] );
+		$this->assertStringNotContainsString( 'MARKER', $entry['html'] );
+	}
+
+	public function test_a_viewer_who_may_edit_the_post_sees_its_message_notes_and_input(): void {
+		$id = $this->private_edit();
+
+		$list  = $this->render_as( $this->admin_id() );
+		$entry = $this->render_as( $this->admin_id(), array( 'entry' => (string) $id ) );
+
+		$this->assertStringContainsString( 'Private message MARKER', $list['html'] );
+		$this->assertStringNotContainsString( 'Hidden: you are not allowed', $list['html'] );
+		$this->assertStringContainsString( 'Private note MARKER', $entry['html'] );
+		$this->assertStringContainsString( 'Private after title', $entry['html'] );
+		$this->assertStringNotContainsString( 'Hidden: you are not allowed', $entry['html'] );
+	}
+
+	public function test_an_entry_about_no_post_is_shown_even_when_the_viewer_may_edit_no_post(): void {
+		$id = $this->log_row(
+			array(
+				'object_type'     => 'post',
+				'object_id'       => 0,
+				'message'         => 'Zero object message',
+				'guardrail_notes' => 'Zero object note',
+				'input'           => '{"x":1}',
+			)
+		);
+
+		$deny = $this->deny_edit( null );
+		try {
+			$list  = $this->render_as( $this->admin_id() );
+			$entry = $this->render_as( $this->admin_id(), array( 'entry' => (string) $id ) );
+		} finally {
+			remove_filter( 'map_meta_cap', $deny, 10 );
+		}
+
+		$this->assertStringContainsString( 'Zero object message', $list['html'] );
+		$this->assertStringContainsString( 'Zero object message', $entry['html'] );
+		$this->assertStringContainsString( 'Zero object note', $entry['html'] );
+		$this->assertStringNotContainsString( 'Hidden: you are not allowed', $entry['html'] );
+	}
+
+	public function test_the_selected_agent_is_offered_even_when_it_is_not_in_the_log(): void {
+		$this->log_row( array( 'message' => 'Admin row' ) );
+		$lonely = (int) self::factory()->user->create( array( 'user_login' => 'lonely_agent' ) );
+
+		$result = $this->render_as( $this->admin_id(), array( 'agent' => (string) $lonely ) );
+
+		$this->assertStringContainsString( 'value="' . $lonely . '" selected>lonely_agent</option>', $result['html'] );
+		$this->assertStringNotContainsString( '<option value="" selected>All agents', $result['html'] );
+	}
+
+	public function test_an_undo_entry_says_it_has_no_diff_of_its_own(): void {
+		$id = $this->log_row( array( 'ability' => 'steadhand/undo-change' ) );
+
+		$result = $this->render_as( $this->admin_id(), array( 'entry' => (string) $id ) );
+
+		$this->assertStringContainsString( 'An undo has no diff of its own. See the entry it reversed.', $result['html'] );
 	}
 
 	public function test_rendering_both_views_writes_nothing(): void {
