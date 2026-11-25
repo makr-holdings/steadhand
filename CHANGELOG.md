@@ -13,6 +13,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). The
 - `steadhand/trash-post` refuses a sticky post with `steadhand_refused_sticky_post` (409), because core removes a post from the sticky posts when it is trashed and a restore does not put it back. The writer refuses it too.
 - `steadhand/restore-post` sets a post that WordPress restores live to draft, with a status-only save, when the agent may not publish. A post that stays live is refused with `steadhand_update_partial`, and the message says an administrator should check it. The restore's own save and the slug save after it hold a live status down to the one the restore asked for, so a plugin's publish filter cannot make the post live. They leave a status that is not live as a plugin set it, and never raise a status. The draft save is only the backstop, and it runs before the slug save. A restore that fails after WordPress removed its trash time reports `steadhand_update_partial`, clears the markers and does not say "try again".
 
+### Changed
+- `readme.txt` opens its description with a pre-release warning, as `README.md` does: Steadhand has been tested only on its maintainers' own sites and has had no outside security review.
+
 ### Security
 - WordPress deletes a trashed post permanently after `EMPTY_TRASH_DAYS` days, which is the site's trash period, unless it is restored. `steadhand/trash-post` refuses, with nothing changed, when that setting is zero or not a positive number, because WordPress would then delete the post at once.
 - `delete_post` is granted to an agent only inside `steadhand/trash-post` and `steadhand/restore-post`, and only as those two abilities need it (SPEC section 14.1). Restoring a post clears its trash markers, so an administrator's later trash of the same post cannot be restored by the agent that trashed it earlier.
