@@ -288,7 +288,7 @@ Build a release zip:
 bin/build.sh <dev|wporg> [version]
 ```
 
-The optional version must match the `Version:` header in `steadhand.php`, with or without a leading `v`.
+The optional version must match the `Version:` header in `steadhand.php`, with or without a leading `v`. A release must also bump `Stable tag` in `readme.txt` to the same version; the build fails if the two differ.
 
 Each build writes one zip into `build/`:
 

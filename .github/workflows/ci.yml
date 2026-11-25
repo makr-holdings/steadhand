@@ -11,7 +11,7 @@ name: CI
 
 # Docs-only changes do not run CI: a change that touches only the files listed under paths-ignore is skipped,
 # on pull requests and on main. A change that touches any other file as well gets the full run.
-# CHANGELOG.md and SECURITY.md are not listed, because they ship in the release zips and the build job checks them.
+# CHANGELOG.md, SECURITY.md and readme.txt are not listed, because they ship in the release zips and the build job or Plugin Check checks them.
 # Keep the two lists identical.
 on:
   pull_request:
@@ -264,9 +264,4 @@ jobs:
           # KNOWN OPEN QUESTION FOR THE OWNER: Plugin Check reports a trademarked_term warning
           # for the plugin name ("Steadhand"). It is left visible on purpose and is not excluded or
           # ignored here. The naming decision belongs to Rick, not to CI.
-          # TODO(M4, D10): remove this exclusion when readme.txt is added. Until then the
-          # plugin_readme check (Plugin_Readme_Check, registered as "plugin_readme" in
-          # Plugin Check's Default_Check_Repository) fails because readme.txt is intentionally absent.
           # Do not add other exclusions without a reason written here.
-          exclude-checks: |
-            plugin_readme
