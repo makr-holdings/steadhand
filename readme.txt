@@ -56,7 +56,7 @@ Write:
 
 * Use the REST API, XML-RPC or wp-admin. Its credentials work only at the Steadhand endpoint.
 * Sign in with a password.
-* Manage users, roles, plugins or settings, delete, trash or restore content, or run PHP, SQL or shell commands. No tool does these.
+* Manage users, roles, plugins or settings, delete, trash or restore a post or page, or run PHP, SQL or shell commands. No tool does these.
 * Publish, schedule or make content private, unless an administrator turns on the publish capability for it. It is off by default.
 * Connect with any account that holds a role besides the agent role, such as an administrator.
 
