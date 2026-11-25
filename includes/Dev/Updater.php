@@ -76,9 +76,8 @@ final class Updater {
 	 * Whether a download URL may be offered, for the mode the checker runs in.
 	 *
 	 * With a token, the URL must be an API asset URL of this repository. Without one, it must be the public
-	 * browser download of a dev zip whose version in the tag matches the version in the zip name, and when $version
-	 * is given as a string it must equal that version too. Without one, a missing, null or non-string $version
-	 * is refused.
+	 * browser download of a dev zip whose version in the tag matches the version in the zip name. Without a token,
+	 * $version must be a string equal to the version in the URL; anything else is refused.
 	 *
 	 * @param mixed $url       The download URL.
 	 * @param bool  $tokenless True for the tokenless checker, false for the checker with a token.
@@ -188,10 +187,23 @@ final class Updater {
 
 		// The library caches the offered update and serves it later without running request_info_result again, so an
 		// update cached under another mode (or a bad one) would still be offered. Drop it here, and only then write.
-		$state  = $checker->getUpdateState();
-		$cached = $state->getUpdate();
-		if ( null !== $cached && ! self::is_allowed_download( $cached->download_url ?? null, $tokenless, $cached->version ?? null ) ) {
-			$state->setUpdate( null )->save();
+		// A malformed stored state can make the library throw while loading it (for example a TypeError from
+		// property_exists() on a non-object update). This runs on every request, so a throw must not reach the site:
+		// discard the stored state instead. resetUpdateState() only deletes the option, so it does not read the
+		// malformed state. Nothing is logged or printed.
+		try {
+			$state  = $checker->getUpdateState();
+			$cached = $state->getUpdate();
+			if ( null !== $cached && ! self::is_allowed_download( $cached->download_url ?? null, $tokenless, $cached->version ?? null ) ) {
+				$state->setUpdate( null )->save();
+			}
+		} catch ( \Throwable ) {
+			try {
+				$checker->resetUpdateState();
+			} catch ( \Throwable ) {
+				// Nothing more can be done here without failing the request, so the checker is returned as it is.
+				return $checker;
+			}
 		}
 
 		return $checker;

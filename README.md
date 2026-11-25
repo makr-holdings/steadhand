@@ -321,7 +321,7 @@ The value must be the boolean `true`. `1`, `'true'` and any other value leave th
 
 How the updater handles the download:
 
-- It installs only the `steadhand-dev-X.Y.Z.zip` release asset, from `https://github.com/makr-holdings/steadhand/releases/download/vX.Y.Z/`. The version in the release tag, in the zip's name and in the plugin header at that tag must all be the same, or the release is skipped. It never installs GitHub's source archive, which has no `vendor/` folder. A release without the asset is skipped.
+- It installs only the `steadhand-dev-X.Y.Z.zip` release asset, from `https://github.com/makr-holdings/steadhand/releases/download/vX.Y.Z/`. The version in the release tag and in the zip's name must be the same, or the release is skipped. When the plugin header at that tag can be read, its version must match too. It never installs GitHub's source archive, which has no `vendor/` folder. A release without the asset is skipped.
 - It sends no credentials. GitHub limits requests without a token to 60 an hour for each IP address. On a server that shares its address with other sites, an update check can fail for that reason. A pending update is then hidden until a check succeeds. Checks run every 12 hours, and **Check for updates** on the Plugins screen runs one at once.
 
 Know this risk before you turn it on:
@@ -330,7 +330,7 @@ Know this risk before you turn it on:
 
 ### Sites that still have a token
 
-Before the repository was public, the updater needed a GitHub token in the `STEADHAND_DEV_GITHUB_TOKEN` constant. A site that defines it, and not `STEADHAND_DEV_UPDATES`, keeps updating as before: the updater stays on and sends the token to this repository's GitHub API. When the token expires or is revoked, GitHub refuses those requests and updates stop.
+Before the repository was public, the updater needed a GitHub token in the `STEADHAND_DEV_GITHUB_TOKEN` constant. A site that defines it, and does not set `STEADHAND_DEV_UPDATES` to `true`, keeps updating as before: the updater stays on and sends the token to this repository's GitHub API. When the token expires or is revoked, GitHub refuses those requests and updates stop.
 
 The token is no longer needed. On each such site:
 

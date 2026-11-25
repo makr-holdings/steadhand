@@ -39,6 +39,13 @@ final class DevUpdaterTest extends TestCase {
 	 */
 	private array $http_routes = array();
 
+	/**
+	 * Writes to the state option counted while a checker is built. See watch_state_writes().
+	 *
+	 * @var int
+	 */
+	private int $state_writes = 0;
+
 	protected function setUp(): void {
 		parent::setUp();
 		$this->http_log    = array();
@@ -785,37 +792,105 @@ final class DevUpdaterTest extends TestCase {
 		$this->load_library();
 		$this->seed_cached_update( self::ASSET_URL_PREFIX . '123', '9.9.9' );
 
+		$this->watch_state_writes();
 		$checker = Updater::create_checker( '' );
 		$this->assertNotNull( $checker, 'create_checker() returned null without a token; the library class may be unavailable.' );
 
 		$this->assertNull( $checker->getUpdateState()->getUpdate(), 'The tokenless checker kept a cached API asset update.' );
+		$this->assertGreaterThanOrEqual( 1, $this->state_writes, 'The write counter did not see the save that cleared the update.' );
 	}
 
 	public function test_token_checker_drops_a_cached_github_download_update(): void {
 		$this->load_library();
 		$this->seed_cached_update( 'https://github.com/makr-holdings/steadhand/releases/download/v9.9.9/steadhand-dev-9.9.9.zip', '9.9.9' );
 
+		$this->watch_state_writes();
 		$checker = Updater::create_checker( self::DUMMY_TOKEN );
 		$this->assertNotNull( $checker, 'create_checker() returned null with a token; the library class may be unavailable.' );
 
 		$this->assertNull( $checker->getUpdateState()->getUpdate(), 'The token checker kept a cached github.com download update.' );
+		$this->assertGreaterThanOrEqual( 1, $this->state_writes, 'The write counter did not see the save that cleared the update.' );
 	}
 
 	/**
-	 * A cached update that is valid for the mode is kept, and the state option is not rewritten.
+	 * A cached update that is valid for the mode is kept, and the state option is not written.
 	 */
 	public function test_a_cached_update_valid_for_the_mode_is_kept_and_not_rewritten(): void {
 		$this->load_library();
 		$this->seed_cached_update( 'https://github.com/makr-holdings/steadhand/releases/download/v9.9.9/steadhand-dev-9.9.9.zip', '9.9.9' );
-		$before = get_site_option( 'external_updates-steadhand' );
 
+		$this->watch_state_writes();
 		$checker = Updater::create_checker( '' );
 		$this->assertNotNull( $checker, 'create_checker() returned null without a token; the library class may be unavailable.' );
 
 		$cached = $checker->getUpdateState()->getUpdate();
 		$this->assertNotNull( $cached, 'A valid cached update for the tokenless mode was dropped.' );
 		$this->assertSame( 'https://github.com/makr-holdings/steadhand/releases/download/v9.9.9/steadhand-dev-9.9.9.zip', $cached->download_url );
-		$this->assertEquals( $before, get_site_option( 'external_updates-steadhand' ), 'The state option was rewritten although the cached update was valid.' );
+		$this->assertSame( 0, $this->state_writes, 'The state option was written although the cached update was valid.' );
+	}
+
+	/**
+	 * Counts writes to the state option from now on. Multisite writes through update_site_option(), and single site
+	 * through update_option(); both per-option filters are watched. Install this after the test has seeded the option.
+	 */
+	private function watch_state_writes(): void {
+		$this->state_writes = 0;
+		$count              = function ( $value ) {
+			++$this->state_writes;
+			return $value;
+		};
+		add_filter( 'pre_update_site_option_external_updates-steadhand', $count, 10, 1 ); // phpcs:ignore WordPress.NamingConventions.PrefixAllGlobals.NonPrefixedHooknameFound -- Core's per-option filter name.
+		add_filter( 'pre_update_option_external_updates-steadhand', $count, 10, 1 ); // phpcs:ignore WordPress.NamingConventions.PrefixAllGlobals.NonPrefixedHooknameFound -- Core's per-option filter name.
+	}
+
+	/**
+	 * Stores a state the library cannot load: its update is an array, but the class that loads it expects an object.
+	 * Loading it throws a TypeError (copyFields() calls property_exists() on the array).
+	 */
+	private function seed_malformed_state(): void {
+		update_site_option(
+			'external_updates-steadhand',
+			(object) array(
+				'lastCheck'      => 0,
+				'checkedVersion' => '0.3.2',
+				'update'         => array(),
+				'updateClass'    => \YahnisElsts\PluginUpdateChecker\v5p7\Plugin\Update::class,
+			)
+		);
+	}
+
+	/**
+	 * The malformed state really throws in the library. Without this, the next test would prove nothing.
+	 */
+	public function test_the_malformed_state_really_throws_in_the_library(): void {
+		$this->load_library();
+		$this->seed_malformed_state();
+
+		$this->expectException( \TypeError::class );
+		( new \YahnisElsts\PluginUpdateChecker\v5p7\StateStore( 'external_updates-steadhand' ) )->getUpdate();
+	}
+
+	/**
+	 * A malformed stored state must not stop the tokenless checker from being built, and nothing may escape.
+	 */
+	public function test_a_malformed_stored_state_does_not_break_the_tokenless_checker(): void {
+		$this->load_library();
+		$this->seed_malformed_state();
+
+		$checker = Updater::create_checker( '' );
+
+		$this->assertNotNull( $checker, 'A malformed stored state stopped the tokenless checker from being built.' );
+		$this->assertFalse( get_site_option( 'external_updates-steadhand', false ), 'The malformed state was not discarded.' );
+	}
+
+	public function test_a_malformed_stored_state_does_not_break_the_token_checker(): void {
+		$this->load_library();
+		$this->seed_malformed_state();
+
+		$checker = Updater::create_checker( self::DUMMY_TOKEN );
+
+		$this->assertNotNull( $checker, 'A malformed stored state stopped the token checker from being built.' );
+		$this->assertFalse( get_site_option( 'external_updates-steadhand', false ), 'The malformed state was not discarded.' );
 	}
 
 	public function test_a_cached_api_asset_update_is_kept_with_a_token(): void {
@@ -871,13 +946,69 @@ final class DevUpdaterTest extends TestCase {
 					static fn( $callback ): bool => ! in_array( $callback, $before[ $hook ], true )
 				)
 			);
-			foreach ( $added as $callback ) {
-				$owned_by_library = is_array( $callback )
-					&& ( ( $callback[0] ?? null ) instanceof \YahnisElsts\PluginUpdateChecker\v5p7\Plugin\UpdateChecker
-						|| ( $callback[0] ?? null ) instanceof \YahnisElsts\PluginUpdateChecker\v5p7\Vcs\Api );
-				$this->assertTrue( $owned_by_library, 'The tokenless checker added a callback of its own to ' . $hook . '.' );
+			if ( 'upgrader_pre_download' === $hook ) {
+				// The library's constructor always adds this one (GitHubApi::setAuthentication() enables it even without a
+				// token). Nothing else may be added. Behaviour is checked in the download test below.
+				$this->assertCount( 1, $added, 'The tokenless checker did not add exactly one library callback to upgrader_pre_download.' );
+				$this->assertTrue(
+					is_array( $added[0] ) && ( $added[0][0] ?? null ) instanceof \YahnisElsts\PluginUpdateChecker\v5p7\Vcs\GitHubApi && 'addDownloadRequestFilters' === ( $added[0][1] ?? null ),
+					'The tokenless checker added a callback to upgrader_pre_download other than the library download callback.'
+				);
+				continue;
 			}
+			if ( in_array( $hook, array( 'http_request_args', 'http_request_host_is_external' ), true ) ) {
+				foreach ( $added as $callback ) {
+					$owned_by_library = is_array( $callback )
+						&& ( ( $callback[0] ?? null ) instanceof \YahnisElsts\PluginUpdateChecker\v5p7\Plugin\UpdateChecker
+							|| ( $callback[0] ?? null ) instanceof \YahnisElsts\PluginUpdateChecker\v5p7\Vcs\Api );
+					$this->assertTrue( $owned_by_library, 'The tokenless checker added a callback of its own to ' . $hook . '.' );
+				}
+				continue;
+			}
+			$this->assertSame( array(), $added, 'The tokenless checker added a callback to ' . $hook . '.' );
 		}
+	}
+
+	/**
+	 * Mirror of the tokenless hook test: the token checker adds the same download callback, so the count above can see one.
+	 */
+	public function test_token_checker_adds_the_library_download_callback_to_upgrader_pre_download(): void {
+		$this->load_library();
+		$before  = $this->callbacks_on( 'upgrader_pre_download' );
+		$checker = Updater::create_checker( self::DUMMY_TOKEN );
+		$this->assertNotNull( $checker, 'create_checker() returned null with a token; the library class may be unavailable.' );
+
+		$added = array_values(
+			array_filter(
+				$this->callbacks_on( 'upgrader_pre_download' ),
+				static fn( $callback ): bool => ! in_array( $callback, $before, true )
+			)
+		);
+		$this->assertCount( 1, $added, 'The token checker did not add the library download callback, so the tokenless test cannot see one.' );
+	}
+
+	/**
+	 * The library's download filter adds an Authorization header only when authentication is enabled. A tokenless
+	 * download request therefore carries none, and a token download to the API asset URL does.
+	 */
+	public function test_download_requests_carry_an_authorization_header_only_with_a_token(): void {
+		$this->load_library();
+		$asset_url = self::ASSET_URL_PREFIX . '123';
+
+		Updater::create_checker( '' );
+		apply_filters( 'upgrader_pre_download', false, '', null ); // phpcs:ignore WordPress.NamingConventions.PrefixAllGlobals.NonPrefixedHooknameFound -- Core hook.
+		$tokenless_args = apply_filters( 'http_request_args', array( 'headers' => array() ), $asset_url ); // phpcs:ignore WordPress.NamingConventions.PrefixAllGlobals.NonPrefixedHooknameFound -- Core hook.
+		$this->assertArrayNotHasKey( 'Authorization', $tokenless_args['headers'], 'A tokenless download request carried an Authorization header.' );
+	}
+
+	public function test_token_download_requests_carry_an_authorization_header_to_the_api_asset(): void {
+		$this->load_library();
+		$asset_url = self::ASSET_URL_PREFIX . '123';
+
+		Updater::create_checker( self::DUMMY_TOKEN );
+		apply_filters( 'upgrader_pre_download', false, '', null ); // phpcs:ignore WordPress.NamingConventions.PrefixAllGlobals.NonPrefixedHooknameFound -- Core hook.
+		$token_args = apply_filters( 'http_request_args', array( 'headers' => array() ), $asset_url ); // phpcs:ignore WordPress.NamingConventions.PrefixAllGlobals.NonPrefixedHooknameFound -- Core hook.
+		$this->assertArrayHasKey( 'Authorization', $token_args['headers'], 'A token download request to the API asset carried no Authorization header.' );
 	}
 
 	/**
