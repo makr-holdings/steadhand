@@ -4,7 +4,7 @@ Tags: mcp, ai, security, agents, audit-log
 Requires at least: 6.9
 Tested up to: 7.1
 Requires PHP: 8.1
-Stable tag: 0.3.2
+Stable tag: 0.4.0
 License: GPL-2.0-or-later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -119,6 +119,12 @@ No. Steadhand never calls an AI provider and stores no AI keys. Content leaves t
 
 == Changelog ==
 
+= 0.4.0 =
+* New tools: steadhand-trash-post moves a post or page to the trash, and steadhand-restore-post restores one that the same agent trashed. Both need the trash capability, which is off by default. Neither deletes permanently.
+* The Agents screen offers the trash capability.
+* A sticky post, the front page, the posts page and the privacy policy page cannot be trashed. Trashing is refused on a site that deletes trashed posts at once.
+* The description opens with a pre-release warning.
+
 = 0.3.2 =
 * An agent can be disabled, enabled again, or deleted on its page. Disabling revokes every connection and keeps the user, its drafts and its change log entries. Deleting is offered only when no content is attributed to the agent.
 * An agent's page shows how to connect an MCP client, and a new connection's password comes with the finished command for Claude Code.
@@ -155,6 +161,9 @@ No. Steadhand never calls an AI provider and stores no AI keys. Content leaves t
 The full changelog is in CHANGELOG.md in the plugin folder.
 
 == Upgrade Notice ==
+
+= 0.4.0 =
+Adds trash and restore tools for agents, behind a capability that is off by default.
 
 = 0.3.2 =
 Adds disable, enable and delete for agents, and connection instructions on the Agents screen.
