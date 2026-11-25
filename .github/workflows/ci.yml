@@ -9,23 +9,22 @@
 
 name: CI
 
-# Docs-only changes do not run CI: a change that touches only the files listed under paths-ignore is skipped,
-# on pull requests and on main. A change that touches any other file as well gets the full run.
-# CHANGELOG.md, SECURITY.md and readme.txt are not listed, because they ship in the release zips and the build job or Plugin Check checks them.
-# Keep the two lists identical.
+# Docs-only pull requests: the workflow always starts, so that the "CI result" check always reports
+# and can be a required check. The "changes" job looks at the files the pull request changes. If every
+# one is under docs/, or is README.md or CLAUDE.md, the phpcs, test, build and plugin-check jobs are
+# skipped and "CI result" passes. Any other file, any doubt, or a base branch other than main runs
+# everything.
+# CHANGELOG.md, SECURITY.md and readme.txt are not docs here, because they ship in the release zips and
+# the build job or Plugin Check checks them.
+# Pushes to main always run everything.
+#
+# Branch protection: require only the check named "CI result". Do not require the other jobs by name:
+# they are skipped on a docs-only pull request, and a skipped matrix job reports under a different name.
 on:
   pull_request:
-    paths-ignore:
-      - 'docs/**'
-      - 'README.md'
-      - 'CLAUDE.md'
   push:
     branches:
       - main
-    paths-ignore:
-      - 'docs/**'
-      - 'README.md'
-      - 'CLAUDE.md'
 
 permissions:
   contents: read
@@ -37,8 +36,59 @@ concurrency:
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
+  changes:
+    name: Detect changes
+    runs-on: ${{ vars.STEADHAND_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 5
+    outputs:
+      code: ${{ steps.detect.outputs.code }}
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: steadhand
+          persist-credentials: false
+          # Two commits: on a pull request HEAD is the merge commit, and HEAD^1 is the base branch.
+          fetch-depth: 2
+
+      # Sets code=false only when this is a pull request into main, the diff could be read, it lists
+      # at least one file, and every file is documentation. The base must be main because a check is
+      # recorded against the head commit: a pull request that is docs-only against another branch
+      # could later be re-pointed at main, bringing that branch's code with it, and GitHub does not
+      # re-run the checks when the base changes. Everything else, including any git error, leaves
+      # code=true, so a failure here can only cause more checks to run, never fewer.
+      # File names come from the pull request and are untrusted: they are read NUL-separated, only
+      # compared against fixed patterns, and never printed, expanded or executed.
+      - name: Decide whether code checks are needed
+        id: detect
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          set -u
+          code=true
+          if [ "$EVENT_NAME" = 'pull_request' ] && [ "$BASE_REF" = 'main' ] && git -C steadhand rev-parse -q --verify 'HEAD^2' >/dev/null 2>&1; then
+            total=0
+            other=0
+            while IFS= read -r -d '' file; do
+              total=$((total + 1))
+              case "$file" in
+                docs/*|README.md|CLAUDE.md) ;;
+                *) other=$((other + 1)) ;;
+              esac
+            done < <(git -C steadhand diff --name-only -z --no-renames 'HEAD^1' HEAD 2>/dev/null)
+            if [ "$total" -gt 0 ] && [ "$other" -eq 0 ]; then
+              code=false
+            fi
+            echo "Changed files: $total. Files that are not documentation: $other."
+          fi
+          echo "code=$code"
+          echo "code=$code" >> "$GITHUB_OUTPUT"
+
   phpcs:
     name: PHPCS
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ${{ vars.STEADHAND_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 15
     steps:
@@ -78,6 +128,8 @@ jobs:
 
   test:
     name: Tests (PHP ${{ matrix.php }}, WordPress ${{ matrix.wp }})
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ${{ vars.STEADHAND_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 45
     strategy:
@@ -166,6 +218,8 @@ jobs:
 
   build:
     name: Build release zips
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ${{ vars.STEADHAND_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 20
     steps:
@@ -230,6 +284,7 @@ jobs:
 
   plugin-check:
     name: Plugin Check
+    # Skipped when build is skipped (a docs-only pull request).
     needs: build
     runs-on: ${{ vars.STEADHAND_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 30
@@ -265,3 +320,48 @@ jobs:
           # for the plugin name ("Steadhand"). It is left visible on purpose and is not excluded or
           # ignored here. The naming decision belongs to Rick, not to CI.
           # Do not add other exclusions without a reason written here.
+
+  # The one check that branch protection requires. It always runs and always reports.
+  # It passes in exactly two cases:
+  #   - code checks were needed, and phpcs, test, build and plugin-check all succeeded;
+  #   - the change is docs-only, and all four were skipped.
+  # Anything else fails: a failed, cancelled or unexpectedly skipped job, or a failed "changes" job.
+  # Keep "if: always()". With "!cancelled()" this job would be skipped on a cancelled run, and GitHub
+  # counts a skipped required check as passed.
+  result:
+    name: CI result
+    if: always()
+    needs: [changes, phpcs, test, build, plugin-check]
+    runs-on: ${{ vars.STEADHAND_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 5
+    steps:
+      - name: Check the results of the other jobs
+        env:
+          CHANGES: ${{ needs.changes.result }}
+          CODE: ${{ needs.changes.outputs.code }}
+          PHPCS: ${{ needs.phpcs.result }}
+          TEST: ${{ needs.test.result }}
+          BUILD: ${{ needs.build.result }}
+          PLUGIN_CHECK: ${{ needs.plugin-check.result }}
+        run: |
+          set -u
+          echo "changes=$CHANGES code=$CODE phpcs=$PHPCS test=$TEST build=$BUILD plugin-check=$PLUGIN_CHECK"
+          if [ "$CHANGES" != 'success' ]; then
+            echo "The changes job did not succeed." >&2
+            exit 1
+          fi
+          if [ "$CODE" = 'true' ]; then
+            want=success
+          elif [ "$CODE" = 'false' ]; then
+            want=skipped
+          else
+            echo "The changes job gave no decision." >&2
+            exit 1
+          fi
+          for result in "$PHPCS" "$TEST" "$BUILD" "$PLUGIN_CHECK"; do
+            if [ "$result" != "$want" ]; then
+              echo "Expected every job to be '$want', but one was '$result'." >&2
+              exit 1
+            fi
+          done
+          echo "All jobs: $want."
