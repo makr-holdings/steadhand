@@ -201,7 +201,39 @@ final class AgentsConnectHelpTest extends TestCase {
 	 * @return string
 	 */
 	private function escaped_command( string $value ): string {
-		return esc_html( 'claude mcp add --transport http steadhand ' . rest_url( 'steadhand/mcp' ) . ' --header "Authorization: Basic ' . $value . '"' );
+		return esc_html( 'claude mcp add --transport http steadhand "' . rest_url( 'steadhand/mcp' ) . '" --header "Authorization: Basic ' . $value . '"' );
+	}
+
+	/**
+	 * Makes a user's login a value WordPress would not write, directly in the database (as a login created elsewhere could be).
+	 *
+	 * @param int    $user  The user.
+	 * @param string $login The login to write.
+	 * @return void
+	 */
+	private function set_login_directly( int $user, string $login ): void {
+		global $wpdb;
+		$wpdb->update( $wpdb->users, array( 'user_login' => $login ), array( 'ID' => $user ) ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching -- Test fixture: a login WordPress would not write.
+		clean_user_cache( $user );
+	}
+
+	/**
+	 * Sends a POST of one action through load(), which is what WordPress calls on the load-{hook}. Returns 'loaded', or 'died' when refused.
+	 *
+	 * @param string              $action One of the AgentsHandler::ACTION_* values.
+	 * @param array<string,mixed> $fields The other form fields.
+	 * @return string
+	 */
+	private function load_post( string $action, array $fields ): string {
+		$_SERVER['REQUEST_METHOD'] = 'POST';
+		$_POST                     = array_merge( array( AgentsHandler::FIELD => $action ), $fields );
+
+		try {
+			$this->screen->load();
+			return 'loaded';
+		} catch ( \WPDieException ) {
+			return 'died';
+		}
 	}
 
 	public function test_the_detail_view_has_the_facts_the_placeholder_command_the_check_sentence_and_the_warning(): void {
@@ -378,25 +410,52 @@ final class AgentsConnectHelpTest extends TestCase {
 		$this->assertTrue( AgentsScreen::command_is_safe( 'agent-1', $endpoint ) );
 		$this->assertTrue( AgentsScreen::command_is_safe( 'Claude Desktop', $endpoint ), 'A space is not in the unsafe set: the username is only ever encoded.' );
 
-		foreach ( array( '"', '`', '$', '\\', "\n", "\t", "\x00", "\x7F" ) as $bad ) {
+		foreach ( array( '"', '`', '$', '\\', "\n", "\t", "\x00", "\x7F", ':' ) as $bad ) {
 			$this->assertFalse( AgentsScreen::command_is_safe( 'agent' . $bad, $endpoint ), 'Username with ' . bin2hex( $bad ) );
 			$this->assertFalse( AgentsScreen::command_is_safe( 'agent', $endpoint . $bad ), 'Endpoint with ' . bin2hex( $bad ) );
 		}
 	}
 
-	public function test_a_plain_endpoint_is_not_quoted_and_one_with_other_characters_is(): void {
+	public function test_the_endpoint_allowlist_refuses_every_character_outside_the_plain_set(): void {
+		$bad_characters = array( '!', '%', '#', ';', '|', "'", ' ', '(', '*', '"', '`', '$', '\\', '@', '[', '<', '>', "\u{00E9}", "\n", "\t", "\x7F" );
+		foreach ( $bad_characters as $bad ) {
+			$this->assertFalse( AgentsScreen::command_is_safe( 'agent', 'https://example.org/wp-json/' . $bad . 'steadhand/mcp' ), 'Path with ' . bin2hex( $bad ) );
+			$this->assertFalse( AgentsScreen::command_is_safe( 'agent', 'https://example.org/wp-json/steadhand/mcp?x=' . $bad ), 'Query with ' . bin2hex( $bad ) );
+			$this->assertFalse( AgentsScreen::command_is_safe( 'agent', 'https://ex' . $bad . 'ample.org/wp-json/steadhand/mcp' ), 'Host with ' . bin2hex( $bad ) );
+		}
+	}
+
+	public function test_the_endpoint_allowlist_refuses_other_schemes_and_ipv6_hosts(): void {
+		foreach ( array( 'ftp://example.org/wp-json/steadhand/mcp', 'https://[::1]/wp-json/steadhand/mcp', 'javascript:alert(1)', 'http:/example.org/steadhand/mcp' ) as $endpoint ) {
+			$this->assertFalse( AgentsScreen::command_is_safe( 'agent', $endpoint ), $endpoint );
+		}
+	}
+
+	public function test_the_endpoint_allowlist_accepts_the_plain_forms_a_site_gives(): void {
+		foreach ( array(
+			'https://example.org/wp-json/steadhand/mcp',
+			'http://localhost:8888/wp-json/steadhand/mcp',
+			'https://example.org/sub-dir/index.php?rest_route=/steadhand/mcp',
+			'https://example.org/?rest_route=/steadhand/mcp&x=1',
+		) as $endpoint ) {
+			$this->assertTrue( AgentsScreen::command_is_safe( 'agent', $endpoint ), $endpoint );
+		}
+	}
+
+	public function test_the_endpoint_is_always_in_double_quotes_in_the_command(): void {
 		$agent = $this->agent( 'help-quote' );
 		$this->as_admin_viewing( $agent );
 
 		$plain = $this->render();
-		$this->assertStringContainsString( 'steadhand https://example.org/wp-json/steadhand/mcp --header', $plain );
+		$this->assertStringContainsString( 'steadhand &quot;https://example.org/wp-json/steadhand/mcp&quot; --header', $plain );
+		$this->assertStringNotContainsString( 'steadhand https://', $plain, 'A plain endpoint is quoted too.' );
 
 		$this->endpoint_override = 'https://example.org/wp-json/steadhand/mcp?x=1';
-		$quoted                  = $this->render();
-		$this->assertStringContainsString( 'steadhand &quot;https://example.org/wp-json/steadhand/mcp?x=1&quot; --header', $quoted );
+		$query                   = $this->render();
+		$this->assertStringContainsString( 'steadhand &quot;https://example.org/wp-json/steadhand/mcp?x=1&quot; --header', $query );
 	}
 
-	public function test_an_endpoint_with_angle_brackets_is_escaped_in_the_page(): void {
+	public function test_an_endpoint_with_angle_brackets_gets_no_command_and_is_escaped_in_the_page(): void {
 		$agent                   = $this->agent( 'help-escape-angle' );
 		$this->endpoint_override = 'https://example.org/<b>x</b>/steadhand/mcp';
 		$this->as_admin_viewing( $agent );
@@ -405,8 +464,188 @@ final class AgentsConnectHelpTest extends TestCase {
 
 		$this->assertStringNotContainsString( '<b>x</b>', $html );
 		$this->assertStringContainsString( esc_html( 'https://example.org/<b>x</b>/steadhand/mcp' ), $html );
-		// The address has characters outside the plain set, so it is wrapped in double quotes.
-		$this->assertStringContainsString( esc_html( 'claude mcp add --transport http steadhand "https://example.org/<b>x</b>/steadhand/mcp" --header "Authorization: Basic BASE64_OF_USERNAME_AND_PASSWORD"' ), $html );
+		// Angle brackets are outside the allowlist, so no command is printed.
+		$this->assertStringNotContainsString( 'claude mcp add', $html );
+		$this->assertStringContainsString( 'The command cannot be shown safely for this username or address', $html );
+	}
+
+	public function test_an_endpoint_with_history_and_cmd_expansion_characters_gets_no_command_in_the_panel_or_the_detail_view(): void {
+		// '!!' is bash and zsh history expansion inside double quotes, and '%' is variable expansion in Windows cmd.
+		$this->endpoint_override = 'https://example.org/!!/wp-json/steadhand/mcp%PATH%';
+		$agent                   = $this->agent( 'bang-agent', 1 );
+		$this->as_user( $this->admin() );
+		$this->assertNull(
+			$this->post(
+				AgentsHandler::ACTION_ADD_PASSWORD,
+				array(
+					'user_id'  => (string) $agent,
+					'_wpnonce' => $this->nonce( AgentsHandler::ACTION_ADD_PASSWORD, $agent ),
+					'label'    => 'Bang',
+				)
+			)
+		);
+
+		$panel    = $this->render();
+		$password = $this->password_on_screen( $panel );
+		$this->assertNotSame( '', $password );
+		$this->assertStringNotContainsString( 'claude mcp add', $panel );
+		$this->assertStringContainsString( 'The command cannot be shown safely for this username or address, so only the endpoint and the header value are shown here.', $panel );
+		$this->assertStringContainsString( esc_html( 'https://example.org/!!/wp-json/steadhand/mcp%PATH%' ), $panel, 'The facts still show the endpoint.' );
+		$this->assertSame( array( base64_encode( 'bang-agent:' . $password ) ), $this->real_header_values( $panel ), 'The header value is still shown.' ); // phpcs:ignore WordPress.PHP.DiscouragedPHPFunctions.obfuscation_base64_encode -- Test: the expected header value.
+
+		// A later GET of the detail view: a new screen, as a new request would have, so the panel's outcome is not held over.
+		$this->screen = new AgentsScreen( $this->handler );
+		$this->as_admin_viewing( $agent );
+		$detail = $this->render();
+		$this->assertStringNotContainsString( 'claude mcp add', $detail, 'The detail view prints no placeholder command either.' );
+		$this->assertStringContainsString( 'The command cannot be shown safely for this username or address', $detail );
+		$this->assertSame( array(), $this->real_header_values( $detail ) );
+	}
+
+	public function test_a_login_with_a_colon_gets_no_command_and_no_header_value_in_the_panel(): void {
+		// HTTP Basic reads the username up to its first colon, so no header can be built for this login. It is written directly.
+		$agent = $this->agent( 'colon-seed' );
+		$this->set_login_directly( $agent, 'colon:agent' );
+
+		$this->as_admin_viewing( $agent );
+		$detail = $this->render();
+		$this->assertStringNotContainsString( 'claude mcp add', $detail );
+		$this->assertSame( array(), $this->real_header_values( $detail ) );
+
+		$this->as_user( $this->admin() );
+		$this->assertNull(
+			$this->post(
+				AgentsHandler::ACTION_ADD_PASSWORD,
+				array(
+					'user_id'  => (string) $agent,
+					'_wpnonce' => $this->nonce( AgentsHandler::ACTION_ADD_PASSWORD, $agent ),
+					'label'    => 'Colon',
+				)
+			)
+		);
+
+		$panel    = $this->render();
+		$password = $this->password_on_screen( $panel );
+		$this->assertNotSame( '', $password );
+		$this->assertStringContainsString( 'The header cannot be built for this username, because HTTP Basic reads the username only up to its first colon. So neither the command nor the header value is shown here.', $panel );
+		$this->assertStringNotContainsString( 'claude mcp add', $panel );
+		$this->assertStringNotContainsString( 'Send this header on every request:', $panel, 'The panel has no header line (the detail view has the label text, not a value).' );
+		$this->assertSame( array(), $this->real_header_values( $panel ) );
+		$this->assertStringNotContainsString( base64_encode( 'colon:agent:' . $password ), $panel ); // phpcs:ignore WordPress.PHP.DiscouragedPHPFunctions.obfuscation_base64_encode -- Test: the value that must not be shown.
+		$this->assertStringNotContainsString( 'shown once, with the password', $panel );
+	}
+
+	public function test_the_scope_project_warning_is_in_the_detail_view_and_the_one_time_panel(): void {
+		$sentence = 'Do not add --scope project to the command: that writes the password into a .mcp.json file in the current folder, where it can be committed to a repository.';
+		$agent    = $this->agent( 'scope-agent', 1 );
+
+		$this->as_admin_viewing( $agent );
+		$this->assertStringContainsString( esc_html( $sentence ), $this->render(), 'The detail view.' );
+
+		$this->as_user( $this->admin() );
+		$this->assertNull(
+			$this->post(
+				AgentsHandler::ACTION_ADD_PASSWORD,
+				array(
+					'user_id'  => (string) $agent,
+					'_wpnonce' => $this->nonce( AgentsHandler::ACTION_ADD_PASSWORD, $agent ),
+					'label'    => 'Scope',
+				)
+			)
+		);
+		$this->assertStringContainsString( esc_html( $sentence ), $this->render(), 'The one-time panel.' );
+	}
+
+	public function test_the_connection_sentence_points_at_the_add_form_when_that_form_is_printed(): void {
+		$agent = $this->agent( 'sentence-add' );
+		$this->as_admin_viewing( $agent );
+
+		$html = $this->render();
+
+		$this->assertStringContainsString( 'If you no longer have it, add a new connection above and revoke the old one.', $html );
+		$this->assertStringNotContainsString( 'a new connection has to be added', $html );
+	}
+
+	public function test_the_connection_sentence_does_not_point_above_when_application_passwords_are_unavailable(): void {
+		$agent = $this->agent( 'sentence-unavailable' );
+		$this->on( 'wp_is_application_passwords_available', '__return_false', PHP_INT_MAX );
+		$this->as_admin_viewing( $agent );
+
+		$html = $this->render();
+
+		$this->assertStringContainsString( 'If you no longer have it, a new connection has to be added and the old one revoked.', $html );
+		$this->assertStringNotContainsString( 'add a new connection above', $html );
+	}
+
+	public function test_the_connection_sentence_does_not_point_above_for_a_viewer_who_cannot_edit_the_agent(): void {
+		$agent = $this->agent( 'sentence-no-edit' );
+		$this->on(
+			'map_meta_cap',
+			static fn( $caps, $cap ) => 'edit_user' === $cap ? array( 'do_not_allow' ) : $caps,
+			10
+		);
+		$this->as_admin_viewing( $agent );
+
+		$html = $this->render();
+
+		$this->assertStringContainsString( 'If you no longer have it, a new connection has to be added and the old one revoked.', $html );
+		$this->assertStringNotContainsString( 'add a new connection above', $html );
+	}
+
+	/**
+	 * Core's nocache_headers() returns before it reads the filter when headers were already sent, and PHPUnit's own output has sent them in
+	 * the shared process. So this runs in its own process, as core's header tests do, and counts the calls of the nocache_headers filter.
+	 *
+	 * @runInSeparateProcess
+	 * @preserveGlobalState disabled
+	 */
+	public function test_the_create_and_add_password_responses_are_sent_uncached_and_a_plain_get_is_not_required_to_be(): void {
+		// core applies the nocache_headers filter inside wp_get_nocache_headers(), which nocache_headers() calls.
+		$calls = 0;
+		$this->on(
+			'nocache_headers',
+			static function ( $headers ) use ( &$calls ) {
+				++$calls;
+				return $headers;
+			}
+		);
+
+		$this->as_user( $this->admin() );
+		$this->assertSame(
+			'loaded',
+			$this->load_post(
+				AgentsHandler::ACTION_CREATE,
+				array(
+					'_wpnonce' => $this->nonce( AgentsHandler::ACTION_CREATE ),
+					'username' => 'nocache-agent',
+					'label'    => 'Cache test',
+				)
+			)
+		);
+		$this->assertGreaterThan( 0, $calls, 'The create response that shows a password is sent with no-cache headers.' );
+
+		$agent = $this->agent( 'nocache-second' );
+		$calls = 0;
+		$this->assertSame(
+			'loaded',
+			$this->load_post(
+				AgentsHandler::ACTION_ADD_PASSWORD,
+				array(
+					'user_id'  => (string) $agent,
+					'_wpnonce' => $this->nonce( AgentsHandler::ACTION_ADD_PASSWORD, $agent ),
+					'label'    => 'Cache second',
+				)
+			)
+		);
+		$this->assertGreaterThan( 0, $calls, 'The add-password response that shows a password is sent with no-cache headers.' );
+
+		// A plain GET of the list shows no password, and load() sends no headers for it. Asserted as the code does it.
+		$calls                     = 0;
+		$this->screen              = new AgentsScreen( $this->handler ); // A new request: the POST's outcome is not held over.
+		$_SERVER['REQUEST_METHOD'] = 'GET';
+		$_POST                     = array();
+		$this->screen->load();
+		$this->assertSame( 0, $calls, 'A GET of the list sends no no-cache headers, because it has no password to protect.' );
 	}
 
 	public function test_an_endpoint_with_a_double_quote_gets_no_command_and_is_escaped_in_the_facts(): void {

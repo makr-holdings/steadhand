@@ -372,6 +372,15 @@ final class AgentsScreen {
 		printf( '<p>%s <code>%s</code></p>', esc_html__( 'MCP endpoint:', 'steadhand' ), esc_html( $endpoint ) );
 		printf( '<p><strong>%s</strong></p>', esc_html__( 'This password is shown once. Copy it now. It cannot be shown again.', 'steadhand' ) );
 
+		// HTTP Basic reads the username only up to its first colon, so a login with a colon cannot be sent as a credential. No value is
+		// built or shown for it, and neither the command nor the header is printed.
+		if ( ! self::header_is_possible( $secret['username'] ) ) {
+			printf( '<p>%s</p>', esc_html__( 'The header cannot be built for this username, because HTTP Basic reads the username only up to its first colon. So neither the command nor the header value is shown here.', 'steadhand' ) );
+			$this->password_warning();
+			echo '</div>';
+			return;
+		}
+
 		// The password without the spaces core uses when it displays one, so the header value is canonical. The value is the Base64 of
 		// username:password, which is the credential HTTP Basic sends. It is built only here, and not stored.
 		$password = preg_replace( '/\s+/', '', $secret['password'] ) ?? '';
@@ -402,43 +411,60 @@ final class AgentsScreen {
 	}
 
 	/**
-	 * Whether a username and an endpoint can be printed in the finished command. A double quote, a backtick, a dollar sign, a backslash or
-	 * a control character could change the shell's quoting, so no command is printed for them. WordPress strips the first four from the
-	 * logins it creates, but a login can be written another way, so the check is made anyway.
+	 * Whether a username and an endpoint can be printed in the finished command. The endpoint is an allowlist: it must be an http or https
+	 * URL whose host is letters, digits, dots and hyphens, with an optional port, and whose path and query use only letters, digits and
+	 * the characters / . _ ~ ? = & and hyphen. Any other character, such as ! % # ; | ' " ` $ \ space ( * @ [ a non-ASCII byte or a control
+	 * character, could change the shell's quoting or expansion (bash and zsh history expansion, cmd variable expansion), so no command is
+	 * printed for it. An IPv6 host is refused for the same reason. The username is refused for a double quote, a backtick, a dollar sign,
+	 * a backslash, a control character and a colon. A colon is refused because HTTP Basic reads the username up to its first colon, so a
+	 * login with one gives a credential that does not decode correctly. WordPress strips most of these from the logins it creates, but a
+	 * login can be written another way, so the check is made anyway.
 	 *
 	 * @param string $username The agent's login.
 	 * @param string $endpoint The MCP endpoint URL.
 	 * @return bool
 	 */
 	public static function command_is_safe( string $username, string $endpoint ): bool {
-		$unsafe = '/["`$\\\\\x00-\x1F\x7F]/';
+		$unsafe_username = '/["`$\\\\\x00-\x1F\x7F:]/';
+		$safe_endpoint   = '/\Ahttps?:\/\/[A-Za-z0-9.\-]+(:[0-9]{1,5})?\/[A-Za-z0-9\/._~?=&\-]*\z/';
 
-		return 0 === preg_match( $unsafe, $username ) && 0 === preg_match( $unsafe, $endpoint );
+		return 0 === preg_match( $unsafe_username, $username ) && 1 === preg_match( $safe_endpoint, $endpoint );
 	}
 
 	/**
-	 * The Claude Code command. The endpoint is wrapped in double quotes only when it has a character outside the plain set. The caller has
-	 * checked it with command_is_safe(), so it has no double quote, backtick, dollar sign or backslash.
+	 * Whether the Basic header can be built for a username. HTTP Basic reads the username up to its first colon, so a colon in the login
+	 * makes the credential wrong. This is the only username check that decides whether a header value is shown at all.
+	 *
+	 * @param string $username The agent's login.
+	 * @return bool
+	 */
+	private static function header_is_possible( string $username ): bool {
+		return ! str_contains( $username, ':' );
+	}
+
+	/**
+	 * The Claude Code command. The endpoint is always wrapped in double quotes, so that ? & = in its query do not reach the shell as
+	 * special characters. The caller has checked it with command_is_safe(), so it has no double quote, and no other character that the
+	 * shell or cmd would expand.
 	 *
 	 * @param string $endpoint The MCP endpoint URL.
 	 * @param string $value    The Base64 value, or its placeholder.
 	 * @return string
 	 */
 	private static function command( string $endpoint, string $value ): string {
-		$target = 1 === preg_match( '/\A[A-Za-z0-9:\/._-]+\z/', $endpoint ) ? $endpoint : '"' . $endpoint . '"';
-
-		return 'claude mcp add --transport http steadhand ' . $target . ' --header "Authorization: Basic ' . $value . '"';
+		return 'claude mcp add --transport http steadhand "' . $endpoint . '" --header "Authorization: Basic ' . $value . '"';
 	}
 
 	/**
-	 * The warning about the password in a command or a header. It is printed in the detail view and in the one-time panel.
+	 * The warning about the password in a command or a header. It is printed in the detail view and in the one-time panel. It also tells
+	 * the administrator not to add --scope project, which would write the password into a .mcp.json file in the current folder.
 	 *
 	 * @return void
 	 */
 	private function password_warning(): void {
 		printf(
 			'<div class="notice notice-warning inline"><p>%s</p></div>',
-			esc_html__( 'The command and the header contain the agent\'s password in a form anyone can decode. Base64 is an encoding, not encryption. An MCP client stores it in its configuration file, and a command typed in a terminal is kept in the shell history. Keep both private. If the password may have been seen, revoke that connection here and add a new one.', 'steadhand' )
+			esc_html__( 'The command and the header contain the agent\'s password in a form anyone can decode. Base64 is an encoding, not encryption. An MCP client stores it in its configuration file, and a command typed in a terminal is kept in the shell history. Keep both private. If the password may have been seen, revoke that connection here and add a new one. Do not add --scope project to the command: that writes the password into a .mcp.json file in the current folder, where it can be committed to a repository.', 'steadhand' )
 		);
 	}
 
@@ -447,10 +473,11 @@ final class AgentsScreen {
 	 * Base64 value, help for other clients, how to check the connection, and the warning. It never shows a password: none is available
 	 * here. The one-time panel shows the finished command and header.
 	 *
-	 * @param \WP_User $agent The dedicated agent.
+	 * @param \WP_User $agent   The dedicated agent.
+	 * @param bool     $can_add Whether the add-connection form is printed for this viewer, so the sentence can point at it.
 	 * @return void
 	 */
-	private function connect_section( \WP_User $agent ): void {
+	private function connect_section( \WP_User $agent, bool $can_add ): void {
 		$endpoint = self::endpoint();
 
 		echo '<h3>' . esc_html__( 'Connect a client', 'steadhand' ) . '</h3>';
@@ -470,7 +497,14 @@ final class AgentsScreen {
 		printf( '<tr><th scope="row">%s</th><td><code>%s</code></td></tr>', esc_html__( 'Username', 'steadhand' ), esc_html( $agent->user_login ) );
 		echo '</tbody></table>';
 
-		printf( '<p>%s</p>', esc_html__( 'A connection\'s password is shown once, when the connection is added. If you no longer have it, add a new connection above and revoke the old one.', 'steadhand' ) );
+		// The add form is printed only for a viewer who can edit the agent, with Application Passwords available and the agent enabled.
+		printf(
+			'<p>%s %s</p>',
+			esc_html__( 'A connection\'s password is shown once, when the connection is added.', 'steadhand' ),
+			$can_add
+				? esc_html__( 'If you no longer have it, add a new connection above and revoke the old one.', 'steadhand' )
+				: esc_html__( 'If you no longer have it, a new connection has to be added and the old one revoked.', 'steadhand' )
+		);
 
 		echo '<h4>' . esc_html__( 'Claude Code', 'steadhand' ) . '</h4>';
 		if ( self::command_is_safe( $agent->user_login, $endpoint ) ) {
@@ -786,7 +820,10 @@ final class AgentsScreen {
 			esc_html__( 'View this agent\'s change-log entries', 'steadhand' )
 		);
 
-		$this->connect_section( $agent );
+		// The add-connection form is printed only for a viewer who can edit the agent, with Application Passwords available and the agent enabled
+		// (connections_section() decides the same way).
+		$can_add = $can_edit && $available && Capabilities::user_has( $agent, Capabilities::CONNECT );
+		$this->connect_section( $agent, $can_add );
 
 		if ( $can_edit ) {
 			$this->disable_or_delete_section( $agent );
