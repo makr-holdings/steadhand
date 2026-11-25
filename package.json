@@ -13,6 +13,7 @@
 		"@wordpress/env": {
 			"qs": "^6.16.1",
 			"glob": "^14.0.2"
-		}
+		},
+		"isomorphic-git": "1.38.6"
 	}
 }
