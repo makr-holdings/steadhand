@@ -541,7 +541,7 @@ The dev-only filters in `includes/Dev/Updater.php` are listed below.
 
 ## Dev builds only: update library hooks
 
-Dev builds with a token only: `includes/Dev/Updater.php` hooks the library filters `puc_vcs_update_detection_strategies-steadhand` and `puc_request_info_result-steadhand`. The update library also hooks core hooks such as `http_request_args`, `upgrader_pre_download` and `admin_init`. None of these are Steadhand API.
+Dev builds only, and only when the updater is turned on (`STEADHAND_DEV_UPDATES`, or the older token constant): `includes/Dev/Updater.php` hooks the library filters `puc_vcs_update_detection_strategies-steadhand` and `puc_request_info_result-steadhand`. The update library also hooks core hooks such as `http_request_args`, `upgrader_pre_download` and `admin_init`. None of these are Steadhand API.
 
 ## Hooks other code can use around Steadhand's abilities
 

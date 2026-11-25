@@ -309,43 +309,36 @@ To release, tag a commit on `main` with `vX.Y.Z`, for example `v0.1.0`. The `rel
 
 ## Dev builds on internal sites
 
-The dev zip includes an updater. It checks the latest GitHub release of this repository and installs the dev zip from that release's assets. Without the token constant, the update library is not loaded and nothing is hooked or printed.
+The dev zip includes an updater. It checks the latest GitHub release of this repository and installs the dev zip from that release's assets. The repository is public, so the updater needs no token. It is off until you turn it on. With neither constant below set, the update library is not loaded and nothing is hooked or printed.
 
-Set it up on each internal site:
+Turn it on for each internal site by adding this to `wp-config.php`, above the line that says to stop editing:
 
-1. Create a fine-grained personal access token on GitHub:
-   - Resource owner: the `makr-holdings` organization.
-   - Repository access: "Only select repositories", then `makr-holdings/steadhand`.
-   - Repository permissions: Contents, Read-only. Metadata, Read-only, is added automatically.
-   - Expiration: 90 days or less.
+```php
+define( 'STEADHAND_DEV_UPDATES', true );
+```
 
-   The organization may need fine-grained tokens enabled first. An organization owner can enable them under the organization's Settings, then Personal access tokens.
-2. Add the token to `wp-config.php`, above the line that says to stop editing:
+The value must be the boolean `true`. `1`, `'true'` and any other value leave the updater off.
 
-   ```php
-   define( 'STEADHAND_DEV_GITHUB_TOKEN', '<your-token-here>' );
-   ```
+How the updater handles the download:
 
-3. Rotate the token before it expires. Create a new one, replace the constant's value, and revoke the old token on GitHub.
+- It installs only the `steadhand-dev-X.Y.Z.zip` release asset, from `https://github.com/makr-holdings/steadhand/releases/download/`. It never installs GitHub's source archive, which has no `vendor/` folder. A release without the asset is skipped.
+- It sends no credentials. GitHub limits requests without a token to 60 an hour for each IP address. On a server that shares its address with other sites, an update check can fail for that reason. It is tried again at the next check.
 
-Handling the token:
+Know this risk before you turn it on:
 
-- Edit `wp-config.php` directly. Do not use `wp config set`: it puts the token in your shell history and in the process list.
-- Never commit `wp-config.php`, and never paste the token into a ticket or chat.
-- Restrict the file's permissions so that only the account that runs the web server, and the administrators who need it, can read it.
-- The token belongs to one person's GitHub account. Updates stop if that account loses access to the repository. Write down who owns the token.
-- The organization may require an owner to approve the fine-grained token before it works.
-
-How the updater handles the token and the download:
-
-- It reads the token only from that constant. It never stores the token in the database, writes it to a log or displays it.
-- It installs only the `steadhand-dev-X.Y.Z.zip` release asset. It never installs GitHub's source archive, which has no `vendor/` folder. A release without the asset is skipped.
-
-Know these risks before you use a token:
-
-- Every plugin and theme on the site, and anyone who can read `wp-config.php` or its backups, can read the token. The update library passes its request options, including the `Authorization` header, through its filter `puc_request_info_options-steadhand` and through WordPress's HTTP hooks, so other code on the site can see the token on its requests.
-- A leaked token gives read access to this private repository's source and releases until it is revoked. Use dev builds only on sites where you trust every installed plugin.
 - Anyone with write access to this repository can publish a release, by pushing a tag or uploading an asset by hand, and so run code on every site that uses the dev build. The zip is not signed. Keep write access limited.
+
+### Sites that still have a token
+
+Before the repository was public, the updater needed a GitHub token in the `STEADHAND_DEV_GITHUB_TOKEN` constant. A site that still defines it keeps updating as before: the updater stays on and sends the token to this repository's GitHub API. When the token expires or is revoked, GitHub refuses those requests and updates stop.
+
+The token is no longer needed. On each such site:
+
+1. Add `define( 'STEADHAND_DEV_UPDATES', true );` to `wp-config.php`.
+2. Remove the `STEADHAND_DEV_GITHUB_TOKEN` line.
+3. Revoke the token on GitHub.
+
+While the token constant is still defined, every plugin and theme on the site, and anyone who can read `wp-config.php` or its backups, can read the token. The updater reads it only from that constant, and never stores it in the database, writes it to a log or displays it.
 
 Removing a dev build does not remove the update library's data. These are left behind:
 

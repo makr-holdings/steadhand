@@ -39,6 +39,7 @@ CONTENT_PATTERNS=(
 	'PucFactory'
 	'Puc_v[0-9]'
 	'STEADHAND_DEV_GITHUB_TOKEN'
+	'STEADHAND_DEV_UPDATES'
 	'update_checker'
 	'Steadhand\\Dev'
 	'includes/Dev'
