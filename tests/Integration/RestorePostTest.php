@@ -359,4 +359,244 @@ final class RestorePostTest extends TrashTestCase {
 		$this->assert_generic( $result );
 		$this->assertSame( $before, $this->state( $post ) );
 	}
+
+	/** The warning for a post with no single stored status: it comes back as a draft. */
+	private const NO_RECORD = 'WordPress holds no single record of the status the post had before the trash, so it was restored as a draft.';
+
+	/** The warning for a post WordPress restored live, which Steadhand set to draft. */
+	private const DEMOTED = 'WordPress restored the post as publish. This agent may not publish, so Steadhand set it to draft.';
+
+	/**
+	 * Runs the work with the three trash-marker listeners removed, so that only the rules in TrashRules::own_trash() can refuse a restore.
+	 * They are added back in finally, with the priorities and argument counts Plugin::boot() gave them.
+	 *
+	 * @param callable $work The work to run.
+	 * @return mixed What the work returned.
+	 */
+	private function without_marker_listeners( callable $work ): mixed {
+		$hooks = array(
+			array( 'wp_trash_post', 'trash_starting', 10, 1 ),
+			array( 'transition_post_status', 'left_trash', 10, 3 ),
+			array( 'untrashed_post', 'untrashed', 10, 1 ),
+		);
+
+		foreach ( $hooks as $hook ) {
+			remove_action( $hook[0], array( PostWriter::class, $hook[1] ), $hook[2] );
+		}
+
+		try {
+			return $work();
+		} finally {
+			foreach ( $hooks as $hook ) {
+				add_action( $hook[0], array( PostWriter::class, $hook[1] ), $hook[2], $hook[3] );
+			}
+		}
+	}
+
+	/**
+	 * The number of rows WordPress holds for a meta key, read uncached.
+	 *
+	 * @param int    $post_id Post ID.
+	 * @param string $key     Meta key.
+	 */
+	private function rows_of( int $post_id, string $key ): int {
+		wp_cache_delete( $post_id, 'post_meta' );
+
+		return count( get_post_meta( $post_id, $key, false ) );
+	}
+
+	/**
+	 * The marker listeners are registered by Plugin::boot(), so the tests below that remove them are testing the real wiring.
+	 */
+	public function test_the_marker_listeners_are_registered_while_steadhand_is_loaded(): void {
+		$this->assertIsInt( has_action( 'wp_trash_post', array( PostWriter::class, 'trash_starting' ) ) );
+		$this->assertIsInt( has_action( 'transition_post_status', array( PostWriter::class, 'left_trash' ) ) );
+		$this->assertIsInt( has_action( 'untrashed_post', array( PostWriter::class, 'untrashed' ) ) );
+	}
+
+	/**
+	 * An agent trashes a draft. An administrator moves it out of the trash with a plain status update, which fires no untrashed_post, and
+	 * trashes it again. The status change cleared the agent's markers, so the agent cannot restore that trash.
+	 */
+	public function test_a_status_update_out_of_the_trash_then_a_new_trash_by_an_administrator_is_refused_for_the_agent(): void {
+		$post  = $this->draft_post();
+		$agent = $this->act_as_agent( array( Capabilities::TRASH => true ) );
+		$this->trash( $post );
+
+		wp_set_current_user( $this->admin_id() );
+		wp_update_post(
+			array(
+				'ID'          => $post,
+				'post_status' => 'draft',
+			)
+		);
+		wp_trash_post( $post );
+		wp_set_current_user( $agent );
+
+		$this->assertSame( '', $this->meta_of( $post, PostWriter::TRASHED_BY_META ), 'The status update cleared the agent\'s marker.' );
+		$before = $this->state( $post );
+		$this->assertSame( 'trash', $before['status'] );
+
+		$this->assert_generic( $this->restore( $post ) );
+		$this->assertSame( $before, $this->state( $post ) );
+	}
+
+	/**
+	 * The same route with the listeners removed. The status update leaves the agent's markers, and the new trash adds a second row of each
+	 * core key. The row-count rule in TrashRules::own_trash() alone refuses the restore.
+	 */
+	public function test_without_the_listeners_the_row_count_rule_alone_refuses_a_restore_after_a_status_update_and_a_new_trash(): void {
+		$post  = $this->draft_post();
+		$agent = $this->act_as_agent( array( Capabilities::TRASH => true ) );
+		$this->trash( $post );
+
+		$this->without_marker_listeners(
+			function () use ( $post, $agent ): void {
+				wp_set_current_user( $this->admin_id() );
+				wp_update_post(
+					array(
+						'ID'          => $post,
+						'post_status' => 'draft',
+					)
+				);
+				wp_trash_post( $post );
+				wp_set_current_user( $agent );
+			}
+		);
+
+		$this->assertSame( (string) $agent, $this->meta_of( $post, PostWriter::TRASHED_BY_META ), 'Control: the agent\'s marker survived.' );
+		$this->assertSame( 1, $this->rows_of( $post, PostWriter::TRASHED_BY_META ), 'Control: one marker row.' );
+		$this->assertSame( 2, $this->rows_of( $post, PostWriter::TRASH_CORE_TIME_META ), 'Control: two core trash-time rows.' );
+
+		$before = $this->state( $post );
+		$this->assert_generic( $this->restore( $post ) );
+		$this->assertSame( $before, $this->state( $post ) );
+	}
+
+	/**
+	 * An agent trashes a post, an administrator restores and trashes it again, with the listeners removed. Each core key then has one row, so
+	 * the time comparison is what refuses. The agent's marker time is changed to a different value, to show that comparison alone decides.
+	 */
+	public function test_without_the_listeners_the_time_comparison_alone_refuses_a_restore_after_an_administrator_restored_and_trashed_again(): void {
+		$post  = $this->draft_post();
+		$agent = $this->act_as_agent( array( Capabilities::TRASH => true ) );
+		$this->trash( $post );
+
+		$this->without_marker_listeners(
+			function () use ( $post, $agent ): void {
+				wp_set_current_user( $this->admin_id() );
+				wp_untrash_post( $post );
+				wp_trash_post( $post );
+				wp_set_current_user( $agent );
+
+				$core = $this->meta_of( $post, PostWriter::TRASH_CORE_TIME_META );
+				update_post_meta( $post, PostWriter::TRASH_TIME_META, (string) ( (int) $core + 1000 ) );
+			}
+		);
+
+		$this->assertSame( 1, $this->rows_of( $post, PostWriter::TRASHED_BY_META ), 'Control: one marker row.' );
+		$this->assertSame( 1, $this->rows_of( $post, PostWriter::TRASH_TIME_META ), 'Control: one marker time row.' );
+		$this->assertSame( 1, $this->rows_of( $post, PostWriter::TRASH_CORE_TIME_META ), 'Control: one core trash-time row.' );
+		$this->assertNotSame(
+			$this->meta_of( $post, PostWriter::TRASH_CORE_TIME_META ),
+			$this->meta_of( $post, PostWriter::TRASH_TIME_META ),
+			'Control: the marker time differs from WordPress\'s.'
+		);
+
+		$before = $this->state( $post );
+		$this->assertSame( 'trash', $before['status'] );
+		$this->assert_generic( $this->restore( $post ) );
+		$this->assertSame( $before, $this->state( $post ) );
+	}
+
+	/**
+	 * A published post is trashed by an agent that holds steadhand_publish, and a second status row is added. With two rows of the stored status
+	 * there is no single record, so the post comes back as a draft even for an agent that holds steadhand_publish.
+	 */
+	public function test_duplicate_stored_status_rows_restore_the_post_as_a_draft_even_with_steadhand_publish(): void {
+		$post = $this->live_post();
+		$this->act_as_agent(
+			array(
+				Capabilities::TRASH   => true,
+				Capabilities::PUBLISH => true,
+			)
+		);
+		$this->trash( $post );
+		add_post_meta( $post, '_wp_trash_meta_status', 'publish' );
+		$this->assertSame( 2, $this->rows_of( $post, '_wp_trash_meta_status' ), 'Control: two stored-status rows.' );
+
+		$result = $this->restore( $post );
+
+		$this->assertIsArray( $result );
+		$this->assertSame( 'draft', $result['status'] );
+		$this->assertSame( '', $result['previous_status'] );
+		$this->assertSame( array( self::NO_RECORD ), $result['warnings'] );
+		$this->assertSame( 'draft', $this->status_of( $post ) );
+	}
+
+	/**
+	 * WordPress restores a draft as published, through its restore status filter, while the agent may not publish. Steadhand sets it to draft
+	 * with a status-only save, and the warning says what WordPress did.
+	 */
+	public function test_a_post_wordpress_restores_live_is_set_to_draft_and_the_warning_says_so(): void {
+		$post = $this->draft_post();
+		$this->act_as_agent( array( Capabilities::TRASH => true ) );
+		$this->trash( $post );
+		$forced = null;
+		$this->on(
+			'pre_untrash_post',
+			function () use ( &$forced ) {
+				// Added during the restore, so it runs after Steadhand's own filter at the same priority.
+				$forced = static fn(): string => 'publish';
+				add_filter( 'wp_untrash_post_status', $forced, PHP_INT_MAX, 3 );
+
+				return null;
+			},
+			10,
+			3
+		);
+
+		try {
+			$result = $this->restore( $post );
+		} finally {
+			if ( null !== $forced ) {
+				remove_filter( 'wp_untrash_post_status', $forced, PHP_INT_MAX );
+			}
+		}
+
+		$this->assertIsArray( $result );
+		$this->assertSame( 'draft', $result['status'] );
+		$this->assertSame( array( self::DEMOTED ), $result['warnings'] );
+		$this->assertSame( 'draft', $this->status_of( $post ) );
+	}
+
+	/**
+	 * The restore saves the post live, and the draft save that follows is forced live too. The post stays published, and the call is refused
+	 * with steadhand_update_partial, which says the post is published and that an administrator should check it.
+	 */
+	public function test_a_post_that_stays_live_after_the_draft_save_is_refused_as_partial_and_says_an_administrator_should_check_it(): void {
+		$post = $this->draft_post();
+		$this->act_as_agent( array( Capabilities::TRASH => true ) );
+		$this->trash( $post );
+		$this->on(
+			'wp_insert_post_data',
+			static function ( array $data, array $postarr ) use ( $post ): array {
+				if ( (int) ( $postarr['ID'] ?? 0 ) === $post && 'draft' === ( $data['post_status'] ?? '' ) ) {
+					$data['post_status'] = 'publish';
+				}
+
+				return $data;
+			},
+			PHP_INT_MAX,
+			2
+		);
+
+		$result = $this->restore( $post );
+
+		$this->assertWPError( $result );
+		$this->assertSame( 'steadhand_update_partial', $result->get_error_code() );
+		$this->assertStringContainsString( 'The post was restored and is now publish.', $result->get_error_message() );
+		$this->assertStringContainsString( 'an administrator should check it', $result->get_error_message() );
+		$this->assertSame( 'publish', $this->status_of( $post ) );
+	}
 }

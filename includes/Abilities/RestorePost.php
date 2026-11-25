@@ -12,6 +12,7 @@ namespace Steadhand\Abilities;
 use Steadhand\Capabilities;
 use Steadhand\Guardrails\Engine;
 use Steadhand\Pipeline\PostWriter;
+use Steadhand\Pipeline\TrashRules;
 use Steadhand\PostTypes;
 
 defined( 'ABSPATH' ) || exit;
@@ -25,11 +26,6 @@ defined( 'ABSPATH' ) || exit;
  * destructive and not idempotent: a second call finds the post out of the trash and refuses it.
  */
 final class RestorePost extends Ability {
-
-	/**
-	 * The status WordPress stores for a trashed post, before it was trashed.
-	 */
-	private const PREVIOUS_STATUS_META = '_wp_trash_meta_status';
 
 	/**
 	 * The statuses a post comes back to as it was, when the agent holds the capability each one needs.
@@ -166,7 +162,7 @@ final class RestorePost extends Ability {
 	/**
 	 * Checks that the post is in the trash, of an allowed type and not an attachment, that the caller may delete it (core's
 	 * requirement for untrashing, which MetaCaps grants for a trashed post only inside this call), and that this agent is the one
-	 * that trashed it, for this trash (PostWriter::own_trash()). Every failure gives the same refusal.
+	 * that trashed it, for this trash (TrashRules::own_trash()). Every failure gives the same refusal.
 	 *
 	 * The post is read uncached, and not through PostReader, which refuses a trashed post for every caller.
 	 *
@@ -194,7 +190,7 @@ final class RestorePost extends Ability {
 			return false;
 		}
 
-		return PostWriter::own_trash( $post_id );
+		return TrashRules::own_trash( $post_id, get_current_user_id() );
 	}
 
 	/**
@@ -212,7 +208,8 @@ final class RestorePost extends Ability {
 
 	/**
 	 * Restores the post through PostWriter::untrash(), to the status it had before the trash when the agent may bring it back to
-	 * that status, and to a draft otherwise. The status WordPress gives it is reported as it is.
+	 * that status, and to a draft otherwise. A post that WordPress restores live when a draft was asked for is set to draft by the
+	 * writer, and the warning says so. The status the post has now is reported as it is.
 	 *
 	 * @param array<string, mixed> $input Validated input.
 	 * @return array<string, mixed>|\WP_Error
@@ -223,7 +220,7 @@ final class RestorePost extends Ability {
 		}
 
 		$post_id  = (int) $input['id'];
-		$previous = (string) get_post_meta( $post_id, self::PREVIOUS_STATUS_META, true );
+		$previous = TrashRules::stored_status( $post_id ) ?? '';
 		$target   = $this->target_status( $previous );
 
 		$restored = PostWriter::untrash( $post_id, $target['status'] );
@@ -232,7 +229,14 @@ final class RestorePost extends Ability {
 		}
 
 		$warnings = null === $target['warning'] ? array() : array( $target['warning'] );
-		if ( $restored['status'] !== $target['status'] ) {
+		if ( $restored['restored_as'] !== $restored['status'] ) {
+			// WordPress restored the post live, and Steadhand set it to draft because this agent may not publish.
+			$warnings[] = sprintf(
+				/* translators: %s: the status WordPress gave the restored post before Steadhand set it to draft, e.g. publish. */
+				__( 'WordPress restored the post as %s. This agent may not publish, so Steadhand set it to draft.', 'steadhand' ),
+				$restored['restored_as']
+			);
+		} elseif ( $restored['status'] !== $target['status'] ) {
 			$warnings[] = sprintf(
 				/* translators: 1: the status WordPress gave the restored post. 2: the status Steadhand asked for. */
 				__( 'WordPress restored the post as %1$s, not %2$s.', 'steadhand' ),
@@ -246,12 +250,19 @@ final class RestorePost extends Ability {
 
 	/**
 	 * The status a restored post is asked to have: the status it had before the trash when the agent may restore it to that status, and
-	 * otherwise a draft, with the reason as a warning.
+	 * otherwise a draft, with the reason as a warning. An empty $previous (WordPress holds no single stored status) is a draft.
 	 *
-	 * @param string $previous The status before the trash, as WordPress stored it.
+	 * @param string $previous The status before the trash, as WordPress stored it, or '' when there is not exactly one record.
 	 * @return array{status: string, warning: string|null}
 	 */
 	private function target_status( string $previous ): array {
+		if ( '' === $previous ) {
+			return array(
+				'status'  => 'draft',
+				'warning' => __( 'WordPress holds no single record of the status the post had before the trash, so it was restored as a draft.', 'steadhand' ),
+			);
+		}
+
 		if ( in_array( $previous, self::DRAFT_LIKE, true ) ) {
 			return array(
 				'status'  => $previous,

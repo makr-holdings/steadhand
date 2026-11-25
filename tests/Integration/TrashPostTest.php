@@ -32,6 +32,9 @@ final class TrashPostTest extends TrashTestCase {
 	private const PROTECTED = 'This page is the site\'s front page, posts page or privacy policy page, and Steadhand does not trash it. Nothing was changed.';
 
 	/** The refusal for a published post without steadhand_publish. */
+	/** The refusal for a sticky post. */
+	private const STICKY = 'This post is sticky. Trashing it would remove it from the sticky posts, and restoring it would not put it back. Unstick it in WordPress first. Nothing was changed.';
+
 	private const NEEDS_PUBLISH = 'Trashing a published, scheduled or private post needs steadhand_publish as well as steadhand_trash, and this agent does not hold steadhand_publish. Nothing was changed.';
 
 	/** The refusal for a post with an edit lock held by someone else. */
@@ -589,5 +592,50 @@ final class TrashPostTest extends TrashTestCase {
 		$this->assertContains( self::RESTORE, $registry->names() );
 		$this->assertContains( Capabilities::TRASH, $registry->capabilities_used() );
 		$this->assertNotContains( Capabilities::TRASH, Capabilities::agent_defaults(), 'The trash is off by default.' );
+	}
+
+	/**
+	 * The front page is protected whenever page_on_front holds its ID, even with show_on_front set to posts: core resets page_on_front to 0 when
+	 * that page is trashed, so the saved selection would be lost.
+	 */
+	public function test_the_front_page_is_refused_when_show_on_front_is_posts_because_its_selection_is_saved_in_page_on_front(): void {
+		$front = $this->admin_post( array( 'post_type' => 'page' ) );
+		update_option( 'show_on_front', 'posts' );
+		update_option( 'page_on_front', $front );
+		$this->act_as_agent(
+			array(
+				Capabilities::TRASH   => true,
+				Capabilities::PUBLISH => true,
+			)
+		);
+		$before = $this->state( $front );
+
+		$this->assert_refused( $this->trash( $front ), 'steadhand_refused_protected_page', self::PROTECTED );
+		$this->assertSame( $before, $this->state( $front ) );
+	}
+
+	/**
+	 * A sticky post is refused by the ability and by the writer: trashing it would take it out of the sticky posts, and a restore would not put it
+	 * back. It stays published and sticky.
+	 */
+	public function test_a_sticky_post_is_refused_and_stays_sticky_and_published(): void {
+		$post = $this->live_post();
+		stick_post( $post );
+		$this->act_as_agent(
+			array(
+				Capabilities::TRASH   => true,
+				Capabilities::PUBLISH => true,
+			)
+		);
+		$before = $this->state( $post );
+
+		$this->assert_refused( $this->trash( $post ), 'steadhand_refused_sticky_post', self::STICKY );
+		$this->assertSame( $before, $this->state( $post ) );
+		$this->assertTrue( is_sticky( $post ), 'The post is still sticky.' );
+
+		$writer = $this->in_write( static fn(): mixed => PostWriter::trash( $post, 'publish' ) );
+		$this->assert_refused( $writer, 'steadhand_refused_sticky_post', self::STICKY );
+		$this->assertSame( $before, $this->state( $post ) );
+		$this->assertTrue( is_sticky( $post ), 'The writer leaves it sticky too.' );
 	}
 }

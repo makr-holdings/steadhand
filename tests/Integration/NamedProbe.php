@@ -26,11 +26,13 @@ final class NamedProbe extends Ability {
 	 * @param string  $ability_name The ability name the probe reports.
 	 * @param Closure $check        Receives the sanitized input, returns the value to report.
 	 * @param bool    $write        Whether the probe is a write call (not read-only).
+	 * @param bool    $throw_in_authorize Whether authorize_object() throws, to test the exit path of a call.
 	 */
 	public function __construct(
 		private string $ability_name,
 		private Closure $check,
-		private bool $write = true
+		private bool $write = true,
+		private bool $throw_in_authorize = false
 	) {}
 
 	/**
@@ -109,9 +111,14 @@ final class NamedProbe extends Ability {
 	 *
 	 * @param array<string, mixed> $input Input.
 	 * @return bool
+	 * @throws \RuntimeException When the probe is set to throw here.
 	 */
 	public function authorize_object( array $input ): bool {
 		unset( $input );
+
+		if ( $this->throw_in_authorize ) {
+			throw new \RuntimeException( 'The probe throws in authorize_object().' );
+		}
 
 		return true;
 	}

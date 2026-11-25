@@ -171,12 +171,11 @@ final class TrashMetaCapsTest extends TrashTestCase {
 	}
 
 	/**
-	 * Inside steadhand/restore-post, delete_post is granted for a trashed post with steadhand_trash, and read, edit and publish are not.
-	 * The ownership rule is the ability's own, so the mapping grants delete_post for any trashed post the agent can otherwise reach.
+	 * Inside steadhand/restore-post, delete_post is granted for a trashed post the caller trashed itself, with steadhand_trash, and read, edit
+	 * and publish are not. The ownership rule (TrashRules::own_trash()) is what grants it.
 	 */
 	public function test_inside_restore_post_a_trashed_post_gets_delete_post_and_nothing_else(): void {
 		$trashed = $this->draft_post();
-		wp_trash_post( $trashed );
 		$this->act_as_agent(
 			array(
 				Capabilities::TRASH        => true,
@@ -184,6 +183,7 @@ final class TrashMetaCapsTest extends TrashTestCase {
 				Capabilities::WRITE_DRAFTS => true,
 			)
 		);
+		$this->trash( $trashed );
 
 		$answers = $this->answers_inside( self::RESTORE, $trashed );
 
@@ -288,5 +288,59 @@ final class TrashMetaCapsTest extends TrashTestCase {
 		$this->trash( $post );
 
 		$this->assertFalse( $this->may_delete_inside( self::TRASH, $post ) );
+	}
+
+	/**
+	 * Inside steadhand/restore-post, delete_post is granted for the trashed post the caller trashed, and refused for a trashed post an
+	 * administrator trashed and for one another agent trashed. All three are in the trash and of an allowed type, so only the ownership
+	 * rule (TrashRules::own_trash()) separates them.
+	 */
+	public function test_inside_restore_post_delete_post_is_granted_only_for_the_post_the_caller_trashed(): void {
+		$own                 = $this->draft_post();
+		$admin_trashed       = $this->draft_post();
+		$other_agent_trashed = $this->draft_post();
+		wp_trash_post( $admin_trashed );
+
+		$caller = $this->act_as_agent( array( Capabilities::TRASH => true ) );
+		$this->trash( $own );
+		$this->act_as_agent( array( Capabilities::TRASH => true ) );
+		$this->trash( $other_agent_trashed );
+		wp_set_current_user( $caller );
+
+		$answers = $this->inside(
+			self::RESTORE,
+			static fn(): array => array(
+				'own'         => current_user_can( 'delete_post', $own ),
+				'admin'       => current_user_can( 'delete_post', $admin_trashed ),
+				'other_agent' => current_user_can( 'delete_post', $other_agent_trashed ),
+			)
+		);
+
+		$this->assertTrue( $answers['own'], 'delete_post for the post the caller trashed.' );
+		$this->assertFalse( $answers['admin'], 'delete_post for a post an administrator trashed.' );
+		$this->assertFalse( $answers['other_agent'], 'delete_post for a post another agent trashed.' );
+	}
+
+	/**
+	 * Inside steadhand/trash-post, delete_post is refused for the front page and the posts page, whatever show_on_front says. A plain
+	 * published page is the control: it may be trashed.
+	 */
+	public function test_inside_trash_post_delete_post_is_refused_for_the_front_and_posts_page_whatever_show_on_front_says(): void {
+		$front = $this->admin_post( array( 'post_type' => 'page' ) );
+		$posts = $this->admin_post( array( 'post_type' => 'page' ) );
+		$plain = $this->admin_post( array( 'post_type' => 'page' ) );
+		update_option( 'show_on_front', 'posts' );
+		update_option( 'page_on_front', $front );
+		update_option( 'page_for_posts', $posts );
+		$this->act_as_agent(
+			array(
+				Capabilities::TRASH   => true,
+				Capabilities::PUBLISH => true,
+			)
+		);
+
+		$this->assertFalse( $this->may_delete_inside( self::TRASH, $front ), 'The front page, with show_on_front set to posts.' );
+		$this->assertFalse( $this->may_delete_inside( self::TRASH, $posts ), 'The posts page.' );
+		$this->assertTrue( $this->may_delete_inside( self::TRASH, $plain ), 'Control: an ordinary published page.' );
 	}
 }

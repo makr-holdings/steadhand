@@ -10,10 +10,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). The
 - `steadhand/trash-post` and `steadhand/restore-post` (SPEC section 5). The first moves one post or page to the trash, and the second restores a post that the same agent trashed, and only while that trash is the current one. Both need `steadhand_trash`, which is off by default. Neither deletes permanently. Trashing a published, scheduled or private post also needs `steadhand_publish`. The restore brings a live post back as a draft unless the agent holds `steadhand_publish`.
 - The Agents screen offers `steadhand_trash`, with a plain description of what it allows.
 - Uninstall removes the two trash marker keys from every post.
+- `steadhand/trash-post` refuses a sticky post with `steadhand_refused_sticky_post` (409), because core removes a post from the sticky posts when it is trashed and a restore does not put it back. The writer refuses it too.
+- `steadhand/restore-post` sets a post that WordPress restores live to draft, with a status-only save, when the agent may not publish. A post that stays live is refused with `steadhand_update_partial`, and the message says an administrator should check it.
 
 ### Security
 - WordPress deletes a trashed post permanently after `EMPTY_TRASH_DAYS` days, which is the site's trash period, unless it is restored. `steadhand/trash-post` refuses, with nothing changed, when that setting is zero or not a positive number, because WordPress would then delete the post at once.
 - `delete_post` is granted to an agent only inside `steadhand/trash-post` and `steadhand/restore-post`, and only as those two abilities need it (SPEC section 14.1). Restoring a post clears its trash markers, so an administrator's later trash of the same post cannot be restored by the agent that trashed it earlier.
+- `steadhand/restore-post` restores only a post the calling agent trashed itself, and only while that trash is the current one. The rule now needs exactly one row of each trash key, so a post an administrator moved out of the trash with a status update and trashed again is refused, even when the markers were left behind.
+- The trash markers are cleared by every route out of the trash and at the start of every new trash, not only by `wp_untrash_post()`. The listeners are registered whatever the dependency state, as the lockdown is.
+- `delete_post` is refused, inside a Steadhand call, for the front page, the posts page and the privacy policy page, and for any post that the caller did not trash, inside `restore-post`. The front page is protected whenever `page_on_front` is set, whatever `show_on_front` says.
+- A stored previous status that is not exactly one record restores the post as a draft.
 
 ## [0.3.2] - 2026-11-25
 
