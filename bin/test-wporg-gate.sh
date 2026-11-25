@@ -150,6 +150,9 @@ c_dev_directory_restored() {
 c_vendor_autoload_missing() {
 	rm -f -- steadhand/vendor/autoload.php
 }
+m_opt_in_constant_name() {
+	printf '%s\n' "// Turn on with define( 'STEADHAND_DEV_UPDATES', true );" >>steadhand/includes/Plugin.php
+}
 c_look_alike_words() {
 	printf '%s\n' '// Public API, public_key handling and publication notes.' >>steadhand/includes/Plugin.php
 }
@@ -255,6 +258,7 @@ case_run "duplicate guard block" dir m_duplicate_guard_block "repeat of an allow
 case_run "Steadhand\\Dev reference" dir m_namespace_reference "Steadhand.Dev" 0
 case_run "puc_ token" dir m_puc_prefix_token "puc_" 0
 case_run "Puc/ path and v5p7" dir m_puc_path_and_version "Puc/|v5p" 0
+case_run "dev updates opt-in constant" dir m_opt_in_constant_name "pattern 'STEADHAND_DEV_UPDATES'" 0
 # Controls: the dev directory and the autoloader are checked as before.
 case_run "dev directory restored" dir c_dev_directory_restored "dev-only directory present" 0
 case_run "vendor autoload missing" dir c_vendor_autoload_missing "bin/build.sh wporg" 0
