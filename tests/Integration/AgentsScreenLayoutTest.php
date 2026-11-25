@@ -449,7 +449,7 @@ final class AgentsScreenLayoutTest extends TestCase {
 		$this->assertStringNotContainsString( 'name="username"', $html );
 	}
 
-	public function test_a_create_with_no_box_checked_grants_no_capability(): void {
+	public function test_a_create_with_no_box_checked_is_refused_and_makes_no_user(): void {
 		$this->as_user( $this->admin() );
 		$this->post(
 			AgentsHandler::ACTION_CREATE,
@@ -461,11 +461,8 @@ final class AgentsScreenLayoutTest extends TestCase {
 			)
 		);
 
-		$user = get_user_by( 'login', 'layout-none' );
-		$this->assertInstanceOf( \WP_User::class, $user );
-		foreach ( Capabilities::all() as $capability ) {
-			$this->assertFalse( Capabilities::user_has( $user, $capability ), $capability );
-		}
+		$this->assertFalse( username_exists( 'layout-none' ), 'No user is made without Connect.' );
+		$this->assertStringContainsString( 'A new agent needs Connect, because creating it makes its first connection.', $this->render() );
 	}
 
 	public function test_a_failed_create_shows_the_add_view_and_no_panel(): void {

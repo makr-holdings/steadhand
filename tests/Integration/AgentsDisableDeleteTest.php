@@ -726,6 +726,136 @@ final class AgentsDisableDeleteTest extends TestCase {
 		$this->assertTrue( $this->state( $agent )['exists'], 'The user must not be deleted.' );
 	}
 
+	public function test_a_role_added_by_a_listener_at_priority_one_stops_the_delete_at_the_last_guard(): void {
+		$agent = $this->agent( 1 );
+		$this->as_user( $this->user_with_role( 'administrator' ) );
+		// Runs after the guard at the first priority, which passes, and before the guard at the last one, which sees the second role.
+		$this->on(
+			'delete_user',
+			static function ( $id ) use ( $agent ): void {
+				if ( (int) $id === $agent ) {
+					get_userdata( $agent )->add_role( 'editor' );
+				}
+			},
+			1
+		);
+
+		$result = $this->handler->delete( $this->nonce( AgentsHandler::ACTION_DELETE, $agent ), $agent, true );
+
+		$this->assertSame( 'not_agent_revoked', $result['code'] );
+		$state = $this->state( $agent );
+		$this->assertTrue( $state['exists'], 'The user must not be deleted.' );
+		$this->assertContains( 'editor', $state['roles'] );
+	}
+
+	public function test_a_post_attributed_after_the_last_guard_is_kept_when_the_user_is_deleted(): void {
+		$agent = $this->agent( 1 );
+		$this->as_user( $this->user_with_role( 'administrator' ) );
+		$post = 0;
+		// Core asks for the post types after the delete_user action. This listener attributes a post to the agent after the guard has run.
+		$this->on(
+			'post_types_to_delete_with_user',
+			static function ( $post_types, $id ) use ( $agent, &$post ) {
+				if ( (int) $id === $agent && 0 === $post ) {
+					$post = (int) self::factory()->post->create(
+						array(
+							'post_author' => $agent,
+							'post_status' => 'publish',
+						)
+					);
+				}
+
+				return $post_types;
+			},
+			10
+		);
+
+		$result = $this->handler->delete( $this->nonce( AgentsHandler::ACTION_DELETE, $agent ), $agent, true );
+
+		$this->assertSame( 'agent_deleted', $result['code'] );
+		$this->assertFalse( $this->state( $agent )['exists'], 'The user is deleted.' );
+		$this->assertGreaterThan( 0, $post, 'The post was attributed during the delete.' );
+		$this->assertInstanceOf( \WP_Post::class, get_post( $post ), 'The post still exists: core deletes no post with the user.' );
+	}
+
+	public function test_the_post_filter_leaves_the_list_unchanged_for_another_user(): void {
+		$agent = $this->agent( 1 );
+		$other = $this->agent( 1 );
+		$this->as_user( $this->user_with_role( 'administrator' ) );
+		$seen_other = null;
+		$seen_self  = null;
+		$this->on(
+			'delete_user',
+			static function ( $id ) use ( $agent, $other, &$seen_other, &$seen_self ): void {
+				if ( (int) $id !== $agent ) {
+					return;
+				}
+				// phpcs:disable WordPress.NamingConventions.PrefixAllGlobals.NonPrefixedHooknameFound -- Core's own filter name, called on purpose to test the filter Steadhand adds to it.
+				$seen_other = apply_filters( 'post_types_to_delete_with_user', array( 'post' ), $other );
+				$seen_self  = apply_filters( 'post_types_to_delete_with_user', array( 'post' ), $agent );
+				// phpcs:enable
+			},
+			1
+		);
+
+		$result = $this->handler->delete( $this->nonce( AgentsHandler::ACTION_DELETE, $agent ), $agent, true );
+
+		$this->assertSame( 'agent_deleted', $result['code'] );
+		$this->assertSame( array( 'post' ), $seen_other, 'Another user keeps the list core built.' );
+		$this->assertSame( array(), $seen_self, 'The user being deleted gets no post type.' );
+	}
+
+	public function test_a_link_added_at_the_last_moment_stops_the_delete_and_is_kept(): void {
+		require_once ABSPATH . 'wp-admin/includes/bookmark.php';
+		$agent = $this->agent( 1 );
+		$this->as_user( $this->user_with_role( 'administrator' ) );
+		$link = 0;
+		// Core deletes links after its delete_user action, with no filter. This listener adds one before the last guard runs.
+		$this->on(
+			'delete_user',
+			static function ( $id ) use ( $agent, &$link ): void {
+				if ( (int) $id === $agent && 0 === $link ) {
+					$link = (int) wp_insert_link(
+						array(
+							'link_url'   => 'https://example.com/',
+							'link_name'  => 'Added late',
+							'link_owner' => $agent,
+						),
+						true
+					);
+				}
+			},
+			1
+		);
+
+		$result = $this->handler->delete( $this->nonce( AgentsHandler::ACTION_DELETE, $agent ), $agent, true );
+
+		$this->assertGreaterThan( 0, $link, 'The link was made during the delete.' );
+		$this->assertSame( 'delete_has_content_revoked', $result['code'] );
+		$this->assertTrue( $this->state( $agent )['exists'], 'The user is not deleted.' );
+		$this->assertNotNull( get_bookmark( $link ), 'The link still exists.' );
+	}
+
+	public function test_a_disable_during_add_password_undoes_the_new_password_and_refuses(): void {
+		$agent = $this->agent( 1 );
+		$this->as_user( $this->user_with_role( 'administrator' ) );
+		// The password is saved, then a disable stores steadhand_connect as false before the re-check.
+		$this->on(
+			'wp_create_application_password',
+			static function ( $user_id ): void {
+				get_userdata( $user_id )->add_cap( Capabilities::CONNECT, false );
+			}
+		);
+
+		$result = $this->handler->add_password( $this->nonce( AgentsHandler::ACTION_ADD_PASSWORD, $agent ), $agent, 'Race' );
+
+		$this->assertSame( 'agent_disabled_no_password', $result['code'] );
+		$this->assertFalse( $result['ok'] );
+		$this->assertNull( $result['secret'], 'No secret is returned.' );
+		$this->assertCount( 1, \WP_Application_Passwords::get_user_application_passwords( $agent ), 'The new password was revoked; only the first remains.' );
+		$this->assertSame( array( 'Password 1' ), array_column( \WP_Application_Passwords::get_user_application_passwords( $agent ), 'name' ) );
+	}
+
 	/**
 	 * The priorities at which callbacks are attached to a hook, or an empty list. Used to see whether the guard is in place.
 	 *
@@ -759,6 +889,7 @@ final class AgentsDisableDeleteTest extends TestCase {
 
 		$this->assertContains( PHP_INT_MAX, $during['filter'], 'The post filter is in place while core deletes.' );
 		$this->assertContains( PHP_INT_MAX, $during['guard'], 'The guard is in place while core deletes.' );
+		$this->assertContains( PHP_INT_MIN, $during['guard'], 'The guard also runs first, at the lowest priority.' );
 		$this->assertFalse( $this->state( $ok )['exists'] );
 		$this->assertSame( $filter_before, $this->priorities( 'post_types_to_delete_with_user' ), 'The filter is removed after a successful delete.' );
 		$this->assertSame( $action_before, $this->priorities( 'delete_user' ), 'The guard is removed after a successful delete.' );
@@ -856,11 +987,11 @@ final class AgentsDisableDeleteTest extends TestCase {
 
 		$_GET = array();
 		$list = $this->render();
-		$this->assertStringContainsString( '<td>Disabled (1 connection not revoked)</td>', $list );
+		$this->assertStringContainsString( '<td>Disabled (1 connection remains)</td>', $list );
 
 		$_GET   = array( 'agent' => (string) $agent );
 		$detail = $this->render();
-		$this->assertStringContainsString( 'Disabled (1 connection not revoked)', $detail );
+		$this->assertStringContainsString( 'Disabled (1 connection remains)', $detail );
 		$this->assertStringContainsString( 'Disable agent', $detail, 'Disable is offered while connections remain.' );
 		$this->assertStringContainsString( 'Enable agent', $detail );
 		$this->assertStringContainsString( 'Its existing connections work again.', $detail );
@@ -878,7 +1009,7 @@ final class AgentsDisableDeleteTest extends TestCase {
 		$detail = $this->render();
 
 		$this->assertStringContainsString( '<strong>Status:</strong> Disabled', $detail );
-		$this->assertStringNotContainsString( 'not revoked', $detail );
+		$this->assertStringNotContainsString( 'remains', $detail );
 		$this->assertStringContainsString( 'Enable agent', $detail );
 		$this->assertStringNotContainsString( 'Disable agent', $detail );
 		$this->assertStringContainsString( 'It has no connection now, so add one above before it can connect.', $detail );

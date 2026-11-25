@@ -214,13 +214,87 @@ final class AgentsCreateCapabilitiesTest extends TestCase {
 		$this->assert_stored( $result['user_id'], array( Capabilities::CONNECT, Capabilities::READ ) );
 	}
 
-	public function test_an_empty_list_gives_an_agent_that_cannot_connect(): void {
+	public function test_an_empty_list_is_refused_with_connect_required_and_makes_no_user_or_password(): void {
+		$made = false;
+		$this->on(
+			'wp_create_application_password',
+			static function () use ( &$made ): void {
+				$made = true;
+			}
+		);
+		$this->on(
+			'user_register',
+			static function () use ( &$made ): void {
+				$made = true;
+			}
+		);
+
 		$result = $this->create( 'empty-agent', array() );
 
-		$this->assertSame( 'created', $result['code'] );
-		$this->assertIsArray( $result['secret'] );
-		$this->assertFalse( Capabilities::user_has( get_userdata( $result['user_id'] ), Capabilities::CONNECT ) );
-		$this->assert_stored( $result['user_id'], array() );
+		$this->assert_refused( $result, 'connect_required', 'empty-agent' );
+		$this->assertFalse( $made, 'No user and no password were made.' );
+	}
+
+	public function test_connect_unticked_is_refused_before_any_user_or_password_is_made(): void {
+		$made = false;
+		$this->on(
+			'wp_create_application_password',
+			static function () use ( &$made ): void {
+				$made = true;
+			}
+		);
+		$this->on(
+			'user_register',
+			static function () use ( &$made ): void {
+				$made = true;
+			}
+		);
+
+		$result = $this->create( 'no-connect-create', array( Capabilities::READ, Capabilities::WRITE_DRAFTS ) );
+
+		$this->assert_refused( $result, 'connect_required', 'no-connect-create' );
+		$this->assertFalse( $made, 'Refused before the user row and the password.' );
+	}
+
+	public function test_a_connect_refusal_redraws_the_form_with_the_posted_values(): void {
+		$this->post_create(
+			'redraw-login',
+			array(
+				'capabilities_present' => '1',
+				'capabilities'         => array( Capabilities::READ ),
+			)
+		);
+
+		$html = $this->render();
+
+		$this->assertFalse( username_exists( 'redraw-login' ), 'No user with that login exists.' );
+		$this->assertStringContainsString( 'A new agent needs Connect, because creating it makes its first connection. To make an agent that cannot connect, create it and then disable it.', $html );
+		$this->assertStringContainsString( 'value="redraw-login"', $html, 'The login is redrawn as posted.' );
+		$this->assertStringContainsString( 'value="Desk"', $html, 'The connection name is redrawn as posted.' );
+		$this->assertStringNotContainsString( 'Application password:', $html, 'No secret is shown.' );
+		preg_match_all( '/<input type="checkbox" name="capabilities\[\]" value="([^"]+)"([^>]*)>/', $html, $matches, PREG_SET_ORDER );
+		$boxes = array();
+		foreach ( $matches as $match ) {
+			$boxes[ $match[1] ] = str_contains( $match[2], 'checked' );
+		}
+		$this->assertTrue( $boxes[ Capabilities::READ ], 'The box that was ticked stays ticked.' );
+		$this->assertFalse( $boxes[ Capabilities::CONNECT ], 'The box that was unticked stays unticked.' );
+	}
+
+	/**
+	 * The rendered Agents screen, for the current user and the current $_GET.
+	 *
+	 * @return string
+	 */
+	private function render(): string {
+		ob_start();
+		try {
+			$this->screen->render();
+		} finally {
+			$html = (string) ob_get_clean();
+		}
+
+		return $html;
 	}
 
 	public function test_null_keeps_the_role_defaults_and_stores_no_user_level_capability(): void {
@@ -238,12 +312,12 @@ final class AgentsCreateCapabilitiesTest extends TestCase {
 		$this->assertNotContains( Capabilities::SETTINGS, $this->handler->offered_capabilities(), 'Precondition: settings is not offered.' );
 		$this->assertNotContains( Capabilities::MENUS, $this->handler->offered_capabilities(), 'Precondition: menus is not offered.' );
 
-		$posted = array( Capabilities::READ, 'manage_options', 'administrator', 'edit_posts', Capabilities::SETTINGS, Capabilities::MENUS, Capabilities::NO_GRANT, Roles::ROLE );
+		$posted = array( Capabilities::CONNECT, Capabilities::READ, 'manage_options', 'administrator', 'edit_posts', Capabilities::SETTINGS, Capabilities::MENUS, Capabilities::NO_GRANT, Roles::ROLE );
 		$result = $this->create( 'refused-names', $posted );
 
 		$this->assertSame( 'created', $result['code'] );
 		$user = get_userdata( $result['user_id'] );
-		$this->assert_stored( $result['user_id'], array( Capabilities::READ ) );
+		$this->assert_stored( $result['user_id'], array( Capabilities::CONNECT, Capabilities::READ ) );
 		foreach ( array( 'manage_options', 'administrator', 'edit_posts', Capabilities::NO_GRANT ) as $name ) {
 			$this->assertArrayNotHasKey( $name, $user->caps, $name );
 		}
@@ -256,11 +330,11 @@ final class AgentsCreateCapabilitiesTest extends TestCase {
 	}
 
 	public function test_non_string_entries_are_ignored_without_an_error(): void {
-		$posted = array( Capabilities::READ, 5, null, true, 1.5, array( Capabilities::PUBLISH ) );
+		$posted = array( Capabilities::CONNECT, Capabilities::READ, 5, null, true, 1.5, array( Capabilities::PUBLISH ) );
 		$result = $this->create( 'typed-agent', $posted );
 
 		$this->assertSame( 'created', $result['code'] );
-		$this->assert_stored( $result['user_id'], array( Capabilities::READ ) );
+		$this->assert_stored( $result['user_id'], array( Capabilities::CONNECT, Capabilities::READ ) );
 		$this->assertFalse( Capabilities::user_has( get_userdata( $result['user_id'] ), Capabilities::PUBLISH ) );
 	}
 
@@ -278,7 +352,7 @@ final class AgentsCreateCapabilitiesTest extends TestCase {
 			}
 		);
 
-		$result = $this->create( 'no-grant', array( Capabilities::PUBLISH ) );
+		$result = $this->create( 'no-grant', array( Capabilities::CONNECT, Capabilities::PUBLISH ) );
 
 		$this->assert_refused( $result, 'create_failed', 'no-grant' );
 		$this->assertFalse( $made, 'The password step was never reached.' );
@@ -307,7 +381,7 @@ final class AgentsCreateCapabilitiesTest extends TestCase {
 			}
 		);
 
-		$result = $this->create( 'throws-grant', array( Capabilities::PUBLISH ) );
+		$result = $this->create( 'throws-grant', array( Capabilities::CONNECT, Capabilities::PUBLISH ) );
 
 		$this->assert_refused( $result, 'create_failed', 'throws-grant' );
 		$this->assertFalse( $made, 'The password step was never reached, so no password was made.' );
@@ -321,7 +395,7 @@ final class AgentsCreateCapabilitiesTest extends TestCase {
 			}
 		);
 
-		$result = $this->create( 'int-one', array( Capabilities::READ ) );
+		$result = $this->create( 'int-one', array( Capabilities::CONNECT, Capabilities::READ ) );
 
 		$this->assert_refused( $result, 'create_failed', 'int-one' );
 	}
@@ -334,7 +408,7 @@ final class AgentsCreateCapabilitiesTest extends TestCase {
 			}
 		);
 
-		$result = $this->create( 'string-one', array( Capabilities::READ ) );
+		$result = $this->create( 'string-one', array( Capabilities::CONNECT, Capabilities::READ ) );
 
 		$this->assert_refused( $result, 'create_failed', 'string-one' );
 	}
@@ -362,11 +436,11 @@ final class AgentsCreateCapabilitiesTest extends TestCase {
 		$role->add_cap( Capabilities::MENUS, true );
 
 		try {
-			$result = $this->create( 'menus-role', array( Capabilities::READ ) );
+			$result = $this->create( 'menus-role', array( Capabilities::CONNECT, Capabilities::READ ) );
 
 			$this->assertSame( 'created', $result['code'] );
 			$this->assertFalse( Capabilities::user_has( get_userdata( $result['user_id'] ), Capabilities::MENUS ), 'The role grant is overridden by the stored false.' );
-			$this->assert_stored( $result['user_id'], array( Capabilities::READ ) );
+			$this->assert_stored( $result['user_id'], array( Capabilities::CONNECT, Capabilities::READ ) );
 		} finally {
 			$role->remove_cap( Capabilities::MENUS );
 		}
@@ -389,10 +463,16 @@ final class AgentsCreateCapabilitiesTest extends TestCase {
 		}
 	}
 
-	public function test_an_agent_created_without_connect_is_refused_by_the_gate(): void {
-		$result = $this->create( 'no-connect', array( Capabilities::READ, Capabilities::WRITE_DRAFTS ) );
+	public function test_an_agent_whose_connect_is_unticked_later_is_refused_by_the_gate(): void {
+		// A new agent cannot be created without Connect (connect_required), so the agent is created connected and then disabled by unticking.
+		$result = $this->create( 'no-connect', array( Capabilities::CONNECT, Capabilities::READ, Capabilities::WRITE_DRAFTS ) );
 		$this->assertSame( 'created', $result['code'] );
 		$user_id = $result['user_id'];
+		$this->handler->set_capabilities(
+			wp_create_nonce( AgentsHandler::nonce_action( AgentsHandler::ACTION_CAPABILITIES, $user_id ) ),
+			$user_id,
+			array( Capabilities::READ, Capabilities::WRITE_DRAFTS )
+		);
 
 		$this->assertFalse( user_can( $user_id, Capabilities::CONNECT ) );
 		$this->assertTrue( user_can( $user_id, Capabilities::READ ), 'Read was checked.' );
@@ -428,7 +508,7 @@ final class AgentsCreateCapabilitiesTest extends TestCase {
 			}
 		);
 
-		$result = $this->create( 'extra-cap', array( Capabilities::READ ) );
+		$result = $this->create( 'extra-cap', array( Capabilities::CONNECT, Capabilities::READ ) );
 
 		$this->assert_refused( $result, 'extra_role', 'extra-cap' );
 	}
@@ -441,7 +521,7 @@ final class AgentsCreateCapabilitiesTest extends TestCase {
 			}
 		);
 
-		$result = $this->create( 'flipped-publish', array( Capabilities::READ ) );
+		$result = $this->create( 'flipped-publish', array( Capabilities::CONNECT, Capabilities::READ ) );
 
 		$this->assert_refused( $result, 'create_failed', 'flipped-publish' );
 	}
@@ -455,7 +535,7 @@ final class AgentsCreateCapabilitiesTest extends TestCase {
 			}
 		);
 
-		$result = $this->create( 'menus-listener', array( Capabilities::READ ) );
+		$result = $this->create( 'menus-listener', array( Capabilities::CONNECT, Capabilities::READ ) );
 
 		$this->assert_refused( $result, 'create_failed', 'menus-listener' );
 	}
@@ -469,19 +549,26 @@ final class AgentsCreateCapabilitiesTest extends TestCase {
 			}
 		);
 
-		$result = $this->create( 'quiet-agent', array( Capabilities::READ ) );
+		$result = $this->create( 'quiet-agent', array( Capabilities::CONNECT, Capabilities::READ ) );
 
 		$this->assertSame( 'created', $result['code'] );
 		$this->assertFalse( $fired );
 	}
 
-	public function test_a_post_with_the_marker_and_no_boxes_creates_an_agent_that_cannot_connect(): void {
+	public function test_a_post_with_the_marker_and_no_boxes_is_refused_with_connect_required(): void {
+		$made = false;
+		$this->on(
+			'wp_create_application_password',
+			static function () use ( &$made ): void {
+				$made = true;
+			}
+		);
+
 		$this->post_create( 'post-none', array( 'capabilities_present' => '1' ) );
 
-		$user = get_user_by( 'login', 'post-none' );
-		$this->assertInstanceOf( \WP_User::class, $user );
-		$this->assert_stored( $user->ID, array() );
-		$this->assertFalse( Capabilities::user_has( $user, Capabilities::CONNECT ) );
+		$this->assertFalse( username_exists( 'post-none' ), 'No user with that login exists.' );
+		$this->assertFalse( $made, 'No password was made.' );
+		$this->assertStringContainsString( 'A new agent needs Connect', $this->render() );
 	}
 
 	public function test_a_post_with_the_marker_and_boxes_grants_exactly_those_boxes(): void {
@@ -489,13 +576,13 @@ final class AgentsCreateCapabilitiesTest extends TestCase {
 			'post-some',
 			array(
 				'capabilities_present' => '1',
-				'capabilities'         => array( Capabilities::READ, 'manage_options' ),
+				'capabilities'         => array( Capabilities::CONNECT, Capabilities::READ, 'manage_options' ),
 			)
 		);
 
 		$user = get_user_by( 'login', 'post-some' );
 		$this->assertInstanceOf( \WP_User::class, $user );
-		$this->assert_stored( $user->ID, array( Capabilities::READ ) );
+		$this->assert_stored( $user->ID, array( Capabilities::CONNECT, Capabilities::READ ) );
 	}
 
 	public function test_a_post_without_the_marker_gets_the_role_defaults_whatever_is_posted(): void {

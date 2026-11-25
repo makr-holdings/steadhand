@@ -381,6 +381,42 @@ final class AgentsVerificationTest extends TestCase {
 		$this->assert_kept_without_access( $result['user_id'] );
 	}
 
+	public function test_content_that_appears_only_during_the_rollback_delete_keeps_the_user(): void {
+		$post = 0;
+		$this->on(
+			'user_register',
+			static function ( $user_id ): void {
+				get_userdata( $user_id )->add_role( 'editor' );
+			}
+		);
+		// The rollback's delete is the first thing to see the new user's content: a draft is attributed to it at the first priority of
+		// delete_user, after the content check that ran before the delete. The guard must stop the delete, and the user must be kept.
+		$this->on(
+			'delete_user',
+			static function ( $id ) use ( &$post ): void {
+				if ( 0 === $post ) {
+					$post = (int) self::factory()->post->create(
+						array(
+							'post_author' => (int) $id,
+							'post_status' => 'draft',
+						)
+					);
+				}
+			},
+			1
+		);
+
+		$result = $this->handler->create( $this->nonce( AgentsHandler::ACTION_CREATE ), 'late-content', 'Desk' );
+
+		$this->assertGreaterThan( 0, $post, 'The draft was made during the rollback delete.' );
+		$this->assertSame( 'create_failed_user_kept', $result['code'] );
+		$this->assertNull( $result['secret'], 'No secret is returned.' );
+		$stored = get_post( $post );
+		$this->assertInstanceOf( \WP_Post::class, $stored, 'The draft still exists.' );
+		$this->assertSame( 'draft', $stored->post_status, 'The draft was not trashed or deleted.' );
+		$this->assert_kept_without_access( $result['user_id'] );
+	}
+
 	public function test_an_attachment_attributed_to_the_new_user_is_kept_when_creation_fails(): void {
 		$attachment = 0;
 		$this->on(

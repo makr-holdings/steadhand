@@ -84,6 +84,7 @@ final class AgentsHandler {
 		'invalid_username',
 		'username_taken',
 		'invalid_label',
+		'connect_required',
 		'label_taken',
 		'too_many_passwords',
 		'app_passwords_unavailable',
@@ -206,6 +207,10 @@ final class AgentsHandler {
 	 * never holds one. A failed check, or a listener that throws, rolls the request back (see roll_back()) and refuses. No password is
 	 * returned then. This method does not fire steadhand_agent_capabilities_changed.
 	 *
+	 * When $capabilities is an array and steadhand_connect is not checked, the create is refused with connect_required before anything is
+	 * written: a new agent makes its first connection, so it must be able to connect. To make an agent that cannot connect, create it and
+	 * then disable it.
+	 *
 	 * @param string            $nonce        The nonce from the form.
 	 * @param string            $username     The requested login name, after wp_unslash().
 	 * @param string            $label        The label of the first Application Password, after wp_unslash().
@@ -232,6 +237,12 @@ final class AgentsHandler {
 
 		if ( ! self::is_valid_label( $label ) ) {
 			return $this->result( 'invalid_label' );
+		}
+
+		// Creating an agent makes its first connection, so Connect must be ticked. A new agent that cannot connect is made by creating it
+		// and then disabling it. Refused before anything is created. A marker-less create (null) keeps the role's defaults and is not refused here.
+		if ( null !== $values && true !== ( $values[ Capabilities::CONNECT ] ?? null ) ) {
+			return $this->result( 'connect_required' );
 		}
 
 		// Without the role, wp_insert_user() gives the new user no role at all. Refuse before anything is created.
@@ -449,6 +460,11 @@ final class AgentsHandler {
 		$fresh = $this->fresh_user( $user_id );
 		if ( null === $fresh || ! Agents::is_agent( $fresh ) ) {
 			return $this->undo_add( $user_id, $uuid, 'not_agent' );
+		}
+
+		// A disable that ran during the request (before this check) leaves the password without a connect to go with it.
+		if ( ! Capabilities::user_has( $fresh, Capabilities::CONNECT ) ) {
+			return $this->undo_add( $user_id, $uuid, 'agent_disabled_no_password' );
 		}
 
 		$passwords = \WP_Application_Passwords::get_user_application_passwords( $user_id );
@@ -1087,8 +1103,15 @@ final class AgentsHandler {
 		$revoked = self::quietly( fn(): bool => $this->revoke_every_password( $user_id ) );
 		$content = self::quietly( fn(): bool => $this->holds_attributed_content( $user_id ), true );
 
-		if ( ! $content && 'deleted' === $this->delete_user( $user_id, false ) ) {
-			return self::ROLLED_BACK;
+		if ( ! $content ) {
+			$deleted = $this->delete_user( $user_id, false );
+			if ( 'deleted' === $deleted ) {
+				return self::ROLLED_BACK;
+			}
+
+			// The guard stopped the delete for content that appeared after the check above, or the content check has changed since. Count it
+			// again, so a user that now holds content is kept, not reported as cleaned up.
+			$content = 'content' === $deleted || self::quietly( fn(): bool => $this->holds_attributed_content( $user_id ), true );
 		}
 
 		$stripped = self::quietly( fn(): bool => $this->strip_user( $user_id ) );
@@ -1147,12 +1170,14 @@ final class AgentsHandler {
 	 * Deletes a user with core's wp_delete_user(), with no reassign target, and reports what happened. Core deletes the posts attributed to
 	 * the user through a list of post types, and the links through a loop with no filter. So the call is guarded for its own duration only:
 	 *
-	 * - Posts: the post_types_to_delete_with_user filter returns no post type, so core deletes no post with the user.
-	 * - Links, and the content and role checks: core fires delete_user before it deletes anything. A listener at the last priority, for this
-	 *   user only, counts the posts and links attributed to it again, and when $agent_only it reads the user again. It throws when content is
-	 *   attributed or the user is no longer a dedicated agent, which ends the delete before anything is removed.
+	 * - Posts: the post_types_to_delete_with_user filter returns no post type for this user (any other user's list is left as core built it),
+	 *   so core deletes no post with the user.
+	 * - Links, and the content and role checks: core fires delete_user before it deletes anything. The same listener runs at the first
+	 *   priority (PHP_INT_MIN) and at the last (PHP_INT_MAX), for this user only. It counts the posts and links attributed to the user and,
+	 *   when $agent_only, reads the user again. It throws when content is attributed or the user is no longer a dedicated agent, which ends
+	 *   the delete before anything is removed. The last copy catches what a listener at any priority added.
 	 *
-	 * Both are removed in a finally. A throw from anywhere in the call does not decide the result: the user is read again, and it counts as
+	 * All of them are removed in a finally. A throw from anywhere in the call does not decide the result: the user is read again, and it counts as
 	 * deleted when it is gone (a listener of deleted_user can throw after the row is removed).
 	 *
 	 * @param int  $user_id    The user ID.
@@ -1168,8 +1193,13 @@ final class AgentsHandler {
 		// The reason the listener stopped the delete: 'content' or 'not_agent'. Empty when no listener stopped it.
 		$stopped_by = '';
 
-		$no_posts = static fn(): array => array();
-		$guard    = function ( $id ) use ( $user_id, $agent_only, &$stopped_by ): void {
+		// Only this user's list is emptied. Any other user's delete keeps the list core built.
+		$no_posts = static function ( $post_types, $id ) use ( $user_id ) {
+			return (int) $id === $user_id ? array() : $post_types;
+		};
+		// The guard runs first (PHP_INT_MIN, so a stop that can be seen up front happens before another plugin's listener cleans up) and
+		// last (PHP_INT_MAX, so a link or a role added by a listener at any priority is still caught).
+		$guard = function ( $id ) use ( $user_id, $agent_only, &$stopped_by ): void {
 			if ( (int) $id !== $user_id ) {
 				return;
 			}
@@ -1189,6 +1219,7 @@ final class AgentsHandler {
 		};
 
 		add_filter( 'post_types_to_delete_with_user', $no_posts, PHP_INT_MAX, 2 );
+		add_action( 'delete_user', $guard, PHP_INT_MIN, 3 );
 		add_action( 'delete_user', $guard, PHP_INT_MAX, 3 );
 
 		try {
@@ -1197,6 +1228,7 @@ final class AgentsHandler {
 			// A listener threw. Whether the user is gone is read below.
 		} finally {
 			remove_action( 'delete_user', $guard, PHP_INT_MAX );
+			remove_action( 'delete_user', $guard, PHP_INT_MIN );
 			remove_filter( 'post_types_to_delete_with_user', $no_posts, PHP_INT_MAX );
 		}
 

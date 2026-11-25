@@ -352,7 +352,7 @@ Runs after the Agents screen deletes a dedicated agent's user account.
 - **Since:** unreleased.
 - **Type:** action.
 - **Parameters:** `$user_id` (`int`), the ID of the deleted user; `$user_login` (`string`), the login the user had. The user no longer exists, so there is no `WP_User` object.
-- **When it runs:** once, after a fresh read finds the user gone. It does not run when the delete is refused, or when the user still exists afterwards. A delete is refused before any change when the request is not confirmed or when posts or links are attributed to the agent. It can also be refused after the agent's connections were revoked, when content or a role appears during the delete; then nothing is deleted and this action does not run.
+- **When it runs:** once, after a fresh read finds the user gone. It does not run when the delete is refused, or when the user still exists afterwards. A delete is refused before any change when the request is not confirmed or when posts or links are attributed to the agent. It can also be refused after the agent's connections were revoked, when content appears during the delete (`delete_has_content_revoked`) or a role is added (`not_agent_revoked`); then nothing is deleted and this action does not run.
 - **What is kept:** Steadhand never deletes content. The change-log entries of the user are kept.
 - **If a listener throws:** the exception is caught and ignored. The user stays deleted.
 - **What it does not do:** it cannot undo the delete or change the result. It has no return value.

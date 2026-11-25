@@ -429,11 +429,12 @@ final class AgentsScreen {
 			'invalid_username'               => array( 'error', __( 'The username is not valid. Use 1 to 60 lower-case letters, digits, underscores or hyphens, starting with a letter or digit.', 'steadhand' ) ),
 			'username_taken'                 => array( 'error', __( 'That username already exists.', 'steadhand' ) ),
 			'invalid_label'                  => array( 'error', __( 'The connection name is not valid. Use 1 to 60 characters on one line, with no markup, no invisible or control characters, and no leading or trailing spaces.', 'steadhand' ) ),
+			'connect_required'               => array( 'error', __( 'A new agent needs Connect, because creating it makes its first connection. To make an agent that cannot connect, create it and then disable it.', 'steadhand' ) ),
 			'label_taken'                    => array( 'error', __( 'The agent already has a connection with that name.', 'steadhand' ) ),
 			'too_many_passwords'             => array( 'error', __( 'The agent already has the most Application Passwords allowed. Revoke one first.', 'steadhand' ) ),
 			'app_passwords_unavailable'      => array( 'error', __( 'Application Passwords are not available for this user, so no password was made.', 'steadhand' ) ),
 			'not_agent'                      => array( 'error', __( 'That user is not a dedicated agent, so nothing was changed.', 'steadhand' ) ),
-			'not_agent_revoked'              => array( 'error', __( 'That user stopped being a dedicated agent during the delete, so it was not deleted. Its connections were already revoked. Nothing else was changed.', 'steadhand' ) ),
+			'not_agent_revoked'              => array( 'error', __( 'That user stopped being a dedicated agent during the delete, so it was not deleted. Its connections were already revoked. Steadhand changed nothing else.', 'steadhand' ) ),
 			'password_not_found'             => array( 'error', __( 'That password was not found for this agent.', 'steadhand' ) ),
 			'create_failed'                  => array( 'error', __( 'The agent could not be created.', 'steadhand' ) ),
 			'create_failed_user_kept'        => array( 'error', __( 'The agent could not be created. A user with no role and no password access was left behind because content on this site is attributed to its ID. Remove it on the Users screen and choose what to do with that content.', 'steadhand' ) ),
@@ -454,7 +455,7 @@ final class AgentsScreen {
 			'delete_not_confirmed'           => array( 'error', __( 'The agent was not deleted, because the deletion was not confirmed. Tick the box to confirm. Nothing was changed.', 'steadhand' ) ),
 			'delete_has_content'             => array( 'error', __( 'The agent was not deleted. Posts or links are attributed to it, and Steadhand never deletes content. Use Disable instead.', 'steadhand' ) ),
 			'delete_failed'                  => array( 'error', __( 'The agent could not be deleted. Its Application Passwords were revoked, so it cannot connect.', 'steadhand' ) ),
-			'delete_has_content_revoked'     => array( 'error', __( 'The agent now has posts or links attributed to it, so it was not deleted. Its connections were already revoked, and nothing else was changed. Steadhand never deletes content.', 'steadhand' ) ),
+			'delete_has_content_revoked'     => array( 'error', __( 'The agent now has posts or links attributed to it, so it was not deleted. Its connections were already revoked, and Steadhand changed nothing else. Steadhand never deletes content.', 'steadhand' ) ),
 			'agent_disabled_no_password'     => array( 'error', __( 'This agent is disabled. Enable it before adding a connection.', 'steadhand' ) ),
 		);
 	}
@@ -881,8 +882,8 @@ final class AgentsScreen {
 	}
 
 	/**
-	 * An agent's status, for the list and the detail view. "Disabled" when steadhand_connect is not in effect, and "Disabled (N connections not
-	 * revoked)" when that agent still holds N Application Passwords. Otherwise
+	 * An agent's status, for the list and the detail view. "Disabled" when steadhand_connect is not in effect, and "Disabled (N connections
+	 * remain)" when that agent still holds N Application Passwords. Otherwise
 	 * "No connections" when it holds no Application Password, and "Active" when it does.
 	 *
 	 * @param \WP_User $agent      The dedicated agent.
@@ -900,7 +901,7 @@ final class AgentsScreen {
 			// A disabled agent that still holds passwords: they do not reach Steadhand, but they were not revoked, so the count is shown.
 			return sprintf(
 				/* translators: %d: the number of Application Passwords a disabled agent still holds. */
-				_n( 'Disabled (%d connection not revoked)', 'Disabled (%d connections not revoked)', $connections, 'steadhand' ),
+				_n( 'Disabled (%d connection remains)', 'Disabled (%d connections remain)', $connections, 'steadhand' ),
 				$connections
 			);
 		}
