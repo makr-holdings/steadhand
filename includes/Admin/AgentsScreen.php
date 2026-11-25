@@ -357,18 +357,149 @@ final class AgentsScreen {
 	}
 
 	/**
-	 * The one-time panel: the username, the password, and the endpoint. It is printed only in the response to the POST that made it.
+	 * The one-time panel: the username, the password, and the endpoint, then the finished Claude Code command and the header value. It is
+	 * printed only in the response to the POST that made it. The Base64 value is built here, for this response only, and stored nowhere.
 	 *
 	 * @param array{username: string, password: string} $secret The new credentials.
 	 * @return void
 	 */
 	private function secret_panel( array $secret ): void {
+		$endpoint = self::endpoint();
+
 		echo '<div class="notice notice-success"><h2>' . esc_html__( 'New agent password', 'steadhand' ) . '</h2>';
 		printf( '<p>%s <code>%s</code></p>', esc_html__( 'Username:', 'steadhand' ), esc_html( $secret['username'] ) );
 		printf( '<p>%s <code>%s</code></p>', esc_html__( 'Application password:', 'steadhand' ), esc_html( $secret['password'] ) );
-		printf( '<p>%s <code>%s</code></p>', esc_html__( 'MCP endpoint:', 'steadhand' ), esc_html( rest_url( 'steadhand/mcp' ) ) );
+		printf( '<p>%s <code>%s</code></p>', esc_html__( 'MCP endpoint:', 'steadhand' ), esc_html( $endpoint ) );
 		printf( '<p><strong>%s</strong></p>', esc_html__( 'This password is shown once. Copy it now. It cannot be shown again.', 'steadhand' ) );
+
+		// The password without the spaces core uses when it displays one, so the header value is canonical. The value is the Base64 of
+		// username:password, which is the credential HTTP Basic sends. It is built only here, and not stored.
+		$password = preg_replace( '/\s+/', '', $secret['password'] ) ?? '';
+		$value    = base64_encode( $secret['username'] . ':' . $password ); // phpcs:ignore WordPress.PHP.DiscouragedPHPFunctions.obfuscation_base64_encode -- This is the HTTP Basic credential a client needs, built for this one response. It is not obfuscation, and it is not stored.
+
+		echo '<h3>' . esc_html__( 'Connect Claude Code', 'steadhand' ) . '</h3>';
+		if ( self::command_is_safe( $secret['username'], $endpoint ) ) {
+			printf( '<pre><code>%s</code></pre>', esc_html( self::command( $endpoint, $value ) ) );
+		} else {
+			printf( '<p>%s</p>', esc_html__( 'The command cannot be shown safely for this username or address, so only the endpoint and the header value are shown here.', 'steadhand' ) );
+		}
+
+		echo '<h3>' . esc_html__( 'Other MCP clients', 'steadhand' ) . '</h3>';
+		printf( '<p>%s <code>%s</code></p>', esc_html__( 'Send this header on every request:', 'steadhand' ), esc_html( 'Authorization: Basic ' . $value ) );
+
+		$this->password_warning();
+		printf( '<p><strong>%s</strong></p>', esc_html__( 'This command and this header are shown once, with the password. They cannot be shown again.', 'steadhand' ) );
 		echo '</div>';
+	}
+
+	/**
+	 * The MCP endpoint, as WordPress gives it. Every place that shows it calls this.
+	 *
+	 * @return string
+	 */
+	private static function endpoint(): string {
+		return rest_url( 'steadhand/mcp' );
+	}
+
+	/**
+	 * Whether a username and an endpoint can be printed in the finished command. A double quote, a backtick, a dollar sign, a backslash or
+	 * a control character could change the shell's quoting, so no command is printed for them. WordPress strips the first four from the
+	 * logins it creates, but a login can be written another way, so the check is made anyway.
+	 *
+	 * @param string $username The agent's login.
+	 * @param string $endpoint The MCP endpoint URL.
+	 * @return bool
+	 */
+	public static function command_is_safe( string $username, string $endpoint ): bool {
+		$unsafe = '/["`$\\\\\x00-\x1F\x7F]/';
+
+		return 0 === preg_match( $unsafe, $username ) && 0 === preg_match( $unsafe, $endpoint );
+	}
+
+	/**
+	 * The Claude Code command. The endpoint is wrapped in double quotes only when it has a character outside the plain set. The caller has
+	 * checked it with command_is_safe(), so it has no double quote, backtick, dollar sign or backslash.
+	 *
+	 * @param string $endpoint The MCP endpoint URL.
+	 * @param string $value    The Base64 value, or its placeholder.
+	 * @return string
+	 */
+	private static function command( string $endpoint, string $value ): string {
+		$target = 1 === preg_match( '/\A[A-Za-z0-9:\/._-]+\z/', $endpoint ) ? $endpoint : '"' . $endpoint . '"';
+
+		return 'claude mcp add --transport http steadhand ' . $target . ' --header "Authorization: Basic ' . $value . '"';
+	}
+
+	/**
+	 * The warning about the password in a command or a header. It is printed in the detail view and in the one-time panel.
+	 *
+	 * @return void
+	 */
+	private function password_warning(): void {
+		printf(
+			'<div class="notice notice-warning inline"><p>%s</p></div>',
+			esc_html__( 'The command and the header contain the agent\'s password in a form anyone can decode. Base64 is an encoding, not encryption. An MCP client stores it in its configuration file, and a command typed in a terminal is kept in the shell history. Keep both private. If the password may have been seen, revoke that connection here and add a new one.', 'steadhand' )
+		);
+	}
+
+	/**
+	 * The "Connect a client" section of the detail view: the facts a client needs, the Claude Code command with a placeholder for the
+	 * Base64 value, help for other clients, how to check the connection, and the warning. It never shows a password: none is available
+	 * here. The one-time panel shows the finished command and header.
+	 *
+	 * @param \WP_User $agent The dedicated agent.
+	 * @return void
+	 */
+	private function connect_section( \WP_User $agent ): void {
+		$endpoint = self::endpoint();
+
+		echo '<h3>' . esc_html__( 'Connect a client', 'steadhand' ) . '</h3>';
+
+		if ( ! Capabilities::user_has( $agent, Capabilities::CONNECT ) ) {
+			printf( '<p><strong>%s</strong></p>', esc_html__( 'This agent is disabled, so it cannot connect until it is enabled.', 'steadhand' ) );
+		}
+
+		echo '<table class="form-table" role="presentation"><tbody>';
+		printf( '<tr><th scope="row">%s</th><td><code>%s</code></td></tr>', esc_html__( 'MCP endpoint', 'steadhand' ), esc_html( $endpoint ) );
+		printf( '<tr><th scope="row">%s</th><td>%s</td></tr>', esc_html__( 'Transport', 'steadhand' ), esc_html__( 'Streamable HTTP', 'steadhand' ) );
+		printf(
+			'<tr><th scope="row">%s</th><td>%s</td></tr>',
+			esc_html__( 'Authentication', 'steadhand' ),
+			esc_html__( 'HTTP Basic: the agent\'s username and one of its Application Passwords', 'steadhand' )
+		);
+		printf( '<tr><th scope="row">%s</th><td><code>%s</code></td></tr>', esc_html__( 'Username', 'steadhand' ), esc_html( $agent->user_login ) );
+		echo '</tbody></table>';
+
+		printf( '<p>%s</p>', esc_html__( 'A connection\'s password is shown once, when the connection is added. If you no longer have it, add a new connection above and revoke the old one.', 'steadhand' ) );
+
+		echo '<h4>' . esc_html__( 'Claude Code', 'steadhand' ) . '</h4>';
+		if ( self::command_is_safe( $agent->user_login, $endpoint ) ) {
+			printf( '<pre><code>%s</code></pre>', esc_html( self::command( $endpoint, 'BASE64_OF_USERNAME_AND_PASSWORD' ) ) );
+			printf( '<p>%s</p>', esc_html__( 'The value is the Base64 encoding of username:application-password: the username, a colon, and the Application Password. The one-time panel shown when a connection is added gives the finished command.', 'steadhand' ) );
+		} else {
+			printf( '<p>%s</p>', esc_html__( 'The command cannot be shown safely for this username or address, so it is not printed here. Connect the client with the endpoint and the header described below.', 'steadhand' ) );
+		}
+
+		echo '<h4>' . esc_html__( 'Other MCP clients', 'steadhand' ) . '</h4><ul>';
+		printf( '<li>%s</li>', esc_html__( 'The endpoint URL above, with the Streamable HTTP transport.', 'steadhand' ) );
+		printf(
+			'<li>%s <code>%s</code> %s</li>',
+			esc_html__( 'The header', 'steadhand' ),
+			esc_html( 'Authorization: Basic' ),
+			esc_html__( 'followed by the Base64 value described above, sent on every request.', 'steadhand' )
+		);
+		echo '</ul>';
+		printf( '<p>%s</p>', esc_html__( 'Many clients take this as a configuration entry. Check your client\'s documentation for the exact form.', 'steadhand' ) );
+
+		echo '<h4>' . esc_html__( 'Check the connection', 'steadhand' ) . '</h4>';
+		printf(
+			'<p>%s <code>%s</code>. %s</p>',
+			esc_html__( 'Ask the client to call the tool', 'steadhand' ),
+			esc_html( 'steadhand-get-site-info' ),
+			esc_html__( 'It takes no arguments and returns the site\'s name and address and what this agent may do.', 'steadhand' )
+		);
+
+		$this->password_warning();
 	}
 
 	/**
@@ -654,6 +785,8 @@ final class AgentsScreen {
 			),
 			esc_html__( 'View this agent\'s change-log entries', 'steadhand' )
 		);
+
+		$this->connect_section( $agent );
 
 		if ( $can_edit ) {
 			$this->disable_or_delete_section( $agent );
