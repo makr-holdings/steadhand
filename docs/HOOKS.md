@@ -235,7 +235,7 @@ This action is public API. The [stability policy](#stability-policy) above appli
 
 Runs on the list view of the change-log screen (under Steadhand in the admin menu, SPEC section 7), after the filter form. Use it to add controls to the toolbar above the list.
 
-- **Since:** unreleased (see [CHANGELOG.md](../CHANGELOG.md)).
+- **Since:** 0.3.0.
 - **Type:** action.
 - **Parameter:** `$filters` (`array<string, string>`), the validated filters the form shows. The keys are `agent` (a user ID), `ability`, `result`, `from` and `to` (dates as `Y-m-d`, in the site's timezone), `paged` and `entry`. A filter that is not set, or is not valid, is `''`.
 - **When it runs:** once for each render of the list view, after the capability check has passed. It runs even when a filter is not valid, in which case the list shows no rows. It does not run on the single-entry view, and not for a viewer who is refused.
@@ -264,7 +264,7 @@ This action is public API. The [stability policy](#stability-policy) above appli
 
 Runs on the single-entry view of the change-log screen, after the entry's stored fields and its input, and before its diff.
 
-- **Since:** unreleased (see [CHANGELOG.md](../CHANGELOG.md)).
+- **Since:** 0.3.0.
 - **Type:** action.
 - **Parameter:** `$entry` (`array<string, mixed>`), the entry as `Steadhand\Log\DbLogger::find_any()` returns it: every column of the change log, with the types that `steadhand_log_entry_stored` gives them. Unlike the list, it includes `input`, which is the stored JSON text.
 - **When it runs:** once for each render of an entry that exists, after the capability check has passed. It does not run for an entry that does not exist, nor for a viewer who is refused.
@@ -281,12 +281,13 @@ This action is public API. The [stability policy](#stability-policy) above appli
 
 Runs after the Agents screen (SPEC section 4.1) creates an agent and its first Application Password.
 
-- **Since:** unreleased (see [CHANGELOG.md](../CHANGELOG.md)).
+- **Since:** 0.3.0.
 - **Type:** action.
-- **Parameters:** `$user_id` (`int`), the new agent's user ID; `$label` (`string`), the label of its first Application Password, which is the agent label in the change log.
-- **When it runs:** once for each create that has saved the agent's first Application Password, after the password is made and before the final check. The final check then runs on the user as it is now (it must hold only the agent role, under the posted login). **The action can fire for an agent that the final check then refuses.** In that case the agent is rolled back (its password is revoked, and the user is deleted or, when content is attributed to it, kept with no role and no password), and the screen shows no password and reports the refusal. A listener therefore cannot assume that a call of this action means the agent exists: a listener that records "created" must allow for the refusal that may follow. The screen shows a password only when the final check passes, so a call of this action without a password on the screen is possible. It does not run when the create is refused earlier.
+- **Parameters:** `$user_id` (`int`), the new agent's user ID; `$label` (`string`), the connection name of its first Application Password (the label), which is the agent label in the change log.
+- **When it runs:** once for each create that has saved the agent's first Application Password, after the password is made and before the final check. The capabilities chosen on the form are already stored when this action fires: each offered capability was written as true or false, and read back, before the password was made. The final check runs after the action, on the user as it is now. It compares the stored capabilities with the chosen ones, and it must hold the agent role and those capabilities, and nothing else, under the posted login. **The action can fire for an agent that the final check then refuses.** In that case the agent is rolled back (its password is revoked, and the user is deleted or, when content is attributed to it, kept with no role and no password), and the screen shows no password and reports the refusal. A listener therefore cannot assume that a call of this action means the agent exists: a listener that records "created" must allow for the refusal that may follow. The screen shows a password only when the final check passes, so a call of this action without a password on the screen is possible. It does not run when the create is refused earlier.
 - **Who gets it:** any code on the site. The action is reached only from the Agents screen, by an administrator who holds no agent role.
 - **The password is not passed.** Listeners get the user ID and the label, and nothing else of the secret.
+- **The role is not checked.** The final check reads the user's stored capabilities, not what the `steadhand_agent` role grants. A Steadhand capability added to the role does not reach an agent created on the screen with chosen capabilities, because that agent stores an explicit false for each one. It does reach an agent that stores no user-level value: one made by `bin/create-agent.sh`, or by a create request without the capability marker. Any other (non-Steadhand) capability added to the role reaches every agent.
 - **If a listener throws:** the exception is caught and ignored, and the final check still runs. The agent exists until that check refuses it.
 - **What it does not do:** it cannot change the result or stop the creation, except by changing the user, which the final check then sees. It has no return value.
 
@@ -307,10 +308,10 @@ This action is public API. The [stability policy](#stability-policy) above appli
 
 Runs after the Agents screen saves an agent's capabilities.
 
-- **Since:** unreleased (see [CHANGELOG.md](../CHANGELOG.md)).
+- **Since:** 0.3.0.
 - **Type:** action.
 - **Parameters:** `$user_id` (`int`), the agent; `$capabilities` (`array<string, bool>`), each offered capability with the value it was saved with. The offered capabilities are the ones the Agents screen shows (`steadhand_connect` and every capability a registered ability uses). Capabilities that are not offered are not in the array and are not changed.
-- **When it runs:** after every offered capability is saved and read back as saved. It does not run when the save is refused or does not read back.
+- **When it runs:** after every offered capability is saved and read back as saved. It does not run when the save is refused or does not read back. It does not run when an agent is created with chosen capabilities.
 - **If a listener throws:** the exception is caught and ignored. The capabilities stay saved.
 - **What it does not do:** it cannot change the values. It has no return value.
 
@@ -318,15 +319,16 @@ This action is public API. The [stability policy](#stability-policy) above appli
 
 ### `steadhand_admin_agent_row`
 
-Runs on the Agents screen, after the block of one dedicated agent (a user whose only role is `steadhand_agent`).
+Runs on the Agents screen's detail view of one dedicated agent (a user whose only role is `steadhand_agent`), after that agent's sections: its capabilities, its connections and the link to its change-log entries.
 
-- **Since:** unreleased (see [CHANGELOG.md](../CHANGELOG.md)).
+- **Since:** 0.3.0.
+- **Changed:** unreleased (after 0.3.0). In 0.3.0 it ran once for each dedicated agent in the list. It now runs once, in the detail view of one agent. The name and the parameter are unchanged.
 - **Type:** action.
 - **Parameter:** `$agent` (`WP_User`), the dedicated agent.
-- **When it runs:** once for each dedicated agent listed, on each render of the screen, after the capability check has passed. It does not run for a user who holds the agent role and another role, who is shown with a warning instead, nor for a viewer who is refused.
+- **When it runs:** once for each render of the detail view of a dedicated agent (`agent=<id>`), after the capability check has passed. That includes the response to a create or an add-password that shows the agent's detail. It does not run in the list view or the add view, for a user who holds the agent role and another role, for an ID that is not a dedicated agent, or for a viewer who is refused.
 - **Who gets it:** the same viewers as the screen: an administrator who holds no agent role.
 - **If a listener throws:** the exception is caught and ignored, so the screen still renders.
-- **Trust and output:** listeners are trusted code, and they run inside an administrator's request. Whatever a listener prints appears inside the agent's block, so the listener must escape its own output.
+- **Trust and output:** listeners are trusted code, and they run inside an administrator's request. Whatever a listener prints appears inside the agent's detail, after its sections, so the listener must escape its own output.
 - **What it does not do:** it cannot change the agent or the screen. It has no return value.
 
 This action is public API. The [stability policy](#stability-policy) above applies. Any new parameter will go at the end.

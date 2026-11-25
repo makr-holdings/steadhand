@@ -6,6 +6,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). The
 
 ## [Unreleased]
 
+### Changed
+- The Agents screen has three views (SPEC section 4.1): the list of agents, which has no forms; one agent's detail (`agent=<id>`), with its capabilities, its connections and the link to its change-log entries; and the add form (`view=new`). A detail request for an ID that is not a dedicated agent shows the "not a dedicated agent" notice and the list, and nothing about that user.
+- Creating an agent sets its capabilities. The form has one checkbox for each offered capability, checked as the role's defaults say. Only offered capabilities are read from the form, and any other name is ignored. Each offered capability is written to the user as true or false before the Application Password is made, and read back. Every other Steadhand capability is written as false, so a grant something else gave the agent role never reaches a new agent. A refused create redraws the form with the choices as posted, not with the defaults. The final check compares the user's stored capabilities with the chosen ones, and a difference is refused and rolled back, with no password shown. A form without the capability marker keeps the role's defaults. Creating an agent does not fire `steadhand_agent_capabilities_changed`.
+- On the Agents screen, the name of an Application Password is called the "connection name", where it was "label". The agent label in the change log is unchanged.
+- Revoking a password, revoking all of them and saving an agent's capabilities return to that agent's detail view, not to the list.
+- **Behaviour change to a public action:** `steadhand_admin_agent_row` (released in 0.3.0) now runs once, in the detail view of the agent shown, after its sections. In 0.3.0 it ran once for each dedicated agent in the list. It does not run in the list view or the add view. Its name and its parameter (`$agent`) are unchanged, but a listener that printed one block per listed agent now prints once, in the detail view (`docs/HOOKS.md`).
+
 ## [0.3.0] - 2026-11-24
 
 ### Added
