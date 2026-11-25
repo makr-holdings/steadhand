@@ -127,9 +127,9 @@ final class DevUpdaterTest extends TestCase {
 		);
 
 		$this->http_routes = array(
-			self::API_PATH_PREFIX . 'releases/latest' => array( 200, $release ),
-			self::API_PATH_PREFIX . 'releases'        => array( 200, array( $release ) ),
-			self::API_PATH_PREFIX . 'tags'            => array(
+			self::API_PATH_PREFIX . 'releases/latest'     => array( 200, $release ),
+			self::API_PATH_PREFIX . 'releases'            => array( 200, array( $release ) ),
+			self::API_PATH_PREFIX . 'tags'                => array(
 				200,
 				array(
 					array(
@@ -139,14 +139,14 @@ final class DevUpdaterTest extends TestCase {
 					),
 				),
 			),
-			self::API_PATH_PREFIX . 'branches/master' => array(
+			self::API_PATH_PREFIX . 'branches/master'     => array(
 				200,
 				array(
 					'name'   => 'master',
 					'commit' => $commit,
 				),
 			),
-			self::API_PATH_PREFIX . 'commits'         => array( 200, array( $commit ) ),
+			self::API_PATH_PREFIX . 'commits'             => array( 200, array( $commit ) ),
 			self::API_PATH_PREFIX . 'contents/steadhand.php' => array( 404, array( 'message' => 'Not Found' ) ),
 			self::API_PATH_PREFIX . 'contents/CHANGELOG.md' => array( 404, array( 'message' => 'Not Found' ) ),
 			self::API_PATH_PREFIX . 'contents/readme.txt' => array( 404, array( 'message' => 'Not Found' ) ),
