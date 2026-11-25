@@ -17,9 +17,10 @@ use Steadhand\Roles;
 defined( 'ABSPATH' ) || exit;
 
 /**
- * Runs the five actions of the Agents screen. Every action checks, in this order: the nonce, that the site is not a multisite network,
+ * Runs the eight actions of the Agents screen. Every action checks, in this order: the nonce, that the site is not a multisite network,
  * manage_options, that the caller holds no agent role, list_users, and the native WordPress capability for the act (create_users, or
- * edit_user for the target). A target must then be a dedicated agent (Agents::is_agent()). Nothing is changed before every check passes.
+ * edit_user for the target, and delete_user too for a delete). A target must then be a dedicated agent (Agents::is_agent()). Nothing is
+ * changed before every check passes.
  * An authorisation failure ends the request with wp_die(); a validation failure or a refusal returns a result whose code names it.
  *
  * The result is an array: 'code' (one of CODES), 'ok' (true for the success codes), 'user_id', 'secret' (for create and add-password
@@ -40,6 +41,9 @@ final class AgentsHandler {
 	public const ACTION_REVOKE       = 'revoke_password';
 	public const ACTION_REVOKE_ALL   = 'revoke_all';
 	public const ACTION_CAPABILITIES = 'set_capabilities';
+	public const ACTION_DISABLE      = 'disable';
+	public const ACTION_ENABLE       = 'enable';
+	public const ACTION_DELETE       = 'delete';
 
 	/** The most Application Passwords one agent may hold. */
 	public const MAX_PASSWORDS = 10;
@@ -54,7 +58,17 @@ final class AgentsHandler {
 	public const UUID_PATTERN = '/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\z/';
 
 	/** Result codes of a successful action. */
-	public const SUCCESS_CODES = array( 'created', 'password_added', 'password_revoked', 'passwords_revoked', 'capabilities_saved' );
+	public const SUCCESS_CODES = array(
+		'created',
+		'password_added',
+		'password_revoked',
+		'passwords_revoked',
+		'capabilities_saved',
+		'agent_disabled',
+		'agent_enabled',
+		'agent_enabled_with_connections',
+		'agent_deleted',
+	);
 
 	/**
 	 * Every result code the screen can show. Each code is printed as one fixed, translated notice, never as the request's own text.
@@ -84,12 +98,24 @@ final class AgentsHandler {
 		'capabilities_failed',
 		'role_missing',
 		'multisite',
+		'agent_disabled',
+		'agent_enabled',
+		'agent_deleted',
+		'disable_failed',
+		'enable_failed',
+		'delete_not_confirmed',
+		'delete_has_content',
+		'delete_failed',
+		'delete_has_content_revoked',
+		'not_agent_revoked',
+		'agent_disabled_no_password',
+		'agent_enabled_with_connections',
 	);
 
 	/**
-	 * The codes a redirect can carry: the results of revoke, revoke-all and set-capabilities. The screen reads only these from the
-	 * ?agents= query string. The codes of the one-time panel (created, password_added and the refusals of those two actions) come only
-	 * from the response to their own POST, so a URL cannot show them.
+	 * The codes a redirect can carry: the results of revoke, revoke-all, set-capabilities, disable, enable and delete. The screen reads
+	 * only these from the ?agents= query string. The codes of the one-time panel (created, password_added and the refusals of those two
+	 * actions) come only from the response to their own POST, so a URL cannot show them.
 	 */
 	public const REDIRECT_CODES = array(
 		'password_revoked',
@@ -102,6 +128,17 @@ final class AgentsHandler {
 		'capabilities_unverified',
 		'capabilities_failed',
 		'multisite',
+		'agent_disabled',
+		'agent_enabled',
+		'agent_deleted',
+		'disable_failed',
+		'enable_failed',
+		'delete_not_confirmed',
+		'delete_has_content',
+		'delete_failed',
+		'delete_has_content_revoked',
+		'not_agent_revoked',
+		'agent_enabled_with_connections',
 	);
 
 	/** How a rollback ended: the user was deleted. */
@@ -359,6 +396,11 @@ final class AgentsHandler {
 			return $this->result( 'not_agent' );
 		}
 
+		// Refused before anything is created: a password made for a disabled agent would be a connection that the status does not show.
+		if ( ! Capabilities::user_has( $user, Capabilities::CONNECT ) ) {
+			return $this->result( 'agent_disabled_no_password', $user_id );
+		}
+
 		if ( ! wp_is_application_passwords_available_for_user( $user ) ) {
 			return $this->result( 'app_passwords_unavailable' );
 		}
@@ -556,6 +598,206 @@ final class AgentsHandler {
 	}
 
 	/**
+	 * Disables a dedicated agent. The steps are: store steadhand_connect as false, revoke every Application Password, then read the user
+	 * and its passwords again. The agent is disabled only when both read back as they should; otherwise the result says the agent may
+	 * still be able to connect. Its other Steadhand capabilities, its user account, its content and its change-log entries are left as
+	 * they are. The steadhand_agent_disabled action fires only after the check passes, and a listener that throws does not change the result.
+	 *
+	 * @param string $nonce   The nonce from the form.
+	 * @param int    $user_id The agent.
+	 * @return array{code: string, ok: bool, user_id: int, secret: null}
+	 */
+	public function disable( string $nonce, int $user_id ): array {
+		$refused = $this->guard( $nonce, self::nonce_action( self::ACTION_DISABLE, $user_id ), 'edit_user', $user_id );
+		if ( null !== $refused ) {
+			return $refused;
+		}
+
+		if ( null === $this->agent( $user_id ) ) {
+			return $this->result( 'not_agent' );
+		}
+
+		// Both steps are attempted even if one fails: each one only removes access, and the check below decides the result.
+		self::quietly( fn(): bool => $this->set_connect( $user_id, false ) );
+		self::quietly( fn(): bool => $this->revoke_every_password( $user_id ) );
+
+		$fresh = $this->fresh_user( $user_id );
+		if ( null === $fresh || ! self::connect_is( $fresh, false ) || array() !== \WP_Application_Passwords::get_user_application_passwords( $user_id ) ) {
+			return $this->result( 'disable_failed', $user_id );
+		}
+
+		try {
+			/**
+			 * Fires after a dedicated agent was disabled: its steadhand_connect is stored as false and it holds no Application Password.
+			 *
+			 * @param \WP_User $agent The agent.
+			 */
+			do_action( 'steadhand_agent_disabled', $fresh );
+		} catch ( \Throwable ) { // phpcs:ignore Generic.CodeAnalysis.EmptyStatement.DetectedCatch -- The comment below says why the catch is empty.
+			// A listener must not break the action. The agent is disabled either way.
+		}
+
+		return $this->result( 'agent_disabled', $user_id );
+	}
+
+	/**
+	 * Enables a dedicated agent: stores steadhand_connect as true, then reads it back. It creates no Application Password, so the agent
+	 * still has no connection afterwards when it had none, and the administrator must add one. The result is agent_enabled then, and
+	 * agent_enabled_with_connections when it still holds connections (which work again). The steadhand_agent_enabled action fires only after the
+	 * read-back passes, and a listener that throws does not change the result.
+	 *
+	 * @param string $nonce   The nonce from the form.
+	 * @param int    $user_id The agent.
+	 * @return array{code: string, ok: bool, user_id: int, secret: null}
+	 */
+	public function enable( string $nonce, int $user_id ): array {
+		$refused = $this->guard( $nonce, self::nonce_action( self::ACTION_ENABLE, $user_id ), 'edit_user', $user_id );
+		if ( null !== $refused ) {
+			return $refused;
+		}
+
+		if ( null === $this->agent( $user_id ) ) {
+			return $this->result( 'not_agent' );
+		}
+
+		self::quietly( fn(): bool => $this->set_connect( $user_id, true ) );
+
+		$fresh = $this->fresh_user( $user_id );
+		if ( null === $fresh || ! self::connect_is( $fresh, true ) ) {
+			return $this->result( 'enable_failed', $user_id );
+		}
+
+		// The notice depends on whether the agent still holds connections: they work again, and an agent with none must be given one.
+		$code = array() === \WP_Application_Passwords::get_user_application_passwords( $user_id ) ? 'agent_enabled' : 'agent_enabled_with_connections';
+
+		try {
+			/**
+			 * Fires after a dedicated agent was enabled: its steadhand_connect is stored as true. The agent may still hold no Application Password.
+			 *
+			 * @param \WP_User $agent The agent.
+			 */
+			do_action( 'steadhand_agent_enabled', $fresh );
+		} catch ( \Throwable ) { // phpcs:ignore Generic.CodeAnalysis.EmptyStatement.DetectedCatch -- The comment below says why the catch is empty.
+			// A listener must not break the action. The agent is enabled either way.
+		}
+
+		return $this->result( $code, $user_id );
+	}
+
+	/**
+	 * Deletes a dedicated agent's user account. The request must be confirmed, and needs delete_user for the agent as well as edit_user.
+	 * The agent must hold no posts and no links: a refusal for that changes nothing, and the result says to disable the agent instead.
+	 * Otherwise every Application Password is revoked. Then the user is read again: it must still be a dedicated agent, and it must still
+	 * hold no posts and no links, or the result is delete_has_content_revoked (the passwords stay revoked and nothing else changes). Only
+	 * then is the user deleted, with no reassign target. Core's delete would remove what is attributed to the user, so delete_user()
+	 * guards it: no post is deleted with the user, and a link or a role that appears at the last moment stops the delete. The user must be
+	 * gone when read again, even when a listener throws after the row is removed. The steadhand_agent_deleted action fires only after
+	 * that, with the user ID and the login.
+	 *
+	 * @param string $nonce     The nonce from the form.
+	 * @param int    $user_id   The agent.
+	 * @param bool   $confirmed Whether the confirmation box was ticked.
+	 * @return array{code: string, ok: bool, user_id: int, secret: null}
+	 */
+	public function delete( string $nonce, int $user_id, bool $confirmed ): array {
+		$refused = $this->guard( $nonce, self::nonce_action( self::ACTION_DELETE, $user_id ), 'edit_user', $user_id, 'delete_user' );
+		if ( null !== $refused ) {
+			return $refused;
+		}
+
+		$agent = $this->agent( $user_id );
+		if ( null === $agent ) {
+			return $this->result( 'not_agent' );
+		}
+
+		if ( ! $confirmed ) {
+			return $this->result( 'delete_not_confirmed', $user_id );
+		}
+
+		// The first check comes before any change, so a refusal for content changes nothing.
+		if ( self::quietly( fn(): bool => $this->holds_attributed_content( $user_id ), true ) ) {
+			return $this->result( 'delete_has_content', $user_id );
+		}
+
+		$login = $agent->user_login;
+
+		if ( ! self::quietly( fn(): bool => $this->revoke_every_password( $user_id ) ) ) {
+			return $this->result( 'revoke_failed', $user_id );
+		}
+
+		// Revoking ran listeners, which may have changed the user or attributed content to it. Immediately before the delete the user must
+		// still be a dedicated agent and must hold no content. A refusal here changes nothing more: the passwords are already revoked.
+		$current = $this->fresh_user( $user_id );
+		if ( null === $current || ! Agents::is_agent( $current ) ) {
+			return $this->result( 'not_agent_revoked', $user_id );
+		}
+
+		if ( self::quietly( fn(): bool => $this->holds_attributed_content( $user_id ), true ) ) {
+			return $this->result( 'delete_has_content_revoked', $user_id );
+		}
+
+		// The delete itself is guarded (see delete_user()): core deletes no post with the user, and a content or role change made at the
+		// last moment stops the delete before anything is removed.
+		$outcome = $this->delete_user( $user_id, true );
+		if ( 'content' === $outcome ) {
+			return $this->result( 'delete_has_content_revoked', $user_id );
+		}
+
+		if ( 'not_agent' === $outcome ) {
+			return $this->result( 'not_agent_revoked', $user_id );
+		}
+
+		if ( 'deleted' !== $outcome ) {
+			return $this->result( 'delete_failed', $user_id );
+		}
+
+		try {
+			/**
+			 * Fires after a dedicated agent's user account was deleted. The user no longer exists, so only its ID and login are passed.
+			 *
+			 * @param int    $user_id    The ID of the deleted user.
+			 * @param string $user_login The login the user had.
+			 */
+			do_action( 'steadhand_agent_deleted', $user_id, $login );
+		} catch ( \Throwable ) { // phpcs:ignore Generic.CodeAnalysis.EmptyStatement.DetectedCatch -- The comment below says why the catch is empty.
+			// A listener must not break the action. The user is deleted either way.
+		}
+
+		return $this->result( 'agent_deleted' );
+	}
+
+	/**
+	 * Stores steadhand_connect on a dedicated agent, as an explicit true or false. The user is read again first and must still be a
+	 * dedicated agent. The write is not read back here; the caller checks it.
+	 *
+	 * @param int  $user_id The agent.
+	 * @param bool $grant   The value to store.
+	 * @return bool False when the user is not a dedicated agent or the write throws.
+	 */
+	private function set_connect( int $user_id, bool $grant ): bool {
+		$user = $this->fresh_user( $user_id );
+		if ( null === $user || ! Agents::is_agent( $user ) ) {
+			return false;
+		}
+
+		$user->add_cap( Capabilities::CONNECT, $grant );
+
+		return true;
+	}
+
+	/**
+	 * Whether a user stores steadhand_connect as exactly the given value. A missing stored value is neither true nor false here, so it
+	 * does not match either.
+	 *
+	 * @param \WP_User $user  The user, read fresh.
+	 * @param bool     $grant The value expected.
+	 * @return bool
+	 */
+	private static function connect_is( \WP_User $user, bool $grant ): bool {
+		return ( $user->caps[ Capabilities::CONNECT ] ?? null ) === $grant;
+	}
+
+	/**
 	 * Whether a label may name an Application Password. It is 1 to 60 characters (code points, by mb_strlen()) on one line, and it
 	 * must be valid UTF-8 with no control, format or line- or paragraph-separator characters (\p{Cc}, \p{Cf}, \p{Zl}, \p{Zp}), so no
 	 * right-to-left override, zero-width character or NUL. It may not start or end with a separator or space character (\p{Z}, which
@@ -595,10 +837,11 @@ final class AgentsHandler {
 	 * @param string $nonce_action The nonce action the form was made with.
 	 * @param string $capability   The native WordPress capability for the act.
 	 * @param int    $object_id    The target user for edit_user, or 0 for a check without an object.
+	 * @param string $second       A second native capability that must also pass for the same object, or '' for none (delete_user for a delete).
 	 * @return array{code: string, ok: bool, user_id: int, secret: null}|null Null when every check passes. A multisite install returns the
 	 *                                                                         'multisite' result. Any other failure ends the request with wp_die().
 	 */
-	private function guard( string $nonce, string $nonce_action, string $capability, int $object_id = 0 ): ?array {
+	private function guard( string $nonce, string $nonce_action, string $capability, int $object_id = 0, string $second = '' ): ?array {
 		if ( ! wp_verify_nonce( $nonce, $nonce_action ) ) {
 			wp_die( esc_html__( 'Your request could not be verified. Reload the page and try again.', 'steadhand' ), esc_html__( 'Not allowed', 'steadhand' ), array( 'response' => 403 ) );
 		}
@@ -612,6 +855,10 @@ final class AgentsHandler {
 		}
 
 		$allowed = 0 === $object_id ? current_user_can( $capability ) : current_user_can( $capability, $object_id );
+		if ( $allowed && '' !== $second ) {
+			$allowed = current_user_can( $second, $object_id );
+		}
+
 		if ( ! $allowed ) {
 			wp_die( esc_html__( 'You are not allowed to do this.', 'steadhand' ), esc_html__( 'Forbidden', 'steadhand' ), array( 'response' => 403 ) );
 		}
@@ -802,12 +1049,13 @@ final class AgentsHandler {
 	}
 
 	/**
-	 * Whether any post or link is attributed to the user. A count that cannot be read counts as attributed, so the user is kept.
+	 * Whether any post or link is attributed to the user. A count that cannot be read counts as attributed, so the user is kept. Public so
+	 * the screen can show the delete refusal without a form.
 	 *
 	 * @param int $user_id The user ID.
 	 * @return bool
 	 */
-	private function holds_attributed_content( int $user_id ): bool {
+	public function holds_attributed_content( int $user_id ): bool {
 		global $wpdb;
 
 		$posts = $wpdb->get_var( $wpdb->prepare( "SELECT COUNT(*) FROM {$wpdb->posts} WHERE post_author = %d", $user_id ) ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- Counts the rows attributed to one user; the table name is core's.
@@ -839,7 +1087,7 @@ final class AgentsHandler {
 		$revoked = self::quietly( fn(): bool => $this->revoke_every_password( $user_id ) );
 		$content = self::quietly( fn(): bool => $this->holds_attributed_content( $user_id ), true );
 
-		if ( ! $content && self::quietly( fn(): bool => $this->delete_user( $user_id ) ) ) {
+		if ( ! $content && 'deleted' === $this->delete_user( $user_id, false ) ) {
 			return self::ROLLED_BACK;
 		}
 
@@ -896,19 +1144,67 @@ final class AgentsHandler {
 	}
 
 	/**
-	 * Deletes a user this request made, and checks that it is gone. A throw counts as a failure.
+	 * Deletes a user with core's wp_delete_user(), with no reassign target, and reports what happened. Core deletes the posts attributed to
+	 * the user through a list of post types, and the links through a loop with no filter. So the call is guarded for its own duration only:
 	 *
-	 * @param int $user_id The user ID.
-	 * @return bool
+	 * - Posts: the post_types_to_delete_with_user filter returns no post type, so core deletes no post with the user.
+	 * - Links, and the content and role checks: core fires delete_user before it deletes anything. A listener at the last priority, for this
+	 *   user only, counts the posts and links attributed to it again, and when $agent_only it reads the user again. It throws when content is
+	 *   attributed or the user is no longer a dedicated agent, which ends the delete before anything is removed.
+	 *
+	 * Both are removed in a finally. A throw from anywhere in the call does not decide the result: the user is read again, and it counts as
+	 * deleted when it is gone (a listener of deleted_user can throw after the row is removed).
+	 *
+	 * @param int  $user_id    The user ID.
+	 * @param bool $agent_only Whether the user must still be a dedicated agent when core is about to delete it (the delete action), or only hold
+	 *                         no content (the create rollback, which deletes a user this request made).
+	 * @return string 'deleted' when the user is gone. 'content' or 'not_agent' when the listener stopped the delete for that reason. 'failed' otherwise.
 	 */
-	private function delete_user( int $user_id ): bool {
+	private function delete_user( int $user_id, bool $agent_only ): string {
 		if ( ! function_exists( 'wp_delete_user' ) ) {
 			require_once ABSPATH . 'wp-admin/includes/user.php';
 		}
 
-		$deleted = wp_delete_user( $user_id );
+		// The reason the listener stopped the delete: 'content' or 'not_agent'. Empty when no listener stopped it.
+		$stopped_by = '';
 
-		return true === $deleted && null === $this->fresh_user( $user_id );
+		$no_posts = static fn(): array => array();
+		$guard    = function ( $id ) use ( $user_id, $agent_only, &$stopped_by ): void {
+			if ( (int) $id !== $user_id ) {
+				return;
+			}
+
+			if ( $this->holds_attributed_content( $user_id ) ) {
+				$stopped_by = 'content';
+				throw new \RuntimeException( 'Steadhand: content is attributed to the user.' );
+			}
+
+			if ( $agent_only ) {
+				$user = $this->fresh_user( $user_id );
+				if ( null === $user || ! Agents::is_agent( $user ) ) {
+					$stopped_by = 'not_agent';
+					throw new \RuntimeException( 'Steadhand: the user is not a dedicated agent.' );
+				}
+			}
+		};
+
+		add_filter( 'post_types_to_delete_with_user', $no_posts, PHP_INT_MAX, 2 );
+		add_action( 'delete_user', $guard, PHP_INT_MAX, 3 );
+
+		try {
+			wp_delete_user( $user_id );
+		} catch ( \Throwable ) { // phpcs:ignore Generic.CodeAnalysis.EmptyStatement.DetectedCatch -- The check below decides, not the throw.
+			// A listener threw. Whether the user is gone is read below.
+		} finally {
+			remove_action( 'delete_user', $guard, PHP_INT_MAX );
+			remove_filter( 'post_types_to_delete_with_user', $no_posts, PHP_INT_MAX );
+		}
+
+		if ( null === $this->fresh_user( $user_id ) ) {
+			return 'deleted';
+		}
+
+		return '' === $stopped_by ? 'failed' : $stopped_by;
 	}
 
 	/**

@@ -6,6 +6,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). The
 
 ## [Unreleased]
 
+### Added
+- The Agents screen can disable, enable and delete an agent (SPEC section 4.1). **Disable** stores the agent's `steadhand_connect` as false and revokes every Application Password, then checks both. **Enable** turns `steadhand_connect` back on and creates no password. **Delete** needs a confirmation box and the `delete_user` capability. It is refused, with nothing changed, when posts, revisions or links are attributed to the agent. Content that appears during the delete stops it before anything is removed: the user stays, and its connections stay revoked (`delete_has_content_revoked`). A successful delete removes only the user account, and its change-log entries are kept. The list gains a Status column (Disabled, Disabled (N connections not revoked), No connections or Active). Three new actions for extensions, documented in `docs/HOOKS.md`: `steadhand_agent_disabled`, `steadhand_agent_enabled` and `steadhand_agent_deleted`.
+
+### Changed
+- Adding a connection to a disabled agent is now refused (`agent_disabled_no_password`), before any password is made. Unticking Connect in the capabilities form still does not revoke the agent's connections; the status shows how many remain, and Disable revokes them.
+
 ## [0.3.1] - 2026-11-25
 
 ### Changed
