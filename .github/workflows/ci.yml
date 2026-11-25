@@ -12,7 +12,8 @@ name: CI
 # Docs-only pull requests: the workflow always starts, so that the "CI result" check always reports
 # and can be a required check. The "changes" job looks at the files the pull request changes. If every
 # one is under docs/, or is README.md or CLAUDE.md, the phpcs, test, build and plugin-check jobs are
-# skipped and "CI result" passes. Any other file, or any doubt, runs everything.
+# skipped and "CI result" passes. Any other file, any doubt, or a base branch other than main runs
+# everything.
 # CHANGELOG.md, SECURITY.md and readme.txt are not docs here, because they ship in the release zips and
 # the build job or Plugin Check checks them.
 # Pushes to main always run everything.
@@ -50,8 +51,11 @@ jobs:
           # Two commits: on a pull request HEAD is the merge commit, and HEAD^1 is the base branch.
           fetch-depth: 2
 
-      # Sets code=false only when this is a pull request, the diff could be read, it lists at least
-      # one file, and every file is documentation. Everything else, including any git error, leaves
+      # Sets code=false only when this is a pull request into main, the diff could be read, it lists
+      # at least one file, and every file is documentation. The base must be main because a check is
+      # recorded against the head commit: a pull request that is docs-only against another branch
+      # could later be re-pointed at main, bringing that branch's code with it, and GitHub does not
+      # re-run the checks when the base changes. Everything else, including any git error, leaves
       # code=true, so a failure here can only cause more checks to run, never fewer.
       # File names come from the pull request and are untrusted: they are read NUL-separated, only
       # compared against fixed patterns, and never printed, expanded or executed.
@@ -59,10 +63,11 @@ jobs:
         id: detect
         env:
           EVENT_NAME: ${{ github.event_name }}
+          BASE_REF: ${{ github.base_ref }}
         run: |
           set -u
           code=true
-          if [ "$EVENT_NAME" = 'pull_request' ] && git -C steadhand rev-parse -q --verify 'HEAD^2' >/dev/null 2>&1; then
+          if [ "$EVENT_NAME" = 'pull_request' ] && [ "$BASE_REF" = 'main' ] && git -C steadhand rev-parse -q --verify 'HEAD^2' >/dev/null 2>&1; then
             total=0
             other=0
             while IFS= read -r -d '' file; do
@@ -321,6 +326,8 @@ jobs:
   #   - code checks were needed, and phpcs, test, build and plugin-check all succeeded;
   #   - the change is docs-only, and all four were skipped.
   # Anything else fails: a failed, cancelled or unexpectedly skipped job, or a failed "changes" job.
+  # Keep "if: always()". With "!cancelled()" this job would be skipped on a cancelled run, and GitHub
+  # counts a skipped required check as passed.
   result:
     name: CI result
     if: always()
