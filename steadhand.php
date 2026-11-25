@@ -11,7 +11,7 @@
  * Plugin Name:       Steadhand – Secure AI Agent Access for WordPress
  * Plugin URI:        https://github.com/makr-holdings/steadhand
  * Description:       Lets AI agents work on your site safely over MCP: least-privilege agent users, guardrails against site-breaking writes, and an audit trail with undo.
- * Version:           0.3.2
+ * Version:           0.4.0
  * Requires at least: 6.9
  * Requires PHP:      8.1
  * Requires Plugins:  mcp-adapter
@@ -35,7 +35,7 @@ declare( strict_types=1 );
 
 defined( 'ABSPATH' ) || exit;
 
-define( 'STEADHAND_VERSION', '0.3.2' );
+define( 'STEADHAND_VERSION', '0.4.0' );
 define( 'STEADHAND_FILE', __FILE__ );
 define( 'STEADHAND_DIR', plugin_dir_path( __FILE__ ) );
 
