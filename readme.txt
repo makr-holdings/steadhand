@@ -12,6 +12,8 @@ Lets AI agents work on your WordPress site over MCP, with least-privilege agent 
 
 == Description ==
 
+**Steadhand is pre-release.** It has been tested only on its maintainers' own sites and has had no outside security review. Do not rely on it on a production site yet.
+
 Steadhand is an MCP server that lets an AI agent work on your WordPress site without an administrator's account. Every write is checked before it runs and recorded in a change log, and changes to post text, terms and featured images can be undone.
 
 = Least-privilege agent users =
