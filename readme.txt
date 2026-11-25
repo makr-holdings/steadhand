@@ -16,21 +16,21 @@ Steadhand is an MCP server that lets an AI agent work on your WordPress site wit
 
 = Least-privilege agent users =
 
-Each agent is a user whose only role is the agent role. An administrator turns on only the capabilities the agent needs. An agent can have up to 10 connections (Application Passwords). Each is named in the change log and revocable alone. An agent cannot sign in with a password, and its credentials work only at the Steadhand endpoint.
+Each agent is a user whose only role is the agent role. An administrator turns on only the capabilities the agent needs. The Agents screen gives each agent up to 10 connections (Application Passwords). Each is named in the change log and revocable alone. An agent cannot sign in with a password, and its credentials work only at the Steadhand endpoint.
 
 = Guardrails on every write =
 
 Built-in checks refuse a write before it runs, with a message the agent can act on, when:
 
 * the content is over 256 KB, has more than 2,000 blocks, nests deeper than 20 levels, is not valid UTF-8 or has malformed block comments
-* the agent makes more than 30 writes in a minute, or more than 100 uploads in a day
+* the agent makes more than 30 writes in a minute (the default), or more than 100 uploads in a day
 * another user has the post open in the block editor
 
 Block comments are checked for structure only. No check rewrites content.
 
 = A change log with undo =
 
-Every write, refused call and failed call is logged with the time, the connection name, the tool, the post ID, the result and the input. Secrets are masked where possible. An administrator with no agent role can undo a change from its log entry. An agent can undo its own change to post text, terms or a featured image with steadhand-undo-change. An undo is refused if the content has changed since.
+Every write, and every refused or failed call that reaches Steadhand's checks, is logged with the time, the connection name, the tool, the post ID, the result and the input. Secrets are masked where possible. A call that WordPress rejects as malformed before Steadhand's checks run is not logged. An administrator with no agent role can undo a change from its log entry. An agent can undo its own change to post text, terms or a featured image with steadhand-undo-change. An undo is refused if the content has changed since. Undoing a text change needs the site to keep WordPress revisions, and works only for the newest change to that post.
 
 = What an agent can do =
 
@@ -52,7 +52,7 @@ Write:
 * Upload a JPEG or PNG image and set a featured image, with the media capability. Uploads are public at once.
 * Undo its own change to post text, terms or a featured image
 
-= What an agent can never do =
+= What an agent can never do while Steadhand is active =
 
 * Use the REST API, XML-RPC or wp-admin. Its credentials work only at the Steadhand endpoint.
 * Sign in with a password.
@@ -69,7 +69,7 @@ Steadhand makes no calls to AI providers and sends no telemetry.
 == Installation ==
 
 1. Install and activate the MCP Adapter plugin.
-2. Install and activate Steadhand. It shows a notice and does nothing else if the MCP Adapter is missing.
+2. Install and activate Steadhand. WordPress will not activate it until the MCP Adapter is active. If the adapter is missing later, Steadhand shows a notice and offers no tools.
 3. In wp-admin, go to Steadhand, then Agents, and choose Add agent. Enter a username, tick the capabilities the agent may use, and enter a connection name for its first Application Password. The connection name appears in the change log. Use a new user for the agent, not an administrator account.
 4. Copy the Application Password when it is shown. It is shown once and cannot be shown again. If it is lost, revoke it and add another on the Agents screen.
 5. In your MCP client, add a server at https://your-site.example/wp-json/steadhand/mcp, using your site's address. Use HTTP Basic authentication, with the agent's username and the Application Password.
@@ -87,7 +87,7 @@ No. Only a user whose only role is the agent role can connect. Create an agent o
 
 = What can an agent change by default? =
 
-Drafts. A new agent can read content, create drafts, edit drafts of any author and set their terms. It cannot publish until an administrator turns on the publish capability, and it cannot upload images or set featured images until an administrator turns on the media capability. It cannot change menus, settings, users or plugins, and no tool deletes content.
+Drafts. A new agent can read content, create drafts, edit drafts of any author and set their terms. It cannot publish until an administrator turns on the publish capability, and it cannot upload images or set featured images until an administrator turns on the media capability. It cannot change menus, settings, users or plugins, and no tool deletes or trashes a post or page.
 
 = Can an agent publish? =
 
@@ -103,7 +103,7 @@ Thirty days by default. Old entries are removed when new entries are written, in
 
 = What happens when I deactivate Steadhand? =
 
-The access rules stop while Steadhand is inactive. Agent users and their Application Passwords remain, and they work as ordinary low-privilege WordPress accounts on the REST API and wp-login.php until they are revoked. To take a site out of service, revoke the agents' connections on the Agents screen while Steadhand is active, or uninstall Steadhand. Uninstalling removes the agent role and the change log, and revokes the Application Passwords of accounts whose only role was the agent role. It never deletes users.
+The access rules stop while Steadhand is inactive. Agent users and their Application Passwords remain, and their Application Passwords work as ordinary low-privilege credentials on the REST API and XML-RPC until they are revoked. To take a site out of service, revoke the agents' connections on the Agents screen while Steadhand is active, or uninstall Steadhand. Uninstalling removes the agent role and the change log, and revokes the Application Passwords of accounts whose only role was the agent role. It never deletes users.
 
 = Does it work on multisite? =
 
