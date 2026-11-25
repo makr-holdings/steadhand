@@ -6,6 +6,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). The
 
 ## [Unreleased]
 
+### Added
+- `steadhand/trash-post` and `steadhand/restore-post` (SPEC section 5). The first moves one post or page to the trash, and the second restores a post that the same agent trashed, and only while that trash is the current one. Both need `steadhand_trash`, which is off by default. Neither deletes permanently. Trashing a published, scheduled or private post also needs `steadhand_publish`. The restore brings a live post back as a draft unless the agent holds `steadhand_publish`.
+- The Agents screen offers `steadhand_trash`, with a plain description of what it allows.
+- Uninstall removes the two trash marker keys from every post.
+
+### Security
+- WordPress deletes a trashed post permanently after `EMPTY_TRASH_DAYS` days, which is the site's trash period, unless it is restored. `steadhand/trash-post` refuses, with nothing changed, when that setting is zero or not a positive number, because WordPress would then delete the post at once.
+- `delete_post` is granted to an agent only inside `steadhand/trash-post` and `steadhand/restore-post`, and only as those two abilities need it (SPEC section 14.1). Restoring a post clears its trash markers, so an administrator's later trash of the same post cannot be restored by the agent that trashed it earlier.
+
 ## [0.3.2] - 2026-11-25
 
 ### Added

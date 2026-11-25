@@ -86,6 +86,15 @@ final class Pipeline {
 	private static array $calls = array();
 
 	/**
+	 * The names of the abilities whose calls are inside authorize() or execute() right now, outermost first. It is pushed and
+	 * popped with $calls, by the same enter() and leave() calls, so the innermost name always belongs to the innermost entry in
+	 * $calls. Read by current_ability_name(), which MetaCaps uses to map delete_post only for trash and restore.
+	 *
+	 * @var string[]
+	 */
+	private static array $names = array();
+
+	/**
 	 * How many write snapshot() or execute() calls are running right now. Changed only by enter_write() and leave_write().
 	 *
 	 * @var int
@@ -126,6 +135,23 @@ final class Pipeline {
 	 */
 	public static function is_write_call(): bool {
 		return array() !== self::$calls && true === end( self::$calls ) && ! self::shutting_down();
+	}
+
+	/**
+	 * The name of the ability whose call is innermost and is authorizing or executing right now, or '' outside a call.
+	 *
+	 * It follows the same rules as is_write_call(): it is '' once shutdown has begun, and it is the innermost call's name, so a
+	 * read call nested in a write call answers that read call's name. MetaCaps uses it to map delete_post only for the two
+	 * abilities that trash and restore a post.
+	 *
+	 * @return string The ability name, such as steadhand/trash-post, or ''.
+	 */
+	public static function current_ability_name(): string {
+		if ( array() === self::$names || self::shutting_down() ) {
+			return '';
+		}
+
+		return (string) end( self::$names );
 	}
 
 	/**
@@ -178,10 +204,12 @@ final class Pipeline {
 	/**
 	 * Marks the start of a call's authorize or execute step.
 	 *
-	 * @param bool $write True when the call is a write (not a read-only ability).
+	 * @param bool   $write True when the call is a write (not a read-only ability).
+	 * @param string $name  The ability's name, for current_ability_name().
 	 */
-	private static function enter( bool $write ): void {
+	private static function enter( bool $write, string $name ): void {
 		self::$calls[] = $write;
+		self::$names[] = $name;
 	}
 
 	/**
@@ -189,6 +217,7 @@ final class Pipeline {
 	 */
 	private static function leave(): void {
 		array_pop( self::$calls );
+		array_pop( self::$names );
 	}
 
 	/**
@@ -372,7 +401,7 @@ final class Pipeline {
 			return $prepared;
 		}
 
-		self::enter( ! self::is_read_only_ability( $ability ) );
+		self::enter( ! self::is_read_only_ability( $ability ), $ability->name() );
 		try {
 			$authorized = $this->authorize( $ability, $prepared );
 		} catch ( \Throwable ) {
@@ -435,7 +464,7 @@ final class Pipeline {
 
 		// The context flag is set from authorize() to the end of execute(), including the log write. It is cleared on
 		// every exit path.
-		self::enter( ! self::is_read_only_ability( $ability ) );
+		self::enter( ! self::is_read_only_ability( $ability ), $ability->name() );
 		try {
 			// (c) Authorize.
 			try {
@@ -511,7 +540,7 @@ final class Pipeline {
 			return $this->finish( $ability, Entry::RESULT_BLOCKED, $prepared, $this->loggable( $ability, $input ) );
 		}
 
-		self::enter( true );
+		self::enter( true, $ability->name() );
 		try {
 			// The caller check reads the user and its capabilities, which a filter may throw from: it fails closed like authorize().
 			try {

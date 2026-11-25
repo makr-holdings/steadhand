@@ -134,6 +134,8 @@ final class Plugin {
 		Log\Schema::maybe_upgrade();
 
 		$this->meta_caps->register();
+		// Any restore clears the markers of steadhand/trash-post, so a later trash by someone else is never restorable by the agent.
+		add_action( 'untrashed_post', array( Pipeline\PostWriter::class, 'untrashed' ), 10, 1 );
 		add_action( 'wp_abilities_api_categories_init', array( $this->registry, 'register_category' ) );
 		add_action( 'wp_abilities_api_init', array( $this->registry, 'register_abilities' ) );
 		add_action( 'mcp_adapter_init', array( $this->server, 'register' ) );

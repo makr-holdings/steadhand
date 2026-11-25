@@ -37,6 +37,15 @@ final class PostWriter {
 	/** Fields an update may set. */
 	private const UPDATE_FIELDS = array( 'post_title', 'post_content', 'post_excerpt', 'post_name', 'post_status', 'post_date_gmt' );
 
+	/** The post meta key that holds the ID of the agent user who trashed the post through steadhand/trash-post. */
+	public const TRASHED_BY_META = '_steadhand_trashed_by';
+
+	/** The post meta key that holds the trash time that WordPress stored when Steadhand trashed the post. */
+	public const TRASH_TIME_META = '_steadhand_trash_time';
+
+	/** The post meta key that WordPress itself stores as the trash time of a trashed post. */
+	public const TRASH_CORE_TIME_META = '_wp_trash_meta_time';
+
 	/** The zero GMT date WordPress stores for "no date". */
 	private const ZERO_DATE = '0000-00-00 00:00:00';
 
@@ -601,6 +610,281 @@ final class PostWriter {
 	}
 
 	/**
+	 * Moves a post to the trash, for steadhand/trash-post. The only call that trashes a post (wp_trash_post()), and it never
+	 * deletes one: with the trash turned off, wp_trash_post() deletes the post permanently, so the trash is refused first.
+	 *
+	 * Order: the trash must be on (retention_days()); the post is read again, uncached, and must still be the one the caller
+	 * checked (an allowed type, not trashed, and in $expected_status); the protected pages are refused; then wp_trash_post()
+	 * runs. The result is read again: the post must still exist, and must be in the trash. Then the two marker keys are stored
+	 * (TRASHED_BY_META and TRASH_TIME_META) and read back. If a marker cannot be stored, the move is undone, so a post is never left
+	 * in the trash that steadhand/restore-post cannot restore.
+	 *
+	 * @param int    $post_id         Post ID.
+	 * @param string $expected_status The status the caller checked, which the post must still have.
+	 * @return array{previous_status: string, trash_time: int}|\WP_Error The status before, and the trash time core stored.
+	 * @throws \LogicException When called outside a write.
+	 */
+	public static function trash( int $post_id, string $expected_status ): array|\WP_Error {
+		self::assert_writing();
+
+		if ( 0 === self::retention_days() ) {
+			return self::trash_disabled();
+		}
+
+		$post = self::read_row( $post_id );
+		if ( null === $post || 'trash' === $post->post_status || ! PostTypes::is_allowed( (string) $post->post_type ) ) {
+			return self::not_found();
+		}
+
+		if ( (string) $post->post_status !== $expected_status ) {
+			return self::changed_while_running();
+		}
+
+		$protected = self::protected_page_refusal( $post_id );
+		if ( null !== $protected ) {
+			return $protected;
+		}
+
+		// wp_trash_post() saves the post again through the save filters, as an update does, so the text is kept as it is stored.
+		self::keep_text_for( $post, static fn(): mixed => wp_trash_post( $post_id ) );
+
+		$after = self::read_row( $post_id );
+		if ( null === $after ) {
+			return new \WP_Error(
+				'steadhand_update_partial',
+				__( 'The post no longer exists after the trash step, so Steadhand cannot confirm the change. Check the site before you continue.', 'steadhand' ),
+				array( 'status' => 500 )
+			);
+		}
+
+		if ( 'trash' !== (string) $after->post_status ) {
+			if ( $expected_status === (string) $after->post_status ) {
+				return new \WP_Error(
+					'steadhand_update_failed',
+					__( 'WordPress could not move the post to the trash, so nothing was changed. Try again.', 'steadhand' ),
+					array( 'status' => 500 )
+				);
+			}
+
+			return new \WP_Error(
+				'steadhand_update_partial',
+				__( 'The post changed status during the trash step, so the change was at least partly applied. Check the post before you continue.', 'steadhand' ),
+				array( 'status' => 500 )
+			);
+		}
+
+		$time = (string) get_post_meta( $post_id, self::TRASH_CORE_TIME_META, true );
+		if ( '' === $time || ! self::store_markers( $post_id, get_current_user_id(), $time ) ) {
+			// Undo the move: a trashed post that steadhand/restore-post cannot restore is worse than a post that was not trashed.
+			$back = self::untrash_as( $post_id, $expected_status );
+			self::forget_markers( $post_id );
+
+			if ( null !== $back && 'trash' !== $back ) {
+				return new \WP_Error(
+					'steadhand_update_failed',
+					__( 'Steadhand could not record the move to the trash, so the post was moved back and nothing was changed. Try again.', 'steadhand' ),
+					array( 'status' => 500 )
+				);
+			}
+
+			return new \WP_Error(
+				'steadhand_update_partial',
+				__( 'The post was moved to the trash, but Steadhand could not record it, so steadhand-restore-post cannot restore it. Check the post before you continue.', 'steadhand' ),
+				array( 'status' => 500 )
+			);
+		}
+
+		return array(
+			'previous_status' => $expected_status,
+			'trash_time'      => (int) $time,
+		);
+	}
+
+	/**
+	 * Takes a post out of the trash, for steadhand/restore-post, to $status. Only a post this agent trashed, and only while that trash
+	 * is still the current one (own_trash()). The marker keys are deleted once WordPress has restored the post.
+	 *
+	 * WordPress's restored status is replaced for this one post only, through wp_untrash_post_status, which is removed again in
+	 * finally. The status the post has afterwards is returned as it is, so a caller can see when another filter changed it.
+	 *
+	 * @param int    $post_id The post ID.
+	 * @param string $status  The status to restore the post to.
+	 * @return array{status: string}|\WP_Error The status the post has now.
+	 * @throws \LogicException When called outside a write.
+	 */
+	public static function untrash( int $post_id, string $status ): array|\WP_Error {
+		self::assert_writing();
+
+		$post = self::read_row( $post_id );
+		if ( null === $post || 'trash' !== (string) $post->post_status || ! PostTypes::is_allowed( (string) $post->post_type ) || ! self::own_trash( $post_id ) ) {
+			return self::not_found();
+		}
+
+		$now = self::untrash_as( $post_id, $status );
+		if ( null === $now ) {
+			return new \WP_Error(
+				'steadhand_update_partial',
+				__( 'The post no longer exists after the restore, so Steadhand cannot confirm the change. Check the site before you continue.', 'steadhand' ),
+				array( 'status' => 500 )
+			);
+		}
+
+		if ( 'trash' === $now ) {
+			return new \WP_Error(
+				'steadhand_update_failed',
+				__( 'WordPress could not restore the post, so nothing was changed. Try again.', 'steadhand' ),
+				array( 'status' => 500 )
+			);
+		}
+
+		self::restore_empty_slug( $post_id );
+		self::forget_markers( $post_id );
+
+		return array( 'status' => $now );
+	}
+
+	/**
+	 * Gives back an empty slug to a post that WordPress restored from the trash. When the post had no slug, core keeps the bare
+	 * "__trashed" suffix it added at the trash, because it restores the stored slug only when that slug is not empty. Left alone, the
+	 * post would publish later under the slug "__trashed". The post is saved through keep_text_for(), so only its name changes.
+	 *
+	 * @param int $post_id Post ID.
+	 */
+	private static function restore_empty_slug( int $post_id ): void {
+		$post = self::read_row( $post_id );
+		if ( null === $post || '__trashed' !== (string) $post->post_name ) {
+			return;
+		}
+
+		self::keep_text_for(
+			$post,
+			static fn(): mixed => wp_update_post(
+				array(
+					'ID'        => $post_id,
+					'post_name' => '',
+				)
+			)
+		);
+		delete_post_meta( $post_id, '_wp_desired_post_slug' );
+	}
+
+	/**
+	 * Clears the trash markers of a post that WordPress has restored from the trash, by anyone. Hooked to core's untrashed_post action
+	 * (Plugin::boot()), so the markers never survive a restore: an administrator who restores and trashes the post again cannot leave
+	 * an agent with a marker that matches the new trash time, even when both happen in the same second.
+	 *
+	 * @param int $post_id Post ID.
+	 */
+	public static function untrashed( int $post_id ): void {
+		self::forget_markers( $post_id );
+	}
+
+	/**
+	 * Whether this post was trashed by the current user through steadhand/trash-post, and that trash is still the current one: the
+	 * trashed-by marker is the current user, and the trash-time marker equals the trash time WordPress holds now. If an administrator
+	 * restored the post and trashed it again, WordPress's trash time differs and this is false. The reads are uncached.
+	 *
+	 * @param int $post_id Post ID.
+	 * @return bool
+	 */
+	public static function own_trash( int $post_id ): bool {
+		wp_cache_delete( $post_id, 'post_meta' );
+
+		$by   = (int) get_post_meta( $post_id, self::TRASHED_BY_META, true );
+		$time = (string) get_post_meta( $post_id, self::TRASH_TIME_META, true );
+
+		$user  = get_current_user_id();
+		$trash = (string) get_post_meta( $post_id, self::TRASH_CORE_TIME_META, true );
+
+		return 0 < $by && 0 < $user && $user === $by && '' !== $time && $trash === $time;
+	}
+
+	/**
+	 * The trash time in days that WordPress keeps a trashed post for, from EMPTY_TRASH_DAYS, or 0 when the trash is off. 0
+	 * means wp_trash_post() would delete the post permanently, so steadhand/trash-post refuses. Read through trash_retention_days(),
+	 * which is the one place the rule is decided.
+	 *
+	 * @return int
+	 */
+	public static function retention_days(): int {
+		return self::trash_retention_days( defined( 'EMPTY_TRASH_DAYS' ) ? EMPTY_TRASH_DAYS : null );
+	}
+
+	/**
+	 * The trash days a given EMPTY_TRASH_DAYS value allows: its positive whole number, or 0 when it is not one, which turns the
+	 * trash off for WordPress. Takes the value as an argument, so the rule can be tested with any value. A numeric string is read
+	 * as its number, as WordPress reads it.
+	 *
+	 * @param mixed $value The value of EMPTY_TRASH_DAYS.
+	 * @return int 0 when the trash is off, otherwise the number of days.
+	 */
+	public static function trash_retention_days( mixed $value ): int {
+		if ( is_string( $value ) && 1 === preg_match( '/^\d+\z/', $value ) ) {
+			$value = (int) $value;
+		}
+
+		return is_int( $value ) && $value > 0 ? $value : 0;
+	}
+
+	/**
+	 * The refusal for a site with the trash turned off, so that WordPress would delete the post permanently.
+	 *
+	 * @return \WP_Error
+	 */
+	public static function trash_disabled(): \WP_Error {
+		return new \WP_Error(
+			'steadhand_refused_trash_disabled',
+			__( 'This site has the trash turned off (EMPTY_TRASH_DAYS), so WordPress would delete the post permanently. Steadhand never deletes permanently. Nothing was changed.', 'steadhand' ),
+			array( 'status' => 409 )
+		);
+	}
+
+	/**
+	 * The reason a post is one of the site's protected pages, or null. The static front page (when the front page shows a static
+	 * page), the posts page and the privacy policy page are never trashed by Steadhand.
+	 *
+	 * @param int $post_id Post ID.
+	 * @return string|null 'front', 'posts' or 'privacy', or null.
+	 */
+	public static function protected_page( int $post_id ): ?string {
+		if ( $post_id < 1 ) {
+			return null;
+		}
+
+		if ( 'page' === get_option( 'show_on_front' ) && (int) get_option( 'page_on_front' ) === $post_id ) {
+			return 'front';
+		}
+
+		if ( (int) get_option( 'page_for_posts' ) === $post_id ) {
+			return 'posts';
+		}
+
+		if ( (int) get_option( 'wp_page_for_privacy_policy' ) === $post_id ) {
+			return 'privacy';
+		}
+
+		return null;
+	}
+
+	/**
+	 * The refusal for a protected page, or null when the post is not one.
+	 *
+	 * @param int $post_id Post ID.
+	 * @return \WP_Error|null
+	 */
+	public static function protected_page_refusal( int $post_id ): ?\WP_Error {
+		if ( null === self::protected_page( $post_id ) ) {
+			return null;
+		}
+
+		return new \WP_Error(
+			'steadhand_refused_protected_page',
+			__( 'This page is the site\'s front page, posts page or privacy policy page, and Steadhand does not trash it. Nothing was changed.', 'steadhand' ),
+			array( 'status' => 409 )
+		);
+	}
+
+	/**
 	 * Reads the post uncached, with the refusals every write makes: missing, trashed or of a type that is not allowed.
 	 *
 	 * @param int $post_id Post ID.
@@ -952,6 +1236,151 @@ final class PostWriter {
 		if ( $have !== $keys ) {
 			throw new \InvalidArgumentException( 'A segment has keys other than the ones its type takes.' );
 		}
+	}
+
+	/**
+	 * Reads the post uncached, whatever its status. Used by the trash and restore writes, which must see a trashed row.
+	 *
+	 * @param int $post_id Post ID.
+	 * @return \WP_Post|null
+	 */
+	private static function read_row( int $post_id ): ?\WP_Post {
+		clean_post_cache( $post_id );
+		$post = get_post( $post_id );
+
+		return $post instanceof \WP_Post ? $post : null;
+	}
+
+	/**
+	 * Stores the two marker keys for a post that was just trashed, and reads them back uncached. Returns false when either one
+	 * does not hold the value it was given.
+	 *
+	 * @param int    $post_id The post ID.
+	 * @param int    $user_id The user who trashed the post.
+	 * @param string $time    The trash time WordPress stored (TRASH_CORE_TIME_META).
+	 * @return bool
+	 */
+	private static function store_markers( int $post_id, int $user_id, string $time ): bool {
+		update_post_meta( $post_id, self::TRASHED_BY_META, (string) $user_id );
+		update_post_meta( $post_id, self::TRASH_TIME_META, $time );
+
+		wp_cache_delete( $post_id, 'post_meta' );
+
+		return (int) get_post_meta( $post_id, self::TRASHED_BY_META, true ) === $user_id
+			&& (string) get_post_meta( $post_id, self::TRASH_TIME_META, true ) === $time;
+	}
+
+	/**
+	 * Deletes the two marker keys of a post.
+	 *
+	 * @param int $post_id Post ID.
+	 */
+	private static function forget_markers( int $post_id ): void {
+		delete_post_meta( $post_id, self::TRASHED_BY_META );
+		delete_post_meta( $post_id, self::TRASH_TIME_META );
+	}
+
+	/**
+	 * Restores a trashed post to $status through wp_untrash_post(), with the status replaced for this one post only. The filter
+	 * is removed in finally.
+	 *
+	 * @param int    $post_id Post ID.
+	 * @param string $status  The status to restore the post to.
+	 * @return string|null The status the post has afterwards, or null when the post no longer exists.
+	 */
+	private static function untrash_as( int $post_id, string $status ): ?string {
+		$before = self::read_row( $post_id );
+		if ( null === $before ) {
+			return null;
+		}
+
+		$only = static function ( mixed $new_status, mixed $id, mixed $previous ) use ( $post_id, $status ): mixed {
+			unset( $previous );
+
+			return (int) $id === $post_id ? $status : $new_status;
+		};
+
+		add_filter( 'wp_untrash_post_status', $only, PHP_INT_MAX, 3 );
+		try {
+			self::keep_text_for( $before, static fn(): mixed => wp_untrash_post( $post_id ) );
+		} finally {
+			remove_filter( 'wp_untrash_post_status', $only, PHP_INT_MAX );
+		}
+
+		$after = self::read_row( $post_id );
+
+		return null === $after ? null : (string) $after->post_status;
+	}
+
+	/**
+	 * Runs a core call that saves the post again (wp_trash_post() and wp_untrash_post() both do), with the four KSES filters in place and
+	 * the stored title, content, excerpt and filtered content put back after the save filters have run. This is what update() does
+	 * for a post it changes, so the status change does not alter the text. Only the first save of this post in the call is changed,
+	 * as in save(). The filter is removed in finally.
+	 *
+	 * @param \WP_Post $post The post as stored, read raw.
+	 * @param callable $step The core call.
+	 * @return mixed What the call returned.
+	 */
+	private static function keep_text_for( \WP_Post $post, callable $step ): mixed {
+		$target_id = (int) $post->ID;
+		$keep      = array(
+			'post_title'            => (string) $post->post_title,
+			'post_content'          => (string) $post->post_content,
+			'post_excerpt'          => (string) $post->post_excerpt,
+			'post_content_filtered' => (string) $post->post_content_filtered,
+		);
+
+		$armed   = true;
+		$restore = static function ( array $data, array $postarr, array $unsanitized_postarr, bool $update ) use ( &$armed, $target_id, $keep ): array {
+			unset( $unsanitized_postarr );
+
+			if ( ! $armed || ! $update || (int) ( $postarr['ID'] ?? 0 ) !== $target_id ) {
+				return $data;
+			}
+
+			// Once only, as save() does. $data is slashed here, as core passes it.
+			$armed = false;
+			foreach ( $keep as $field => $value ) {
+				if ( array_key_exists( $field, $data ) ) {
+					$data[ $field ] = wp_slash( $value );
+				}
+			}
+
+			return $data;
+		};
+
+		add_filter( 'wp_insert_post_data', $restore, PHP_INT_MAX, 4 );
+		try {
+			return self::with_filters_added(
+				self::bracket_filters(),
+				$step
+			);
+		} finally {
+			remove_filter( 'wp_insert_post_data', $restore, PHP_INT_MAX );
+		}
+	}
+
+	/**
+	 * The refusal for a post that is missing, trashed, of a type that is not allowed, or not trashed by this agent: the one generic text.
+	 *
+	 * @return \WP_Error
+	 */
+	private static function not_found(): \WP_Error {
+		return new \WP_Error( 'steadhand_forbidden', __( 'Not found, or this agent may not access it.', 'steadhand' ), array( 'status' => 403 ) );
+	}
+
+	/**
+	 * The refusal for a post whose status changed after the caller checked it, so the call was not made.
+	 *
+	 * @return \WP_Error
+	 */
+	private static function changed_while_running(): \WP_Error {
+		return new \WP_Error(
+			'steadhand_refused_changed_since',
+			__( 'The post changed while this call was running, so nothing was changed. Check the post, then try again.', 'steadhand' ),
+			array( 'status' => 409 )
+		);
 	}
 
 	/**
