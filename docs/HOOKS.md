@@ -6,7 +6,7 @@
 
 Steadhand defines four filters, documented in [Filters](#filters), and seven actions, documented in [Actions](#actions). The [Guardrail API](#guardrail-api) section documents the public classes that third-party guardrail rules use.
 
-To check, run this from the repository root. It lists Steadhand's own hooks: the filters `steadhand_allowed_post_types`, `steadhand_log_read_calls`, `steadhand_log_retention_days` and `steadhand_rate_limit_per_minute`, and the actions `steadhand_admin_agent_row`, `steadhand_admin_log_entry`, `steadhand_admin_log_toolbar`, `steadhand_agent_capabilities_changed`, `steadhand_agent_created`, `steadhand_log_entry_stored` and `steadhand_register_guardrails`. It also lists three WordPress hooks that Steadhand calls rather than attaches to: `the_content`, which `get-rendered` runs on purpose, and `wp_check_post_lock_window`, which the edit-lock rule reads, and `image_memory_limit`, which the media tools read. Today the output has fourteen lines: one for each of the eleven Steadhand hooks (four filters and seven actions), and one for each of the three WordPress hooks. Any other `apply_filters()` or `do_action()` call in this output is a mistake, or a new extension point that needs a section here:
+To check, run this from the repository root. It lists Steadhand's own hooks: the filters `steadhand_allowed_post_types`, `steadhand_log_read_calls`, `steadhand_log_retention_days` and `steadhand_rate_limit_per_minute`, and the actions `steadhand_admin_agent_row`, `steadhand_admin_log_entry`, `steadhand_admin_log_toolbar`, `steadhand_agent_capabilities_changed`, `steadhand_agent_created`, `steadhand_agent_deleted`, `steadhand_agent_disabled`, `steadhand_agent_enabled`, `steadhand_log_entry_stored` and `steadhand_register_guardrails`. It also lists three WordPress hooks that Steadhand calls rather than attaches to: `the_content`, which `get-rendered` runs on purpose, and `wp_check_post_lock_window`, which the edit-lock rule reads, and `image_memory_limit`, which the media tools read. Today the output has seventeen lines: one for each of the fourteen Steadhand hooks (four filters and ten actions), and one for each of the three WordPress hooks. Any other `apply_filters()` or `do_action()` call in this output is a mistake, or a new extension point that needs a section here:
 
 ```
 grep -rnE "apply_filters\(|do_action\(" includes steadhand.php uninstall.php --exclude-dir=vendor
@@ -314,6 +314,48 @@ Runs after the Agents screen saves an agent's capabilities.
 - **When it runs:** after every offered capability is saved and read back as saved. It does not run when the save is refused or does not read back. It does not run when an agent is created with chosen capabilities.
 - **If a listener throws:** the exception is caught and ignored. The capabilities stay saved.
 - **What it does not do:** it cannot change the values. It has no return value.
+
+This action is public API. The [stability policy](#stability-policy) above applies. Any new parameter will go at the end.
+
+### `steadhand_agent_disabled`
+
+Runs after the Agents screen disables a dedicated agent.
+
+- **Since:** unreleased.
+- **Type:** action.
+- **Parameter:** `$agent` (`WP_User`), the agent, read again after the disable was checked.
+- **When it runs:** once, after the agent's stored `steadhand_connect` reads back as false and the agent holds no Application Password. It does not run when the disable is refused or does not read back.
+- **If a listener throws:** the exception is caught and ignored. The agent stays disabled.
+- **What it does not do:** it cannot change the agent or the result. It has no return value. It does not fire `steadhand_agent_capabilities_changed`, which runs only when the capabilities form is saved.
+- **Unticking Connect in the capabilities form does not fire it.** Turning `steadhand_connect` off through that form only stores the value; it revokes nothing and fires `steadhand_agent_capabilities_changed`, not this action. A listener that wants every change of connect must listen to both this action and `steadhand_agent_capabilities_changed`, and to `steadhand_agent_enabled` as well.
+
+This action is public API. The [stability policy](#stability-policy) above applies. Any new parameter will go at the end.
+
+### `steadhand_agent_enabled`
+
+Runs after the Agents screen enables a dedicated agent.
+
+- **Since:** unreleased.
+- **Type:** action.
+- **Parameter:** `$agent` (`WP_User`), the agent, read again after the enable was checked.
+- **When it runs:** once, after the agent's stored `steadhand_connect` reads back as true. Enabling creates no Application Password, so the agent may hold none when this runs. It does not run when the enable is refused or does not read back.
+- **If a listener throws:** the exception is caught and ignored. The agent stays enabled.
+- **What it does not do:** it cannot change the agent or the result. It has no return value.
+- **Storing Connect on through the capabilities form does not fire it.** Ticking Connect in that form stores the value and fires `steadhand_agent_capabilities_changed`, not this action. A listener that wants every change of connect must listen to both this action and `steadhand_agent_capabilities_changed`, and to `steadhand_agent_disabled` as well.
+
+This action is public API. The [stability policy](#stability-policy) above applies. Any new parameter will go at the end.
+
+### `steadhand_agent_deleted`
+
+Runs after the Agents screen deletes a dedicated agent's user account.
+
+- **Since:** unreleased.
+- **Type:** action.
+- **Parameters:** `$user_id` (`int`), the ID of the deleted user; `$user_login` (`string`), the login the user had. The user no longer exists, so there is no `WP_User` object.
+- **When it runs:** once, after a fresh read finds the user gone. It does not run when the delete is refused, or when the user still exists afterwards. A delete is refused before any change when the request is not confirmed or when posts or links are attributed to the agent. It can also be refused after the agent's connections were revoked, when content appears during the delete (`delete_has_content_revoked`) or a role is added (`not_agent_revoked`); then nothing is deleted and this action does not run.
+- **What is kept:** Steadhand never deletes content. The change-log entries of the user are kept.
+- **If a listener throws:** the exception is caught and ignored. The user stays deleted.
+- **What it does not do:** it cannot undo the delete or change the result. It has no return value.
 
 This action is public API. The [stability policy](#stability-policy) above applies. Any new parameter will go at the end.
 

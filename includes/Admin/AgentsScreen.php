@@ -151,16 +151,25 @@ final class AgentsScreen {
 		} elseif ( AgentsHandler::ACTION_CAPABILITIES === $action ) {
 			$posted = isset( $post['capabilities'] ) && is_array( $post['capabilities'] ) ? $post['capabilities'] : array();
 			$result = $this->handler->set_capabilities( $nonce, $id, array_values( array_filter( $posted, 'is_string' ) ) );
+		} elseif ( AgentsHandler::ACTION_DISABLE === $action ) {
+			$result = $this->handler->disable( $nonce, $id );
+		} elseif ( AgentsHandler::ACTION_ENABLE === $action ) {
+			$result = $this->handler->enable( $nonce, $id );
+		} elseif ( AgentsHandler::ACTION_DELETE === $action ) {
+			// Only the value '1' of the checkbox confirms the delete. Anything else is not confirmed.
+			$confirmed = isset( $post['confirm_delete'] ) && '1' === $post['confirm_delete'];
+			$result    = $this->handler->delete( $nonce, $id, $confirmed );
 		} else {
 			wp_die( esc_html__( 'That action is not valid.', 'steadhand' ), esc_html__( 'Not allowed', 'steadhand' ), array( 'response' => 400 ) );
 		}
 
-		// The redirect returns to the agent's detail view. The detail view validates the ID, so a forged one shows nothing.
+		// The redirect returns to the agent's detail view. The detail view validates the ID, so a forged one shows nothing. A deleted
+		// agent has no detail view, so a successful delete returns to the list.
 		$args = array(
 			'page'   => self::SLUG,
 			'agents' => $result['code'],
 		);
-		if ( $id > 0 ) {
+		if ( $id > 0 && 'agent_deleted' !== $result['code'] ) {
 			$args['agent'] = (string) $id;
 		}
 
@@ -410,31 +419,44 @@ final class AgentsScreen {
 	 */
 	private static function messages(): array {
 		return array(
-			'created'                   => array( 'success', __( 'The agent was created. Its password is shown below.', 'steadhand' ) ),
-			'password_added'            => array( 'success', __( 'The connection was added. Its password is shown below.', 'steadhand' ) ),
-			'password_revoked'          => array( 'success', __( 'The password was revoked.', 'steadhand' ) ),
-			'passwords_revoked'         => array( 'success', __( 'All of the agent\'s passwords were revoked.', 'steadhand' ) ),
-			'capabilities_saved'        => array( 'success', __( 'The capabilities were saved.', 'steadhand' ) ),
-			'capabilities_mismatch'     => array( 'error', __( 'The capabilities could not be confirmed after saving. Check them before the agent is used.', 'steadhand' ) ),
-			'capabilities_unverified'   => array( 'error', __( 'The capabilities were saved, but this user is no longer a dedicated agent, so they grant nothing. Check the user\'s roles on the Users screen.', 'steadhand' ) ),
-			'invalid_username'          => array( 'error', __( 'The username is not valid. Use 1 to 60 lower-case letters, digits, underscores or hyphens, starting with a letter or digit.', 'steadhand' ) ),
-			'username_taken'            => array( 'error', __( 'That username already exists.', 'steadhand' ) ),
-			'invalid_label'             => array( 'error', __( 'The connection name is not valid. Use 1 to 60 characters on one line, with no markup, no invisible or control characters, and no leading or trailing spaces.', 'steadhand' ) ),
-			'label_taken'               => array( 'error', __( 'The agent already has a connection with that name.', 'steadhand' ) ),
-			'too_many_passwords'        => array( 'error', __( 'The agent already has the most Application Passwords allowed. Revoke one first.', 'steadhand' ) ),
-			'app_passwords_unavailable' => array( 'error', __( 'Application Passwords are not available for this user, so no password was made.', 'steadhand' ) ),
-			'not_agent'                 => array( 'error', __( 'That user is not a dedicated agent, so nothing was changed.', 'steadhand' ) ),
-			'password_not_found'        => array( 'error', __( 'That password was not found for this agent.', 'steadhand' ) ),
-			'create_failed'             => array( 'error', __( 'The agent could not be created.', 'steadhand' ) ),
-			'create_failed_user_kept'   => array( 'error', __( 'The agent could not be created. A user with no role and no password access was left behind because content on this site is attributed to its ID. Remove it on the Users screen and choose what to do with that content.', 'steadhand' ) ),
+			'created'                        => array( 'success', __( 'The agent was created. Its password is shown below.', 'steadhand' ) ),
+			'password_added'                 => array( 'success', __( 'The connection was added. Its password is shown below.', 'steadhand' ) ),
+			'password_revoked'               => array( 'success', __( 'The password was revoked.', 'steadhand' ) ),
+			'passwords_revoked'              => array( 'success', __( 'All of the agent\'s passwords were revoked.', 'steadhand' ) ),
+			'capabilities_saved'             => array( 'success', __( 'The capabilities were saved.', 'steadhand' ) ),
+			'capabilities_mismatch'          => array( 'error', __( 'The capabilities could not be confirmed after saving. Check them before the agent is used.', 'steadhand' ) ),
+			'capabilities_unverified'        => array( 'error', __( 'The capabilities were saved, but this user is no longer a dedicated agent, so they grant nothing. Check the user\'s roles on the Users screen.', 'steadhand' ) ),
+			'invalid_username'               => array( 'error', __( 'The username is not valid. Use 1 to 60 lower-case letters, digits, underscores or hyphens, starting with a letter or digit.', 'steadhand' ) ),
+			'username_taken'                 => array( 'error', __( 'That username already exists.', 'steadhand' ) ),
+			'invalid_label'                  => array( 'error', __( 'The connection name is not valid. Use 1 to 60 characters on one line, with no markup, no invisible or control characters, and no leading or trailing spaces.', 'steadhand' ) ),
+			'connect_required'               => array( 'error', __( 'A new agent needs Connect, because creating it makes its first connection. To make an agent that cannot connect, create it and then disable it.', 'steadhand' ) ),
+			'label_taken'                    => array( 'error', __( 'The agent already has a connection with that name.', 'steadhand' ) ),
+			'too_many_passwords'             => array( 'error', __( 'The agent already has the most Application Passwords allowed. Revoke one first.', 'steadhand' ) ),
+			'app_passwords_unavailable'      => array( 'error', __( 'Application Passwords are not available for this user, so no password was made.', 'steadhand' ) ),
+			'not_agent'                      => array( 'error', __( 'That user is not a dedicated agent, so nothing was changed.', 'steadhand' ) ),
+			'not_agent_revoked'              => array( 'error', __( 'That user stopped being a dedicated agent during the delete, so it was not deleted. Its connections were already revoked. Steadhand changed nothing else.', 'steadhand' ) ),
+			'password_not_found'             => array( 'error', __( 'That password was not found for this agent.', 'steadhand' ) ),
+			'create_failed'                  => array( 'error', __( 'The agent could not be created.', 'steadhand' ) ),
+			'create_failed_user_kept'        => array( 'error', __( 'The agent could not be created. A user with no role and no password access was left behind because content on this site is attributed to its ID. Remove it on the Users screen and choose what to do with that content.', 'steadhand' ) ),
 			/* translators: %s: the login name the administrator entered. */
-			'create_failed_cleanup'     => array( 'error', __( 'The agent could not be created, and removing the user it made did not finish. Check the Users screen for the login %s. The user may still have a role or a password, so remove it there.', 'steadhand' ) ),
-			'extra_role'                => array( 'error', __( 'The agent could not be created, because another plugin gave the new user an extra role or capability. Steadhand only creates users whose single role is the agent role.', 'steadhand' ) ),
-			'password_failed'           => array( 'error', __( 'The password could not be saved. Nothing was left behind.', 'steadhand' ) ),
-			'revoke_failed'             => array( 'error', __( 'The password could not be revoked. It may still work. Try again, or remove it on the user\'s profile.', 'steadhand' ) ),
-			'capabilities_failed'       => array( 'error', __( 'The capabilities could not be confirmed. Check them on the Users screen before the agent is used.', 'steadhand' ) ),
-			'role_missing'              => array( 'error', __( 'The Steadhand agent role is missing. Deactivate and reactivate Steadhand to restore it.', 'steadhand' ) ),
-			'multisite'                 => array( 'warning', __( 'Agent management is not available on multisite networks.', 'steadhand' ) ),
+			'create_failed_cleanup'          => array( 'error', __( 'The agent could not be created, and removing the user it made did not finish. Check the Users screen for the login %s. The user may still have a role or a password, so remove it there.', 'steadhand' ) ),
+			'extra_role'                     => array( 'error', __( 'The agent could not be created, because another plugin gave the new user an extra role or capability. Steadhand only creates users whose single role is the agent role.', 'steadhand' ) ),
+			'password_failed'                => array( 'error', __( 'The password could not be saved. Nothing was left behind.', 'steadhand' ) ),
+			'revoke_failed'                  => array( 'error', __( 'The password could not be revoked. It may still work. Try again, or remove it on the user\'s profile.', 'steadhand' ) ),
+			'capabilities_failed'            => array( 'error', __( 'The capabilities could not be confirmed. Check them on the Users screen before the agent is used.', 'steadhand' ) ),
+			'role_missing'                   => array( 'error', __( 'The Steadhand agent role is missing. Deactivate and reactivate Steadhand to restore it.', 'steadhand' ) ),
+			'multisite'                      => array( 'warning', __( 'Agent management is not available on multisite networks.', 'steadhand' ) ),
+			'agent_disabled'                 => array( 'success', __( 'The agent was disabled. Its connections were revoked, and it cannot connect until it is enabled and given a new connection.', 'steadhand' ) ),
+			'agent_enabled'                  => array( 'success', __( 'The agent was enabled. It has no connection yet. Add a connection so it can connect.', 'steadhand' ) ),
+			'agent_enabled_with_connections' => array( 'success', __( 'The agent was enabled. Its existing connections work again.', 'steadhand' ) ),
+			'agent_deleted'                  => array( 'success', __( 'The agent\'s user account was deleted. Its change-log entries were kept.', 'steadhand' ) ),
+			'disable_failed'                 => array( 'error', __( 'The agent may still be able to connect. The disable could not be confirmed. Check its connections on this page and revoke any that remain.', 'steadhand' ) ),
+			'enable_failed'                  => array( 'error', __( 'The agent could not be enabled. Check its capabilities on the Users screen before it is used.', 'steadhand' ) ),
+			'delete_not_confirmed'           => array( 'error', __( 'The agent was not deleted, because the deletion was not confirmed. Tick the box to confirm. Nothing was changed.', 'steadhand' ) ),
+			'delete_has_content'             => array( 'error', __( 'The agent was not deleted. Posts or links are attributed to it, and Steadhand never deletes content. Use Disable instead.', 'steadhand' ) ),
+			'delete_failed'                  => array( 'error', __( 'The agent could not be deleted. Its Application Passwords were revoked, so it cannot connect.', 'steadhand' ) ),
+			'delete_has_content_revoked'     => array( 'error', __( 'The agent now has posts or links attributed to it, so it was not deleted. Its connections were already revoked, and Steadhand changed nothing else. Steadhand never deletes content.', 'steadhand' ) ),
+			'agent_disabled_no_password'     => array( 'error', __( 'This agent is disabled. Enable it before adding a connection.', 'steadhand' ) ),
 		);
 	}
 
@@ -493,8 +515,9 @@ final class AgentsScreen {
 
 		echo '<table class="widefat striped"><thead><tr>';
 		printf(
-			'<th scope="col">%s</th><th scope="col">%s</th><th scope="col">%s</th><th scope="col">%s</th><th scope="col"><span class="screen-reader-text">%s</span></th>',
+			'<th scope="col">%s</th><th scope="col">%s</th><th scope="col">%s</th><th scope="col">%s</th><th scope="col">%s</th><th scope="col"><span class="screen-reader-text">%s</span></th>',
 			esc_html__( 'Agent', 'steadhand' ),
+			esc_html__( 'Status', 'steadhand' ),
 			esc_html__( 'Capabilities', 'steadhand' ),
 			esc_html__( 'Connections', 'steadhand' ),
 			esc_html__( 'Last used', 'steadhand' ),
@@ -533,6 +556,7 @@ final class AgentsScreen {
 
 		echo '<tr>';
 		printf( '<td><a href="%s">%s</a></td>', esc_url( $url ), esc_html( $agent->user_login ) );
+		printf( '<td>%s</td>', esc_html( self::status_text( $agent, count( $passwords ) ) ) );
 		printf( '<td>%s</td>', esc_html( array() === $texts ? __( 'None', 'steadhand' ) : implode( ', ', $texts ) ) );
 		printf( '<td>%s</td>', esc_html( (string) count( $passwords ) ) );
 		printf( '<td>%s</td>', esc_html( $this->format_time( $newest > 0 ? $newest : null ) ) );
@@ -608,6 +632,11 @@ final class AgentsScreen {
 
 		echo '<div class="steadhand-agent">';
 		printf( '<h2>%s</h2>', esc_html( $agent->user_login ) );
+		printf(
+			'<p><strong>%s</strong> %s</p>',
+			esc_html__( 'Status:', 'steadhand' ),
+			esc_html( self::status_text( $agent, count( \WP_Application_Passwords::get_user_application_passwords( $agent->ID ) ) ) )
+		);
 
 		$this->capabilities_section( $agent, $can_edit );
 		$this->connections_section( $agent, $can_edit, $available );
@@ -626,6 +655,10 @@ final class AgentsScreen {
 			esc_html__( 'View this agent\'s change-log entries', 'steadhand' )
 		);
 
+		if ( $can_edit ) {
+			$this->disable_or_delete_section( $agent );
+		}
+
 		try {
 			/**
 			 * Fires after one dedicated agent's detail on the Agents screen. Output printed here appears inside the agent's block.
@@ -638,6 +671,63 @@ final class AgentsScreen {
 		}
 
 		echo '</div>';
+	}
+
+	/**
+	 * The section that disables or enables an agent, and deletes it. Disable is offered while the agent's steadhand_connect is effectively on,
+	 * and enable while it is not. The delete form has one confirmation box, which the server requires. An agent with posts or links
+	 * attributed to it gets no delete form, only the reason and a pointer to Disable. Every form is posted with its nonce, bound to the
+	 * action and the agent.
+	 *
+	 * @param \WP_User $agent The agent.
+	 * @return void
+	 */
+	private function disable_or_delete_section( \WP_User $agent ): void {
+		echo '<h3>' . esc_html__( 'Disable or delete', 'steadhand' ) . '</h3>';
+
+		$connect_on  = Capabilities::user_has( $agent, Capabilities::CONNECT );
+		$connections = count( \WP_Application_Passwords::get_user_application_passwords( $agent->ID ) );
+
+		// Disable is offered while connect is on, and also while it is off but connections remain, so the administrator can revoke them.
+		if ( $connect_on || $connections > 0 ) {
+			$this->open_form( AgentsHandler::ACTION_DISABLE, AgentsHandler::nonce_action( AgentsHandler::ACTION_DISABLE, $agent->ID ), $agent->ID );
+			submit_button( __( 'Disable agent', 'steadhand' ), 'secondary', 'submit', false );
+			printf( '<p class="description">%s</p>', esc_html__( 'Revokes every connection and stops the agent connecting. The user account, its drafts and its change-log entries stay.', 'steadhand' ) );
+			echo '</form>';
+		}
+
+		if ( ! $connect_on ) {
+			$this->open_form( AgentsHandler::ACTION_ENABLE, AgentsHandler::nonce_action( AgentsHandler::ACTION_ENABLE, $agent->ID ), $agent->ID );
+			submit_button( __( 'Enable agent', 'steadhand' ), 'secondary', 'submit', false );
+			// Enabling creates no connection. An agent that still holds some gets them back, so the help says so instead of "none".
+			printf(
+				'<p class="description">%s</p>',
+				esc_html(
+					0 === $connections
+						? __( 'Lets the agent connect again. It has no connection now, so add one above before it can connect.', 'steadhand' )
+						: __( 'Lets the agent connect again. Its existing connections work again.', 'steadhand' )
+				)
+			);
+			echo '</form>';
+		}
+
+		// The delete form needs delete_user for this agent as well as edit_user. Without it nothing about delete is printed.
+		if ( ! current_user_can( 'delete_user', $agent->ID ) ) {
+			return;
+		}
+
+		if ( $this->handler->holds_attributed_content( $agent->ID ) ) {
+			printf( '<p>%s</p>', esc_html__( 'This agent has posts or links attributed to it. Steadhand never deletes content, so the agent cannot be deleted. Disable it instead.', 'steadhand' ) );
+			return;
+		}
+
+		$this->open_form( AgentsHandler::ACTION_DELETE, AgentsHandler::nonce_action( AgentsHandler::ACTION_DELETE, $agent->ID ), $agent->ID );
+		printf(
+			'<p><label><input type="checkbox" name="confirm_delete" value="1" required> %s</label></p>',
+			esc_html__( 'I understand that this agent\'s user account is deleted and that this cannot be undone.', 'steadhand' )
+		);
+		submit_button( __( 'Delete agent', 'steadhand' ), 'delete', 'submit', false );
+		echo '</form>';
 	}
 
 	/**
@@ -699,6 +789,11 @@ final class AgentsScreen {
 		echo '<h3>' . esc_html__( 'Connections', 'steadhand' ) . '</h3>';
 		printf( '<p>%s</p>', esc_html__( 'Each connection is an Application Password that one app uses to sign in as this agent.', 'steadhand' ) );
 
+		// A disabled agent that still holds passwords: they no longer reach Steadhand, but nothing revoked them, so the warning says what to do.
+		if ( $can_edit && ! Capabilities::user_has( $agent, Capabilities::CONNECT ) && array() !== $passwords ) {
+			$this->notice( 'warning', __( 'This agent is disabled, but its connections were not revoked: they no longer reach Steadhand, but they still exist, so use Disable agent or Revoke all passwords to remove them.', 'steadhand' ) );
+		}
+
 		if ( array() === $passwords ) {
 			printf( '<p>%s</p>', esc_html__( 'This agent has no connections, so it cannot connect.', 'steadhand' ) );
 		} else {
@@ -738,7 +833,10 @@ final class AgentsScreen {
 			}
 		}
 
-		if ( $can_edit && $available ) {
+		if ( $can_edit && $available && ! Capabilities::user_has( $agent, Capabilities::CONNECT ) ) {
+			// AgentsHandler::add_password() refuses for a disabled agent, so the form is not printed.
+			printf( '<p>%s</p>', esc_html__( 'This agent is disabled. Enable it before adding a connection.', 'steadhand' ) );
+		} elseif ( $can_edit && $available ) {
 			$this->open_form( AgentsHandler::ACTION_ADD_PASSWORD, AgentsHandler::nonce_action( AgentsHandler::ACTION_ADD_PASSWORD, $agent->ID ), $agent->ID );
 			printf(
 				'<p><label>%s <input type="text" name="label" class="regular-text" maxlength="60" required></label></p>',
@@ -781,6 +879,34 @@ final class AgentsScreen {
 		}
 
 		return wp_date( get_option( 'date_format' ) . ' ' . get_option( 'time_format' ), $timestamp );
+	}
+
+	/**
+	 * An agent's status, for the list and the detail view. "Disabled" when steadhand_connect is not in effect, and "Disabled (N connections
+	 * remain)" when that agent still holds N Application Passwords. Otherwise
+	 * "No connections" when it holds no Application Password, and "Active" when it does.
+	 *
+	 * @param \WP_User $agent      The dedicated agent.
+	 * @param int      $connections The number of its Application Passwords.
+	 * @return string
+	 */
+	private static function status_text( \WP_User $agent, int $connections ): string {
+		// The effective value, not only the stored one: a dedicated agent with no stored value still connects through the role's grant, so it
+		// must not read as disabled. A stored false overrides the grant, so a disabled agent reads as disabled.
+		if ( ! Capabilities::user_has( $agent, Capabilities::CONNECT ) ) {
+			if ( $connections < 1 ) {
+				return __( 'Disabled', 'steadhand' );
+			}
+
+			// A disabled agent that still holds passwords: they do not reach Steadhand, but they were not revoked, so the count is shown.
+			return sprintf(
+				/* translators: %d: the number of Application Passwords a disabled agent still holds. */
+				_n( 'Disabled (%d connection remains)', 'Disabled (%d connections remain)', $connections, 'steadhand' ),
+				$connections
+			);
+		}
+
+		return 0 === $connections ? __( 'No connections', 'steadhand' ) : __( 'Active', 'steadhand' );
 	}
 
 	/**
