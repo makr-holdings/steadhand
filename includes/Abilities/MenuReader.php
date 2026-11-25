@@ -9,6 +9,8 @@ declare( strict_types=1 );
 
 namespace Steadhand\Abilities;
 
+use Steadhand\Pipeline\MenuRules;
+
 defined( 'ABSPATH' ) || exit;
 
 /**
@@ -79,29 +81,40 @@ final class MenuReader {
 	}
 
 	/**
-	 * The items of a classic menu in menu order, without items core marks invalid (a trashed or missing linked object).
+	 * The items of a classic menu in menu order: the published items and the draft ones, which are hidden from the public site.
+	 * Items that core would not print are left out: a trashed or missing linked object (an invalid item), and an orphaned draft
+	 * (MenuRules::ORPHANED_META). Each item is set up the way core sets up a menu item (wp_setup_nav_menu_item()), so its title and
+	 * URL are the ones the public menu prints, for a draft too. The menu_order of each kept item is then renumbered 1, 2, 3, as
+	 * wp_get_nav_menu_items() does, so item order is the position among the items returned.
 	 *
-	 * Core removes invalid items outside wp-admin (_is_valid_nav_menu_item() in wp_get_nav_menu_items()), and Steadhand
-	 * calls run there. This check is belt-and-braces, for a call made with is_admin() true. No test makes such a call,
-	 * so it is not covered by one.
+	 * This does not call wp_get_nav_menu_items(). That function returns nothing when the menu's stored item count is 0, and the
+	 * stored count counts only published items, so a menu whose items are all hidden would look empty.
 	 *
 	 * @param \WP_Term $menu Classic menu.
 	 * @return \WP_Post[]
 	 */
 	public static function items( \WP_Term $menu ): array {
-		$items = wp_get_nav_menu_items( $menu, array( 'update_post_term_cache' => false ) );
-		if ( ! is_array( $items ) ) {
-			return array();
-		}
-
-		$valid = array();
-		foreach ( $items as $item ) {
-			if ( $item instanceof \WP_Post && empty( $item->_invalid ) ) {
-				$valid[] = $item;
+		$kept = array();
+		foreach ( MenuRules::items_raw( $menu ) as $row ) {
+			if ( 'draft' === $row['status'] && MenuRules::is_orphaned( $row['id'] ) ) {
+				continue;
 			}
+
+			// A copy, so the menu_order change below never reaches the post object that get_posts() caches.
+			$item = wp_setup_nav_menu_item( clone $row['post'] );
+			if ( ! $item instanceof \WP_Post || ! empty( $item->_invalid ) ) {
+				continue;
+			}
+
+			$kept[] = $item;
 		}
 
-		return array_values( $valid );
+		$position = 1;
+		foreach ( $kept as $item ) {
+			$item->menu_order = $position++;
+		}
+
+		return $kept;
 	}
 
 	/**
@@ -125,7 +138,8 @@ final class MenuReader {
 	/**
 	 * One classic menu item, in the get-menu shape. Title and URL are what the menu shows: for an item linked to an
 	 * object, core derives them from that object, which is also what the front end prints. Nothing else about the
-	 * linked object is read.
+	 * linked object is read. hidden is true for a draft item, which the public site does not print, and false for a
+	 * published one.
 	 *
 	 * @param \WP_Post $item Valid item from items().
 	 * @return array<string, mixed>
@@ -146,6 +160,7 @@ final class MenuReader {
 			'target'      => PostReader::utf8( (string) ( $item->target ?? '' ) ),
 			'classes'     => self::classes( $item->classes ?? array() ),
 			'description' => TermReader::description( (string) ( $item->description ?? '' ) ),
+			'hidden'      => 'draft' === (string) $item->post_status,
 		);
 	}
 
@@ -197,6 +212,7 @@ final class MenuReader {
 				'items' => array( 'type' => 'string' ),
 			),
 			'description' => array( 'type' => 'string' ),
+			'hidden'      => array( 'type' => 'boolean' ),
 		);
 
 		return array(

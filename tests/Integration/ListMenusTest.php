@@ -198,4 +198,26 @@ final class ListMenusTest extends MenuToolTestCase {
 		$this->assertSame( (int) get_term( $main, 'nav_menu' )->count, $menus['Steadhand counted']['item_count'] );
 		$this->assertSame( 0, $setups, 'list-menus must not load and set up the items of any menu.' );
 	}
+
+	/**
+	 * The item_count is the stored count of published items, so a hidden (draft) item is not in it, while get-menu returns that item.
+	 */
+	public function test_a_hidden_item_is_not_in_item_count(): void {
+		$this->act_as_agent();
+		$menu = $this->classic_menu( 'Steadhand counted' );
+		$this->custom_item( $menu, 'Shown', 'https://example.test/shown/', 0, 1 );
+		$this->draft_custom_item( $menu, 'Hidden', 'https://example.test/hidden/', 0, 2 );
+
+		$listed = $this->by_name( $this->output( self::TOOL_NAME ) )['Steadhand counted'];
+		$items  = $this->output(
+			'steadhand-get-menu',
+			array(
+				'kind' => 'classic',
+				'id'   => $menu,
+			)
+		)['items'];
+
+		$this->assertSame( 1, $listed['item_count'] );
+		$this->assertCount( 2, $items, 'get-menu returns the hidden item too.' );
+	}
 }

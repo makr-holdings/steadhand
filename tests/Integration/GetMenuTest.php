@@ -107,7 +107,8 @@ final class GetMenuTest extends MenuToolTestCase {
 		$this->assertSame( 'https://example.test/team/', $items[2]['url'] );
 		$this->assertSame( get_term_link( $category ), $items[3]['url'] );
 		$this->assertSame( 'News desk', $items[3]['title'] );
-		$this->assertSame( array( 'id', 'title', 'url', 'type', 'object', 'object_id', 'parent', 'order', 'target', 'classes', 'description' ), array_keys( $items[0] ) );
+		$this->assertSame( array( 'id', 'title', 'url', 'type', 'object', 'object_id', 'parent', 'order', 'target', 'classes', 'description', 'hidden' ), array_keys( $items[0] ) );
+		$this->assertSame( array( false, false, false, false ), array_column( $items, 'hidden' ), 'Published items are not hidden.' );
 	}
 
 	public function test_an_item_whose_page_is_in_the_trash_is_skipped(): void {
@@ -354,6 +355,158 @@ final class GetMenuTest extends MenuToolTestCase {
 		$this->menu( 'block', 999999999 );
 
 		$this->assertFalse( Pipeline::is_running() );
+	}
+
+	/**
+	 * Calls get-menu for a classic menu and returns its items.
+	 *
+	 * @param int $menu Menu term ID.
+	 * @return array<int, array<string, mixed>>
+	 */
+	private function items_of( int $menu ): array {
+		return $this->output(
+			self::TOOL_NAME,
+			array(
+				'kind' => 'classic',
+				'id'   => $menu,
+			)
+		)['items'];
+	}
+
+	public function test_a_draft_item_is_returned_with_hidden_true_and_a_published_one_with_hidden_false(): void {
+		$this->act_as_agent();
+		$menu  = $this->classic_menu( 'Steadhand hidden flag' );
+		$live  = $this->custom_item( $menu, 'Shown', 'https://example.test/shown/', 0, 1 );
+		$draft = $this->draft_custom_item( $menu, 'Hidden', 'https://example.test/hidden/', 0, 2 );
+
+		$items = $this->items_of( $menu );
+
+		$this->assertSame( array( $live, $draft ), array_column( $items, 'id' ) );
+		$this->assertSame( array( false, true ), array_column( $items, 'hidden' ) );
+	}
+
+	/**
+	 * A menu whose stored published count is 0 still returns its drafts. Core's wp_get_nav_menu_items() would return nothing here.
+	 */
+	public function test_a_menu_whose_only_items_are_hidden_still_returns_them(): void {
+		$this->act_as_agent();
+		$menu  = $this->classic_menu( 'Steadhand all hidden' );
+		$draft = $this->draft_custom_item( $menu, 'Only hidden', 'https://example.test/only/', 0, 1 );
+
+		$output = $this->output(
+			self::TOOL_NAME,
+			array(
+				'kind' => 'classic',
+				'id'   => $menu,
+			)
+		);
+
+		$this->assertSame( array( $draft ), array_column( $output['items'], 'id' ) );
+		$this->assertTrue( $output['items'][0]['hidden'] );
+		$this->assertFalse( $output['truncated'] );
+	}
+
+	public function test_an_orphaned_draft_is_not_returned(): void {
+		$this->act_as_agent();
+		$menu     = $this->classic_menu( 'Steadhand orphan' );
+		$live     = $this->custom_item( $menu, 'Kept', 'https://example.test/kept/', 0, 1 );
+		$orphaned = $this->draft_custom_item( $menu, 'Orphaned', 'https://example.test/orphaned/', 0, 2 );
+		update_post_meta( $orphaned, '_menu_item_orphaned', (string) time() );
+
+		$this->assertSame( array( $live ), array_column( $this->items_of( $menu ), 'id' ) );
+	}
+
+	/**
+	 * A trashed item is not returned, whether it was published or a draft before it was trashed.
+	 */
+	public function test_a_trashed_item_is_not_returned(): void {
+		$this->act_as_agent();
+		$menu  = $this->classic_menu( 'Steadhand trashed item' );
+		$live  = $this->custom_item( $menu, 'Kept', 'https://example.test/kept/', 0, 1 );
+		$gone  = $this->custom_item( $menu, 'Gone', 'https://example.test/gone/', 0, 2 );
+		$draft = $this->draft_custom_item( $menu, 'Gone draft', 'https://example.test/gone-draft/', 0, 3 );
+		foreach ( array( $gone, $draft ) as $trashed ) {
+			wp_update_post(
+				array(
+					'ID'          => $trashed,
+					'post_status' => 'trash',
+				)
+			);
+		}
+
+		$this->assertSame( array( $live ), array_column( $this->items_of( $menu ), 'id' ) );
+	}
+
+	/**
+	 * A hidden item's title and URL are the ones a published item gets: for an item linked to a page, the page's title and permalink,
+	 * and for a custom link, its own title and URL.
+	 */
+	public function test_a_hidden_items_title_and_url_match_the_published_treatment(): void {
+		$this->act_as_agent();
+		$page   = $this->admin_post(
+			array(
+				'post_type'  => 'page',
+				'post_title' => 'Shared page',
+			)
+		);
+		$menu   = $this->classic_menu( 'Steadhand same treatment' );
+		$live   = wp_update_nav_menu_item(
+			$menu,
+			0,
+			array(
+				'menu-item-type'      => 'post_type',
+				'menu-item-object'    => 'page',
+				'menu-item-object-id' => $page,
+				'menu-item-status'    => 'publish',
+				'menu-item-position'  => 1,
+			)
+		);
+		$hidden = wp_update_nav_menu_item(
+			$menu,
+			0,
+			array(
+				'menu-item-type'      => 'post_type',
+				'menu-item-object'    => 'page',
+				'menu-item-object-id' => $page,
+				'menu-item-status'    => 'draft',
+				'menu-item-position'  => 2,
+			)
+		);
+		$custom = $this->draft_custom_item( $menu, 'Hidden &amp; <b>plain</b>', 'https://example.test/plain/', 0, 3 );
+
+		$items = array_column( $this->items_of( $menu ), null, 'id' );
+
+		$this->assertSame( 'Shared page', $items[ $hidden ]['title'] );
+		$this->assertSame( get_permalink( $page ), $items[ $hidden ]['url'] );
+		$this->assertSame( $items[ $live ]['title'], $items[ $hidden ]['title'] );
+		$this->assertSame( $items[ $live ]['url'], $items[ $hidden ]['url'] );
+		$this->assertSame( 'Hidden & plain', $items[ $custom ]['title'], 'The title is plain text, as for a published item.' );
+		$this->assertSame( 'https://example.test/plain/', $items[ $custom ]['url'] );
+		$this->assertFalse( $items[ $live ]['hidden'] );
+		$this->assertTrue( $items[ $hidden ]['hidden'] );
+	}
+
+	/**
+	 * A hidden item whose linked page is in the trash is left out, as a published one is.
+	 */
+	public function test_a_hidden_item_whose_page_is_in_the_trash_is_skipped(): void {
+		$this->act_as_agent();
+		$menu = $this->classic_menu( 'Steadhand hidden invalid' );
+		$kept = $this->draft_custom_item( $menu, 'Kept hidden', 'https://example.test/kept-hidden/', 0, 1 );
+		$gone = $this->admin_post( array( 'post_type' => 'page' ) );
+		wp_update_nav_menu_item(
+			$menu,
+			0,
+			array(
+				'menu-item-type'      => 'post_type',
+				'menu-item-object'    => 'page',
+				'menu-item-object-id' => $gone,
+				'menu-item-status'    => 'draft',
+			)
+		);
+		wp_trash_post( $gone );
+
+		$this->assertSame( array( $kept ), array_column( $this->items_of( $menu ), 'id' ) );
 	}
 
 	public function test_no_output_key_matches_a_secret_name_for_either_kind(): void {
