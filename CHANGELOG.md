@@ -6,6 +6,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). The
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-11-25
+
 ### Changed
 - The Agents screen has three views (SPEC section 4.1): the list of agents, which has no forms; one agent's detail (`agent=<id>`), with its capabilities, its connections and the link to its change-log entries; and the add form (`view=new`). A detail request for an ID that is not a dedicated agent shows the "not a dedicated agent" notice and the list, and nothing about that user.
 - Creating an agent sets its capabilities. The form has one checkbox for each offered capability, checked as the role's defaults say. Only offered capabilities are read from the form, and any other name is ignored. Each offered capability is written to the user as true or false before the Application Password is made, and read back. Every other Steadhand capability is written as false, so a grant something else gave the agent role never reaches a new agent. A refused create redraws the form with the choices as posted, not with the defaults. The final check compares the user's stored capabilities with the chosen ones, and a difference is refused and rolled back, with no password shown. A form without the capability marker keeps the role's defaults. Creating an agent does not fire `steadhand_agent_capabilities_changed`.

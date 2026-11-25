@@ -322,7 +322,7 @@ This action is public API. The [stability policy](#stability-policy) above appli
 Runs on the Agents screen's detail view of one dedicated agent (a user whose only role is `steadhand_agent`), after that agent's sections: its capabilities, its connections and the link to its change-log entries.
 
 - **Since:** 0.3.0.
-- **Changed:** unreleased (after 0.3.0). In 0.3.0 it ran once for each dedicated agent in the list. It now runs once, in the detail view of one agent. The name and the parameter are unchanged.
+- **Changed:** 0.3.1. In 0.3.0 it ran once for each dedicated agent in the list. It now runs once, in the detail view of one agent. The name and the parameter are unchanged.
 - **Type:** action.
 - **Parameter:** `$agent` (`WP_User`), the dedicated agent.
 - **When it runs:** once for each render of the detail view of a dedicated agent (`agent=<id>`), after the capability check has passed. That includes the response to a create or an add-password that shows the agent's detail. It does not run in the list view or the add view, for a user who holds the agent role and another role, for an ID that is not a dedicated agent, or for a viewer who is refused.
