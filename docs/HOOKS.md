@@ -321,7 +321,7 @@ This action is public API. The [stability policy](#stability-policy) above appli
 
 Runs after the Agents screen disables a dedicated agent.
 
-- **Since:** unreleased.
+- **Since:** 0.3.2.
 - **Type:** action.
 - **Parameter:** `$agent` (`WP_User`), the agent, read again after the disable was checked.
 - **When it runs:** once, after the agent's stored `steadhand_connect` reads back as false and the agent holds no Application Password. It does not run when the disable is refused or does not read back.
@@ -335,7 +335,7 @@ This action is public API. The [stability policy](#stability-policy) above appli
 
 Runs after the Agents screen enables a dedicated agent.
 
-- **Since:** unreleased.
+- **Since:** 0.3.2.
 - **Type:** action.
 - **Parameter:** `$agent` (`WP_User`), the agent, read again after the enable was checked.
 - **When it runs:** once, after the agent's stored `steadhand_connect` reads back as true. Enabling creates no Application Password, so the agent may hold none when this runs. It does not run when the enable is refused or does not read back.
@@ -349,7 +349,7 @@ This action is public API. The [stability policy](#stability-policy) above appli
 
 Runs after the Agents screen deletes a dedicated agent's user account.
 
-- **Since:** unreleased.
+- **Since:** 0.3.2.
 - **Type:** action.
 - **Parameters:** `$user_id` (`int`), the ID of the deleted user; `$user_login` (`string`), the login the user had. The user no longer exists, so there is no `WP_User` object.
 - **When it runs:** once, after a fresh read finds the user gone. It does not run when the delete is refused, or when the user still exists afterwards. A delete is refused before any change when the request is not confirmed or when posts or links are attributed to the agent. It can also be refused after the agent's connections were revoked, when content appears during the delete (`delete_has_content_revoked`) or a role is added (`not_agent_revoked`); then nothing is deleted and this action does not run.

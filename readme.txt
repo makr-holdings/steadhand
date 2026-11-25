@@ -4,7 +4,7 @@ Tags: mcp, ai, security, agents, audit-log
 Requires at least: 6.9
 Tested up to: 7.1
 Requires PHP: 8.1
-Stable tag: 0.3.1
+Stable tag: 0.3.2
 License: GPL-2.0-or-later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -71,7 +71,7 @@ Steadhand makes no calls to AI providers and sends no telemetry.
 1. Install and activate the MCP Adapter plugin.
 2. Install and activate Steadhand. WordPress will not activate it until the MCP Adapter is active. If the adapter is missing later, Steadhand shows a notice and offers no tools.
 3. In wp-admin, go to Steadhand, then Agents, and choose Add agent. Enter a username, tick the capabilities the agent may use, and enter a connection name for its first Application Password. The connection name appears in the change log. Use a new user for the agent, not an administrator account.
-4. Copy the Application Password when it is shown. It is shown once and cannot be shown again. If it is lost, revoke it and add another on the Agents screen.
+4. Copy the Application Password when it is shown, with the connection command printed below it. It is shown once and cannot be shown again. If it is lost, revoke it and add another on the Agents screen.
 5. In your MCP client, add a server at https://your-site.example/wp-json/steadhand/mcp, using your site's address. Use HTTP Basic authentication, with the agent's username and the Application Password.
 6. Ask the client to call steadhand-get-site-info. It returns the site name, its address and what the agent may do, which confirms the connection.
 
@@ -103,7 +103,7 @@ Thirty days by default. Old entries are removed when new entries are written, in
 
 = What happens when I deactivate Steadhand? =
 
-The access rules stop while Steadhand is inactive. Agent users and their Application Passwords remain, and their Application Passwords work as ordinary low-privilege credentials on the REST API and XML-RPC until they are revoked. To take a site out of service, revoke the agents' connections on the Agents screen while Steadhand is active, or uninstall Steadhand. Uninstalling removes the agent role and the change log, and revokes the Application Passwords of accounts whose only role was the agent role. It never deletes users.
+The access rules stop while Steadhand is inactive. Agent users and their Application Passwords remain, and their Application Passwords work as ordinary low-privilege credentials on the REST API and XML-RPC until they are revoked. To take a site out of service, disable the agents on the Agents screen while Steadhand is active, which revokes their connections, or uninstall Steadhand. Uninstalling removes the agent role and the change log, and revokes the Application Passwords of accounts whose only role was the agent role. It never deletes users.
 
 = Does it work on multisite? =
 
@@ -114,6 +114,12 @@ No, not in this version. Steadhand supports single sites only. On a network, the
 No. Steadhand never calls an AI provider and stores no AI keys. Content leaves the site only when an agent reads it through its MCP client, and what the client does with it depends on that client.
 
 == Changelog ==
+
+= 0.3.2 =
+* An agent can be disabled, enabled again, or deleted on its page. Disabling revokes every connection and keeps the user, its drafts and its change log entries. Deleting is offered only when no content is attributed to the agent.
+* An agent's page shows how to connect an MCP client, and a new connection's password comes with the finished command for Claude Code.
+* The list of agents shows each agent's status.
+* Creating an agent with Connect unticked is refused, and so is adding a connection to a disabled agent.
 
 = 0.3.1 =
 * The Agents screen has a list of agents, a page for each agent, and an add form.
@@ -145,6 +151,9 @@ No. Steadhand never calls an AI provider and stores no AI keys. Content leaves t
 The full changelog is in CHANGELOG.md in the plugin folder.
 
 == Upgrade Notice ==
+
+= 0.3.2 =
+Adds disable, enable and delete for agents, and connection instructions on the Agents screen.
 
 = 0.3.1 =
 The Agents screen is reworked into a list, a page for each agent and an add form. Creating an agent now sets its capabilities on the form.
