@@ -1092,6 +1092,7 @@ final class AgentsScreen {
 			Capabilities::WRITE_DRAFTS => __( 'Write drafts', 'steadhand' ),
 			Capabilities::PUBLISH      => __( 'Publish', 'steadhand' ),
 			Capabilities::MEDIA        => __( 'Media', 'steadhand' ),
+			Capabilities::TRASH        => __( 'Trash and restore', 'steadhand' ),
 			default                    => $capability,
 		};
 	}
@@ -1109,6 +1110,7 @@ final class AgentsScreen {
 			Capabilities::WRITE_DRAFTS => __( 'Create posts, which are always drafts, and edit drafts, pending and auto-draft posts. It cannot publish.', 'steadhand' ),
 			Capabilities::PUBLISH      => __( 'Edit and publish live posts (published, scheduled or private). This changes the public site.', 'steadhand' ),
 			Capabilities::MEDIA        => __( 'Upload media and set featured images. An uploaded file is public at once, at its uploads URL. This changes the public site.', 'steadhand' ),
+			Capabilities::TRASH        => __( 'Move posts and pages to the trash and restore the ones it trashed. It can never delete permanently. WordPress deletes trashed posts permanently after a number of days.', 'steadhand' ),
 			default                    => $capability,
 		};
 	}

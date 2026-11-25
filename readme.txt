@@ -51,13 +51,15 @@ Write:
 * Set a post's terms, from terms that already exist
 * Upload a JPEG or PNG image and set a featured image, with the media capability. Uploads are public at once.
 * Undo its own change to post text, terms or a featured image
+* Move a post or page to the trash and restore one it trashed, with the trash capability. It cannot delete permanently.
 
 = What an agent can never do while Steadhand is active =
 
 * Use the REST API, XML-RPC or wp-admin. Its credentials work only at the Steadhand endpoint.
 * Sign in with a password.
-* Manage users, roles, plugins or settings, delete, trash or restore a post or page, or run PHP, SQL or shell commands. No tool does these.
+* Manage users, roles, plugins or settings, delete a post or page permanently, or run PHP, SQL or shell commands. No tool does these.
 * Publish, schedule or make content private, unless an administrator turns on the publish capability for it. It is off by default.
+* Trash a post or page, or restore one, unless an administrator turns on the trash capability. It is off by default. WordPress itself deletes a trashed post for good after the site's trash period.
 * Connect with any account that holds a role besides the agent role, such as an administrator.
 
 = Requirements =
@@ -87,7 +89,7 @@ No. Only a user whose only role is the agent role can connect. Create an agent o
 
 = What can an agent change by default? =
 
-Drafts. A new agent can read content, create drafts, edit drafts of any author and set their terms. It cannot publish until an administrator turns on the publish capability, and it cannot upload images or set featured images until an administrator turns on the media capability. It cannot change menus, settings, users or plugins, and no tool deletes or trashes a post or page.
+Drafts. A new agent can read content, create drafts, edit drafts of any author and set their terms. It cannot publish until an administrator turns on the publish capability, and it cannot upload images or set featured images until an administrator turns on the media capability. It cannot change menus, settings, users or plugins, and no tool deletes a post or page. Trashing a post or page, or restoring one it trashed, needs the trash capability, which is off until an administrator turns it on. Restoring a draft also needs the drafts capability. A sticky post, the front page and the posts page cannot be trashed.
 
 = Can an agent publish? =
 

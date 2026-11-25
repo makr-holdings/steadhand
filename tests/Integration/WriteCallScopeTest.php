@@ -167,4 +167,93 @@ final class WriteCallScopeTest extends PostWriteTestCase {
 		$this->assertFalse( $probe->write_call, 'A read call is not a write call, however it is checked.' );
 		$this->assertFalse( $probe->edit_answer, 'edit_post is not mapped for a read call.' );
 	}
+
+	/**
+	 * Runs a probe as a call of its own name, through a Pipeline, and returns what run() returned.
+	 *
+	 * @param NamedProbe $probe The probe.
+	 * @return mixed
+	 */
+	private function run_probe( NamedProbe $probe ): mixed {
+		return ( new Pipeline( new SpyLogger() ) )->run( $probe, array() );
+	}
+
+	/**
+	 * Current_ability_name() is '' outside a call, and after a normal call the name is cleared again.
+	 */
+	public function test_current_ability_name_is_empty_after_a_normal_call(): void {
+		$this->act_as_agent();
+
+		$result = $this->run_probe( new NamedProbe( 'steadhand/get-post', static fn(): string => Pipeline::current_ability_name(), false ) );
+
+		$this->assertIsArray( $result );
+		$this->assertSame( 'steadhand/get-post', $result['answer'], 'The call sees its own name.' );
+		$this->assertSame( '', Pipeline::current_ability_name() );
+	}
+
+	/**
+	 * A call whose authorize_object() throws is refused, and the name is cleared on that exit path too.
+	 */
+	public function test_current_ability_name_is_empty_after_a_call_whose_authorize_object_throws(): void {
+		$this->act_as_agent();
+
+		try {
+			$this->run_probe( new NamedProbe( 'steadhand/trash-post', static fn(): string => 'never', true, true ) );
+		} catch ( \RuntimeException $e ) {
+			$this->assertStringContainsString( 'authorize_object', $e->getMessage() );
+		}
+
+		$this->assertSame( '', Pipeline::current_ability_name() );
+	}
+
+	/**
+	 * A call whose execute() throws leaves the name cleared.
+	 */
+	public function test_current_ability_name_is_empty_after_a_call_whose_execute_throws(): void {
+		$this->act_as_agent();
+
+		try {
+			$this->run_probe(
+				new NamedProbe(
+					'steadhand/get-post',
+					static function (): string {
+						throw new \RuntimeException( 'The probe throws in execute().' );
+					},
+					false
+				)
+			);
+		} catch ( \RuntimeException $e ) {
+			$this->assertStringContainsString( 'execute', $e->getMessage() );
+		}
+
+		$this->assertSame( '', Pipeline::current_ability_name() );
+	}
+
+	/**
+	 * Inside a nested call the name is the inner call's, and after the inner call returns it is the outer call's name again. After the
+	 * outer call it is cleared.
+	 */
+	public function test_current_ability_name_reports_the_inner_name_during_a_nested_call_and_the_outer_name_after_it(): void {
+		$this->act_as_agent();
+
+		$outer = $this->run_probe(
+			new NamedProbe(
+				'steadhand/trash-post',
+				function (): array {
+					$inner = $this->run_probe( new NamedProbe( 'steadhand/get-post', static fn(): string => Pipeline::current_ability_name(), false ) );
+
+					return array(
+						'inner' => $inner['answer'],
+						'outer' => Pipeline::current_ability_name(),
+					);
+				},
+				true
+			)
+		);
+
+		$this->assertIsArray( $outer );
+		$this->assertSame( 'steadhand/get-post', $outer['answer']['inner'], 'The inner call reports its own name.' );
+		$this->assertSame( 'steadhand/trash-post', $outer['answer']['outer'], 'After the inner call the outer name is back.' );
+		$this->assertSame( '', Pipeline::current_ability_name() );
+	}
 }

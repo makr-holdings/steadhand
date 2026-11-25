@@ -70,6 +70,8 @@ final class Registry {
 			new SetPostTerms(),
 			new UploadMedia(),
 			new SetFeaturedImage(),
+			new TrashPost(),
+			new RestorePost(),
 			new UndoChange( $this->change_log ),
 		);
 	}

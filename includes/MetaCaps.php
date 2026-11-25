@@ -11,6 +11,7 @@ namespace Steadhand;
 
 use Steadhand\Abilities\MediaReader;
 use Steadhand\Pipeline\Pipeline;
+use Steadhand\Pipeline\TrashRules;
 
 defined( 'ABSPATH' ) || exit;
 
@@ -26,8 +27,8 @@ defined( 'ABSPATH' ) || exit;
  * get-rendered, runs shortcodes and other code that may ask these questions, so inside a read they keep core's answer.
  * read_post is mapped in every Steadhand call.
  *
- * For a post that is missing or in the trash, every mapped capability is refused. A post whose type is not allowed is
- * refused too. An attachment is handled by the media rule for read_post and refused for the other three.
+ * For a post that is missing, every mapped capability is refused. For a post in the trash, every mapped capability is refused
+ * except delete_post inside steadhand/restore-post (see delete_post below). A post whose type is not allowed is refused too. An attachment is handled by the media rule for read_post and refused for the other three.
  *
  * A post type registered with map_meta_cap off is never allowed (PostTypes::allowed()), whatever the owner's filter says.
  * Core makes none of its per-post checks for such a type (author, status, privacy page), and for some of them core
@@ -38,7 +39,21 @@ defined( 'ABSPATH' ) || exit;
  * - edit_post: steadhand_write_drafts for a draft, pending or auto-draft; steadhand_publish for a published, scheduled
  *   or private post; refused for any other status (see edit_capability()).
  * - publish_post: steadhand_publish, whatever the status.
- * - delete_post: not mapped. Core's answer stands, and the agent role holds nothing that grants it, so it is refused.
+ * - delete_post: mapped only inside a write call of steadhand/trash-post or steadhand/restore-post (SPEC §5, §14.1). Everywhere
+ *   else core's answer stands, and the agent role holds nothing that grants it, so it is refused.
+ *   - trash-post, for a post that is not missing, not an attachment, of an allowed type, uses meta caps, is not in the trash
+ *     and is not auto-draft: steadhand_trash AND the edit capability for its status (edit_capability()), both required. For
+ *     a post core asks more of (a protected page, for one), or an auto-draft, or a status with no rule: refused. A protected
+ *     page (the front page, the posts page, or the privacy policy page, TrashRules::protected_page()) is refused too, so the
+ *     mapping refuses it even where core would not. A post in the trash is refused (do_not_allow), as for every other mapped
+ *     capability.
+ *   - restore-post, for a post in the trash that is not an attachment, is of an allowed type and uses meta caps, and that the
+ *     calling user trashed through steadhand/trash-post while that trash is still the current one (TrashRules::own_trash()):
+ *     steadhand_trash only, and only when core asks nothing more. Any other trashed post, whoever trashed it, is refused.
+ *     This is the one exception to the rule that a trashed post is refused for every mapped capability. read_post, edit_post
+ *     and publish_post stay refused for a trashed post in every call. For a post that is not in the trash, restore-post is
+ *     refused.
+ *   Anything else asked during either call is refused as well; the mapping never grants more than those capabilities.
  *
  * Core's extra requirements survive. The mapping replaces the post type's own capabilities (every value in
  * get_post_type_object()->cap), and never anything stricter. If core asks for anything else as well, for example
@@ -75,6 +90,12 @@ final class MetaCaps {
 	 * The capabilities that only a write call may map (see the class comment).
 	 */
 	private const WRITE_ONLY = array( 'edit_post', 'publish_post' );
+
+	/**
+	 * The two abilities that may be granted delete_post, and only inside their write call (see the class comment).
+	 */
+	private const TRASH_ABILITY   = 'steadhand/trash-post';
+	private const RESTORE_ABILITY = 'steadhand/restore-post';
 
 	/**
 	 * The Steadhand capability edit_post needs for a post in this status, or null when no status rule covers it. This is the
@@ -133,6 +154,12 @@ final class MetaCaps {
 			return $caps;
 		}
 
+		// delete_post is mapped only inside a write call of the two abilities that trash and restore a post. Everywhere else
+		// it keeps core's answer, which the agent role never satisfies.
+		if ( 'delete_post' === $cap && ! self::is_trash_call() ) {
+			return $caps;
+		}
+
 		$user = get_userdata( $user_id );
 		if ( ! $user instanceof \WP_User || ! Agents::is_agent( $user ) ) {
 			return $caps;
@@ -144,6 +171,11 @@ final class MetaCaps {
 		}
 
 		$post = get_post( $post_id );
+
+		if ( 'delete_post' === $cap ) {
+			return self::map_delete( $post instanceof \WP_Post ? $post : null, $caps, Pipeline::current_ability_name(), $user_id );
+		}
+
 		if ( ! $post instanceof \WP_Post || 'trash' === $post->post_status ) {
 			return array( 'do_not_allow' );
 		}
@@ -173,6 +205,70 @@ final class MetaCaps {
 		}
 
 		return $this->map_post( $cap, $post, $caps );
+	}
+
+	/**
+	 * Whether the innermost Steadhand call is a write call of steadhand/trash-post or steadhand/restore-post. Only then may
+	 * delete_post be mapped.
+	 *
+	 * @return bool
+	 */
+	private static function is_trash_call(): bool {
+		return Pipeline::is_write_call() && in_array( Pipeline::current_ability_name(), array( self::TRASH_ABILITY, self::RESTORE_ABILITY ), true );
+	}
+
+	/**
+	 * Maps delete_post inside a call of steadhand/trash-post or steadhand/restore-post (see the class comment). A missing post is
+	 * refused as do_not_allow. Every other refusal is NO_GRANT, so no filter can turn it into a grant.
+	 *
+	 * Restore grants delete_post only for a trashed post that $user_id trashed, and only while that trash is the current one
+	 * (TrashRules::own_trash()). The user is the one map() was asked about, not necessarily the current user. Trash refuses a
+	 * protected page (the front page, the posts page and the privacy policy page) at this layer too.
+	 *
+	 * @param \WP_Post|null $post     The post, or null when it is missing.
+	 * @param array         $caps     Core's answer.
+	 * @param string        $ability  The innermost ability's name.
+	 * @param int           $user_id  The user the check is about.
+	 * @return array
+	 */
+	private static function map_delete( ?\WP_Post $post, array $caps, string $ability, int $user_id ): array {
+		if ( null === $post ) {
+			return array( 'do_not_allow' );
+		}
+
+		if ( 'attachment' === $post->post_type || ! PostTypes::is_allowed( (string) $post->post_type ) || ! self::uses_meta_caps( $post ) ) {
+			return array( self::NO_GRANT );
+		}
+
+		if ( self::has_extra_requirement( $post, $caps ) ) {
+			return array( self::NO_GRANT );
+		}
+
+		// Restore grants only steadhand_trash. The status the post comes back to decides a second capability: steadhand_write_drafts for a
+		// draft or pending restore, and steadhand_publish for a live one. That is checked where the status is known, in
+		// RestorePost::authorize_object() and PostWriter::untrash(), and not here, because this layer is asked only for the post.
+		// Ownership is required here in every case, so the grant is for the agent's own trash alone.
+		if ( self::RESTORE_ABILITY === $ability ) {
+			$own = 'trash' === $post->post_status && TrashRules::own_trash( (int) $post->ID, $user_id );
+
+			return $own ? array( Capabilities::TRASH ) : array( self::NO_GRANT );
+		}
+
+		// steadhand/trash-post: a trashed post is refused as every other mapped capability is, and an auto-draft has no grant.
+		if ( 'trash' === $post->post_status ) {
+			return array( 'do_not_allow' );
+		}
+
+		if ( null !== TrashRules::protected_page( (int) $post->ID ) ) {
+			return array( self::NO_GRANT );
+		}
+
+		$needed = self::edit_capability( (string) $post->post_status );
+		if ( 'auto-draft' === $post->post_status || null === $needed ) {
+			return array( self::NO_GRANT );
+		}
+
+		return array( Capabilities::TRASH, $needed );
 	}
 
 	/**
@@ -263,7 +359,7 @@ final class MetaCaps {
 				return self::has_extra_requirement( $post, $caps ) ? array( self::NO_GRANT ) : array( Capabilities::PUBLISH );
 
 			default:
-				// delete_post: not mapped in M2. Core's answer stands.
+				// delete_post is mapped by map_delete(), never here. Core's answer stands for anything else.
 				return $caps;
 		}
 	}
