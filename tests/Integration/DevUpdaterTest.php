@@ -148,6 +148,8 @@ final class DevUpdaterTest extends TestCase {
 			self::API_PATH_PREFIX . 'commits'         => array( 200, array( $commit ) ),
 			self::API_PATH_PREFIX . 'contents/steadhand.php' => array( 404, array( 'message' => 'Not Found' ) ),
 			self::API_PATH_PREFIX . 'contents/CHANGELOG.md' => array( 404, array( 'message' => 'Not Found' ) ),
+			// The library asks for readme.txt because the installed plugin ships one. It is read from this repository, at the release's tag.
+			self::API_PATH_PREFIX . 'contents/readme.txt' => array( 404, array( 'message' => 'Not Found' ) ),
 		);
 	}
 
