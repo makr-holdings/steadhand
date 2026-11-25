@@ -754,7 +754,8 @@ final class PostWriter {
 	 * WordPress takes the status from its own stored record. That record must be exactly one row: with none or several, the post is
 	 * restored as a draft, whatever $status asks. If WordPress restores the post live when $status is not live (a filter on its
 	 * restore status, for one), the post is set to draft with a status-only save, which keeps the stored text. If that save does not
-	 * make it a draft, the post is left live and steadhand_update_partial is returned.
+	 * make it a draft, the post is left live and steadhand_update_partial is returned. This backstop runs before the slug save
+	 * (restore_empty_slug()), so that save is made on the status the post really has, and it is held to $status (hold_status()).
 	 *
 	 * @param int    $post_id The post ID.
 	 * @param string $status  The status to restore the post to.
@@ -808,9 +809,7 @@ final class PostWriter {
 			);
 		}
 
-		self::restore_empty_slug( $post_id );
-		self::forget_markers( $post_id );
-
+		// The backstop runs before the slug save, so the slug save sees the status the post has by then and cannot make a post live again.
 		$restored_as = $now;
 		if ( self::is_live( $now ) && ! self::is_live( $status ) ) {
 			$now = self::set_draft( $post_id );
@@ -826,6 +825,9 @@ final class PostWriter {
 				);
 			}
 		}
+
+		self::restore_empty_slug( $post_id, $status );
+		self::forget_markers( $post_id );
 
 		return array(
 			'status'      => $now,
@@ -872,18 +874,22 @@ final class PostWriter {
 	}
 
 	/**
-	 * Runs a save of one post with the save's status held to $status for that post only: a wp_insert_post_data filter at PHP_INT_MAX
-	 * sets the status whenever the save asks for another. The filter is removed in finally. Used for the restore itself and for the
-	 * slug save that follows it, so a filter that forces publish cannot make the post live during either one.
+	 * Runs a save of one post with its status held down, for that post only: a wp_insert_post_data filter at PHP_INT_MAX sets the
+	 * save's status to $status only when the save asks for a live status (publish, future or private) and $status is not live. In
+	 * every other case the filter returns the data unchanged. So it never raises a status, never overrides a live status the restore
+	 * asked for, and never touches a status that is not live, which another plugin may have chosen (a moderation plugin that lowers
+	 * a post to pending, for one). Core's date handling for a scheduled post is left to run. The filter is removed in finally.
+	 *
+	 * Used for the restore itself and for the slug save that follows it, with the status the restore asked for.
 	 *
 	 * @param int      $post_id Post ID.
-	 * @param string   $status  The status the save must keep.
+	 * @param string   $status  The status the restore asked for.
 	 * @param callable $step    The save.
 	 * @return mixed What the save returned.
 	 */
 	private static function hold_status( int $post_id, string $status, callable $step ): mixed {
 		$hold = static function ( array $data, array $postarr ) use ( $post_id, $status ): array {
-			if ( (int) ( $postarr['ID'] ?? 0 ) === $post_id && ( $data['post_status'] ?? null ) !== $status ) {
+			if ( (int) ( $postarr['ID'] ?? 0 ) === $post_id && ! self::is_live( $status ) && self::is_live( (string) ( $data['post_status'] ?? '' ) ) ) {
 				$data['post_status'] = $status;
 			}
 
@@ -903,18 +909,20 @@ final class PostWriter {
 	 * "__trashed" suffix it added at the trash, because it restores the stored slug only when that slug is not empty. Left alone, the
 	 * post would publish later under the slug "__trashed". The post is saved through keep_text_for(), so only its name changes.
 	 *
-	 * @param int $post_id Post ID.
+	 * It runs after the backstop in untrash(). Its save is held to $status, the status the restore asked for (see hold_status()).
+	 *
+	 * @param int    $post_id Post ID.
+	 * @param string $status  The status the restore asked for.
 	 */
-	private static function restore_empty_slug( int $post_id ): void {
+	private static function restore_empty_slug( int $post_id, string $status ): void {
 		$post = self::read_row( $post_id );
 		if ( null === $post || '__trashed' !== (string) $post->post_name ) {
 			return;
 		}
 
-		// The status is held to the one the restore gave the post, so this save cannot make it live (see hold_status()).
 		self::hold_status(
 			$post_id,
-			(string) $post->post_status,
+			$status,
 			static fn(): mixed => self::keep_text_for(
 				$post,
 				static fn(): mixed => wp_update_post(
@@ -1542,8 +1550,9 @@ final class PostWriter {
 	/**
 	 * Restores a trashed post to $status through wp_untrash_post(). Two layers keep the post from going live on the way (SPEC section 5):
 	 * - wp_untrash_post_status, which replaces WordPress's restored status for this one post;
-	 * - wp_insert_post_data at PHP_INT_MAX, which sets the save's status to $status for this one post whenever the save asks for
-	 *   another. It runs on the save itself, so a plugin's filter cannot make the post live before the demotion in untrash().
+	 * - wp_insert_post_data at PHP_INT_MAX (hold_status()), which sets the save's status to $status for this one post only when the save
+	 *   asks for a live status and $status is not live. It runs on the save itself, so a plugin's filter cannot make the post live
+	 *   before the demotion in untrash().
 	 * Both are removed in finally, and both apply only while wp_untrash_post() runs.
 	 *
 	 * The status the post has afterwards is returned as it is, so a caller can see when a filter that bypasses the second layer made

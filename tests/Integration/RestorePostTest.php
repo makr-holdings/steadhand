@@ -594,6 +594,9 @@ final class RestorePostTest extends TrashTestCase {
 
 		$this->assertIsArray( $result );
 		$this->assertContains( 'publish', $went_live, 'Control: the publish actions ran during the restore.' );
+		// The backstop runs before the slug save, which is held to the requested draft, so the live save happens once and the slug save
+		// does not make the post live again.
+		$this->assertSame( 1, count( array_keys( $went_live, 'publish', true ) ), 'A transition to publish fires once for the post.' );
 		$this->assertSame( 'draft', $result['status'] );
 		$this->assertSame( array( self::DEMOTED ), $result['warnings'] );
 		$this->assertSame( 'draft', $this->status_of( $post ) );
@@ -643,6 +646,154 @@ final class RestorePostTest extends TrashTestCase {
 	}
 
 	/**
+	 * The hold never raises a status and never overrides a plugin's choice for a status that is not live. An agent that may publish
+	 * restores a published post, and a plugin lowers the save to pending at a normal priority. The hold does not put publish back: the
+	 * post ends pending, the output says so, and no transition to publish fires for the post.
+	 */
+	public function test_a_plugin_that_lowers_a_live_restore_to_pending_is_not_overridden_by_the_hold(): void {
+		$post = $this->live_post();
+		$this->act_as_agent(
+			array(
+				Capabilities::TRASH   => true,
+				Capabilities::PUBLISH => true,
+			)
+		);
+		$this->trash( $post );
+		$this->on(
+			'wp_insert_post_data',
+			static function ( array $data, array $postarr ) use ( $post ): array {
+				if ( (int) ( $postarr['ID'] ?? 0 ) === $post && 'publish' === ( $data['post_status'] ?? '' ) ) {
+					$data['post_status'] = 'pending';
+				}
+
+				return $data;
+			},
+			10,
+			2
+		);
+
+		$went_to = array();
+		$this->on(
+			'transition_post_status',
+			static function ( string $new_status, string $old_status, \WP_Post $saved ) use ( &$went_to, $post ): void {
+				unset( $old_status );
+				if ( $saved->ID === $post ) {
+					$went_to[] = $new_status;
+				}
+			},
+			10,
+			3
+		);
+
+		$result = $this->restore( $post );
+
+		$this->assertIsArray( $result );
+		$this->assertSame( 'pending', $result['status'] );
+		$this->assertSame( 'pending', $this->status_of( $post ) );
+		$this->assertSame( array( 'WordPress restored the post as pending, not publish.' ), $result['warnings'] );
+		$this->assertNotContains( 'publish', $went_to, 'No transition to publish fires for the post.' );
+	}
+
+	/**
+	 * The hold leaves a status that is not live alone. A draft is restored for an agent that may write drafts, and a plugin changes the
+	 * save from draft to pending. Neither status is live, so the plugin's choice stands: the post ends pending, and the output reports it.
+	 */
+	public function test_a_plugin_that_changes_a_restored_draft_to_pending_keeps_pending(): void {
+		$post = $this->draft_post();
+		$this->act_as_agent( array( Capabilities::TRASH => true ) );
+		$this->trash( $post );
+		$this->on(
+			'wp_insert_post_data',
+			static function ( array $data, array $postarr ) use ( $post ): array {
+				if ( (int) ( $postarr['ID'] ?? 0 ) === $post && 'draft' === ( $data['post_status'] ?? '' ) ) {
+					$data['post_status'] = 'pending';
+				}
+
+				return $data;
+			},
+			10,
+			2
+		);
+
+		$result = $this->restore( $post );
+
+		$this->assertIsArray( $result );
+		$this->assertSame( 'pending', $result['status'] );
+		$this->assertSame( 'pending', $this->status_of( $post ) );
+		$this->assertSame( array( 'WordPress restored the post as pending, not draft.' ), $result['warnings'] );
+	}
+
+	/**
+	 * A scheduled post whose date has passed. The agent may publish, so the requested status is future, which is live, and the hold does
+	 * not act. Core's own handling of a future post with a past date then decides the status, and the restore must end where the same post
+	 * ends with only the wp_untrash_post_status filter, and not as future with a past date.
+	 */
+	public function test_a_scheduled_post_with_a_past_date_restores_where_core_puts_it(): void {
+		$agent = $this->act_as_agent(
+			array(
+				Capabilities::TRASH   => true,
+				Capabilities::PUBLISH => true,
+			)
+		);
+
+		$post    = $this->trashed_scheduled_post_with_past_date( $agent );
+		$control = $this->trashed_scheduled_post_with_past_date( $agent );
+
+		// Control: core alone. Only the wp_untrash_post_status filter is in place, as the first layer would put it.
+		wp_set_current_user( $this->admin_id() );
+		$to_future = static fn(): string => 'future';
+		add_filter( 'wp_untrash_post_status', $to_future, PHP_INT_MAX, 3 );
+		try {
+			wp_untrash_post( $control );
+		} finally {
+			remove_filter( 'wp_untrash_post_status', $to_future, PHP_INT_MAX );
+		}
+		$expected = $this->status_of( $control );
+		wp_set_current_user( $agent );
+
+		$result = $this->restore( $post );
+
+		$this->assertSame( 'publish', $expected, 'Control: core makes a future post with a past date published.' );
+		$this->assertIsArray( $result );
+		$this->assertSame( $expected, $result['status'] );
+		$this->assertSame( $expected, $this->status_of( $post ) );
+		$this->assertSame( array( 'WordPress restored the post as publish, not future.' ), $result['warnings'] );
+	}
+
+	/**
+	 * A trashed scheduled post, trashed by the agent, whose date is then moved into the past. It is made as a future post with a date ahead,
+	 * because core makes a future post with a past date published when it is saved. The date is changed with a direct update, which leaves the
+	 * modified time alone, so the post is still the agent's own trash.
+	 *
+	 * @param int $agent The agent, who trashes the post.
+	 * @return int The post ID.
+	 */
+	private function trashed_scheduled_post_with_past_date( int $agent ): int {
+		wp_set_current_user( $agent );
+		$post = $this->admin_post(
+			array(
+				'post_status'   => 'future',
+				'post_date'     => get_date_from_gmt( gmdate( 'Y-m-d H:i:s', time() + HOUR_IN_SECONDS ) ),
+				'post_date_gmt' => gmdate( 'Y-m-d H:i:s', time() + HOUR_IN_SECONDS ),
+			)
+		);
+		$this->trash( $post );
+
+		global $wpdb;
+		$wpdb->update( // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching -- Test fixture: a scheduled post whose date has passed, which the API cannot store.
+			$wpdb->posts,
+			array(
+				'post_date'     => get_date_from_gmt( gmdate( 'Y-m-d H:i:s', time() - HOUR_IN_SECONDS ) ),
+				'post_date_gmt' => gmdate( 'Y-m-d H:i:s', time() - HOUR_IN_SECONDS ),
+			),
+			array( 'ID' => $post )
+		);
+		clean_post_cache( $post );
+
+		return $post;
+	}
+
+	/**
 	 * A plugin's restore-status filter that makes the restore live, with the first layer in place, is held to the requested draft too.
 	 * This is the route the older test used. It now stays in the trash-to-draft path and does not reach the demotion.
 	 */
@@ -667,8 +818,12 @@ final class RestorePostTest extends TrashTestCase {
 
 	/**
 	 * A restore that WordPress completes with a trash record it has removed, but that Steadhand cannot store, is not reported as a plain
-	 * failure. Here the save keeps the post in the trash after WordPress removed its trash time (the post is still in the trash, with no
-	 * trash record). WordPress will not delete it, so Steadhand says so, clears its markers, and asks an administrator to act.
+	 * failure. Here the restore's own save fails, so wp_untrash_post() removes WordPress's trash time, makes no update, and returns false
+	 * before its untrashed_post action. The post stays in the trash with no trash record. WordPress will not delete it, so Steadhand says so,
+	 * clears its markers itself (no listener does, because untrashed_post did not fire), and asks an administrator to act.
+	 *
+	 * The failure is a real one in core: wp_update_post() returns 0 when wp_insert_post_empty_content is true for the save, which makes
+	 * wp_insert_post() return before it writes anything.
 	 */
 	public function test_a_restore_that_fails_after_wordpress_removed_its_trash_record_says_so_and_clears_the_markers(): void {
 		$post = $this->draft_post();
@@ -676,30 +831,27 @@ final class RestorePostTest extends TrashTestCase {
 		$this->trash( $post );
 		$this->assertSame( 1, $this->rows_of( $post, PostWriter::TRASH_CORE_TIME_META ), 'Control: WordPress holds its trash time.' );
 
-		$stay_in_trash = static function ( array $data, array $postarr ) use ( $post ): array {
-			if ( (int) ( $postarr['ID'] ?? 0 ) === $post ) {
-				$data['post_status'] = 'trash';
-			}
-
-			return $data;
-		};
+		$untrashed = 0;
 		$this->on(
-			'pre_untrash_post',
-			static function () use ( $stay_in_trash ): ?bool {
-				add_filter( 'wp_insert_post_data', $stay_in_trash, PHP_INT_MAX, 2 );
-
-				return null;
+			'untrashed_post',
+			static function () use ( &$untrashed ): void {
+				++$untrashed;
 			},
-			10,
-			3
+			PHP_INT_MAX,
+			2
 		);
 
+		$empty_save = static function ( bool $maybe_empty, array $postarr ) use ( $post ): bool {
+			return (int) ( $postarr['ID'] ?? 0 ) === $post ? true : $maybe_empty;
+		};
+		add_filter( 'wp_insert_post_empty_content', $empty_save, 10, 2 );
 		try {
 			$result = $this->restore( $post );
 		} finally {
-			remove_filter( 'wp_insert_post_data', $stay_in_trash, PHP_INT_MAX );
+			remove_filter( 'wp_insert_post_empty_content', $empty_save, 10 );
 		}
 
+		$this->assertSame( 0, $untrashed, 'The restore did not finish, so untrashed_post did not fire and no listener cleared the markers.' );
 		$this->assert_refused( $result, 'steadhand_update_partial', self::RESTORE_FAILED_PART_WAY );
 		$this->assertSame( 'trash', $this->status_of( $post ) );
 		$this->assertSame( 0, $this->rows_of( $post, PostWriter::TRASH_CORE_TIME_META ), 'WordPress removed its trash time.' );
@@ -816,7 +968,8 @@ final class RestorePostTest extends TrashTestCase {
 
 	/**
 	 * A copy of a trashed post, in the trash with every meta row of the original copied to it, is not restorable by the agent. The copy has a
-	 * new ID, so the post-ID marker refuses it, and its modified time is its own.
+	 * new ID, so the post-ID marker refuses it. Its modified time is set to the original's, so the other three conditions all hold, and the
+	 * post-ID marker is the only one that refuses it.
 	 */
 	public function test_a_copy_of_a_trashed_post_with_all_its_meta_cannot_be_restored_by_the_agent(): void {
 		$post  = $this->draft_post();
@@ -838,9 +991,37 @@ final class RestorePostTest extends TrashTestCase {
 		}
 		wp_set_current_user( $agent );
 
+		// The copy gets the original's modified time, so its modified-time marker matches its post_modified_gmt, and only the post-ID marker can refuse it.
+		$modified_gmt = $this->meta_of( $post, PostWriter::TRASH_MODIFIED_META );
+		global $wpdb;
+		$wpdb->update( // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching -- Test fixture: a copy whose modified time is the original's, which no API call sets.
+			$wpdb->posts,
+			array(
+				'post_modified'     => get_date_from_gmt( $modified_gmt ),
+				'post_modified_gmt' => $modified_gmt,
+			),
+			array( 'ID' => $copy )
+		);
+		clean_post_cache( $copy );
+		clean_post_cache( $post );
+		$this->assertSame( $modified_gmt, (string) get_post( $copy )->post_modified_gmt, 'Control: the copy has the original\'s modified time.' );
+		$this->assertSame( $modified_gmt, (string) get_post( $post )->post_modified_gmt, 'Control: the original still has the modified time its marker holds.' );
+
 		$this->assertSame( 1, $this->rows_of( $copy, PostWriter::TRASH_POST_META ), 'Control: the copy holds the original\'s post-ID marker.' );
 		$this->assertSame( (string) $post, $this->meta_of( $copy, PostWriter::TRASH_POST_META ), 'Control: the marker names the original.' );
 		$this->assertSame( 1, $this->rows_of( $copy, PostWriter::TRASHED_BY_META ), 'Control: one trashed-by row on the copy.' );
+
+		// The other three conditions of TrashRules::own_trash(), checked one by one, so the refusal can only come from the post-ID marker.
+		$this->assertSame( (string) $agent, $this->meta_of( $copy, PostWriter::TRASHED_BY_META ), 'Condition 1: the trashed-by marker is the agent.' );
+		$this->assertSame(
+			$this->meta_of( $copy, PostWriter::TRASH_CORE_TIME_META ),
+			$this->meta_of( $copy, PostWriter::TRASH_TIME_META ),
+			'Condition 2: the trash-time marker equals WordPress\'s trash time, with one row of each.'
+		);
+		$this->assertSame( 1, $this->rows_of( $copy, PostWriter::TRASH_CORE_TIME_META ) );
+		$this->assertSame( 1, $this->rows_of( $copy, PostWriter::TRASH_TIME_META ) );
+		$this->assertSame( $modified_gmt, $this->meta_of( $copy, PostWriter::TRASH_MODIFIED_META ), 'Condition 3: the modified-time marker equals the copy\'s post_modified_gmt.' );
+		$this->assertSame( 1, $this->rows_of( $copy, PostWriter::TRASH_MODIFIED_META ) );
 
 		$before = $this->state( $copy );
 		$this->assert_generic( $this->restore( $copy ) );
