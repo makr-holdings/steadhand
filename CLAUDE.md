@@ -20,6 +20,7 @@ uninstall.php
 README.md                # GitHub-facing docs; not shipped in release zips
 SECURITY.md              # disclosure policy (ships in release zips)
 CHANGELOG.md             # ships in release zips
+readme.txt               # WordPress.org readme; fills the View details popup; ships in release zips; Stable tag must equal the version
 includes/
   Plugin.php             # wiring
   Server.php             # MCP server registration + transport gate

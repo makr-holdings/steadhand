@@ -68,6 +68,14 @@ if [[ -n "$arg_version" ]]; then
 	fi
 fi
 
+# --- readme.txt -------------------------------------------------------------
+# readme.txt is the WordPress.org readme. It ships in both zips, and its Stable tag must be the version being built.
+[[ -f "$root/readme.txt" ]] || die "readme.txt is missing. It is the WordPress.org readme and must ship in both zips."
+readme_stable=$(sed -n -E '/^Stable tag:[[:space:]]*/{s/^Stable tag:[[:space:]]*([^[:space:]]+).*/\1/p;q}' "$root/readme.txt")
+if [[ "$readme_stable" != "$version" ]]; then
+	die "readme.txt has Stable tag '$readme_stable' but the version is $version. Set Stable tag to $version."
+fi
+
 # --- Output paths and cleanup -----------------------------------------------
 build_dir="$root/build"
 variant_dir="$build_dir/$variant"

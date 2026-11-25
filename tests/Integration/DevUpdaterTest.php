@@ -100,6 +100,7 @@ final class DevUpdaterTest extends TestCase {
 	/**
 	 * Mocks the GitHub endpoints the update check reads. The latest release is v9.9.9 with the given assets;
 	 * the tag list and branch also offer v9.9.9, with GitHub's source zipball, so a fallback would be visible.
+	 * The library also asks for readme.txt, because the installed plugin ships one; it is read from this repository at the release's tag.
 	 *
 	 * @param array<int, array<string, mixed>> $assets Release assets (name, url).
 	 */
@@ -126,9 +127,9 @@ final class DevUpdaterTest extends TestCase {
 		);
 
 		$this->http_routes = array(
-			self::API_PATH_PREFIX . 'releases/latest' => array( 200, $release ),
-			self::API_PATH_PREFIX . 'releases'        => array( 200, array( $release ) ),
-			self::API_PATH_PREFIX . 'tags'            => array(
+			self::API_PATH_PREFIX . 'releases/latest'     => array( 200, $release ),
+			self::API_PATH_PREFIX . 'releases'            => array( 200, array( $release ) ),
+			self::API_PATH_PREFIX . 'tags'                => array(
 				200,
 				array(
 					array(
@@ -138,16 +139,17 @@ final class DevUpdaterTest extends TestCase {
 					),
 				),
 			),
-			self::API_PATH_PREFIX . 'branches/master' => array(
+			self::API_PATH_PREFIX . 'branches/master'     => array(
 				200,
 				array(
 					'name'   => 'master',
 					'commit' => $commit,
 				),
 			),
-			self::API_PATH_PREFIX . 'commits'         => array( 200, array( $commit ) ),
+			self::API_PATH_PREFIX . 'commits'             => array( 200, array( $commit ) ),
 			self::API_PATH_PREFIX . 'contents/steadhand.php' => array( 404, array( 'message' => 'Not Found' ) ),
 			self::API_PATH_PREFIX . 'contents/CHANGELOG.md' => array( 404, array( 'message' => 'Not Found' ) ),
+			self::API_PATH_PREFIX . 'contents/readme.txt' => array( 404, array( 'message' => 'Not Found' ) ),
 		);
 	}
 

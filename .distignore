@@ -32,5 +32,5 @@
 /CLAUDE.md
 /docs
 # The GitHub README documents internal dev-build setup and names the updater's configuration
-# constant, so it does not ship. WordPress.org uses readme.txt (added in M4).
+# constant, so it does not ship. readme.txt is the WordPress.org readme and does ship (it is not listed here).
 /README.md
