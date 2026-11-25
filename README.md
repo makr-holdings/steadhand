@@ -309,7 +309,7 @@ To release, tag a commit on `main` with `vX.Y.Z`, for example `v0.1.0`. The `rel
 
 ## Dev builds on internal sites
 
-The dev zip includes an updater. It checks the latest GitHub release of this repository and installs the dev zip from that release's assets. The repository is public, so the updater needs no token. It is off until you turn it on. With neither constant below set, the update library is not loaded and nothing is hooked or printed.
+The dev zip includes an updater. It checks the latest GitHub release of this repository and installs the dev zip from that release's assets. The repository is public, so the updater needs no token. It is off until you turn it on. Until then the update library is not loaded and nothing is hooked or printed.
 
 Turn it on for each internal site by adding this to `wp-config.php`, above the line that says to stop editing:
 
@@ -321,8 +321,8 @@ The value must be the boolean `true`. `1`, `'true'` and any other value leave th
 
 How the updater handles the download:
 
-- It installs only the `steadhand-dev-X.Y.Z.zip` release asset, from `https://github.com/makr-holdings/steadhand/releases/download/`. It never installs GitHub's source archive, which has no `vendor/` folder. A release without the asset is skipped.
-- It sends no credentials. GitHub limits requests without a token to 60 an hour for each IP address. On a server that shares its address with other sites, an update check can fail for that reason. It is tried again at the next check.
+- It installs only the `steadhand-dev-X.Y.Z.zip` release asset, from `https://github.com/makr-holdings/steadhand/releases/download/vX.Y.Z/`. The version in the release tag, in the zip's name and in the plugin header at that tag must all be the same, or the release is skipped. It never installs GitHub's source archive, which has no `vendor/` folder. A release without the asset is skipped.
+- It sends no credentials. GitHub limits requests without a token to 60 an hour for each IP address. On a server that shares its address with other sites, an update check can fail for that reason. A pending update is then hidden until a check succeeds. Checks run every 12 hours, and **Check for updates** on the Plugins screen runs one at once.
 
 Know this risk before you turn it on:
 
@@ -330,11 +330,11 @@ Know this risk before you turn it on:
 
 ### Sites that still have a token
 
-Before the repository was public, the updater needed a GitHub token in the `STEADHAND_DEV_GITHUB_TOKEN` constant. A site that still defines it keeps updating as before: the updater stays on and sends the token to this repository's GitHub API. When the token expires or is revoked, GitHub refuses those requests and updates stop.
+Before the repository was public, the updater needed a GitHub token in the `STEADHAND_DEV_GITHUB_TOKEN` constant. A site that defines it, and not `STEADHAND_DEV_UPDATES`, keeps updating as before: the updater stays on and sends the token to this repository's GitHub API. When the token expires or is revoked, GitHub refuses those requests and updates stop.
 
 The token is no longer needed. On each such site:
 
-1. Add `define( 'STEADHAND_DEV_UPDATES', true );` to `wp-config.php`.
+1. Add `define( 'STEADHAND_DEV_UPDATES', true );` to `wp-config.php`. From then on the updater sends no token, even while the token constant is still defined.
 2. Remove the `STEADHAND_DEV_GITHUB_TOKEN` line.
 3. Revoke the token on GitHub.
 

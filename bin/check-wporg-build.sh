@@ -38,6 +38,7 @@ CONTENT_PATTERNS=(
 	'YahnisElsts'
 	'PucFactory'
 	'Puc_v[0-9]'
+	# The dev updater's constant names must not appear in anything that ships in the WordPress.org zip, including CHANGELOG.md and readme.txt.
 	'STEADHAND_DEV_GITHUB_TOKEN'
 	'STEADHAND_DEV_UPDATES'
 	'update_checker'

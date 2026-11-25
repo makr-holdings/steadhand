@@ -217,16 +217,6 @@ final class DevUpdaterTest extends TestCase {
 		$this->assertSame( $hooks_before, $this->hook_counts() );
 	}
 
-	public function test_create_checker_with_an_empty_token_builds_a_tokenless_checker(): void {
-		$this->load_library();
-
-		$checker = Updater::create_checker( '' );
-
-		$this->assertNotNull( $checker, 'create_checker() returned null without a token; the library class may be unavailable.' );
-		$this->assertSame( 'steadhand', $checker->slug );
-		$this->assertFalse( $checker->getVcsApi()->isAuthenticationEnabled(), 'A tokenless checker must not enable authentication.' );
-	}
-
 	public function test_tokenless_checker_is_for_the_steadhand_slug_with_dev_zip_assets_and_no_authentication(): void {
 		$this->load_library();
 
@@ -576,6 +566,7 @@ final class DevUpdaterTest extends TestCase {
 
 		$info               = new \YahnisElsts\PluginUpdateChecker\v5p7\Plugin\PluginInfo();
 		$info->download_url = $url;
+		$info->version      = '1.2.3';
 
 		$this->assertNull( $this->apply_request_info_filter( $checker, $info ), 'A tokenless download outside the public pattern was not dropped: ' . $url );
 	}
@@ -587,6 +578,7 @@ final class DevUpdaterTest extends TestCase {
 
 		$info               = new \YahnisElsts\PluginUpdateChecker\v5p7\Plugin\PluginInfo();
 		$info->download_url = 'https://github.com/makr-holdings/steadhand/releases/download/v1.2.3/steadhand-dev-1.2.3.zip';
+		$info->version      = '1.2.3';
 
 		$this->assertSame( $info, $this->apply_request_info_filter( $checker, $info ), 'A correct public download URL was dropped.' );
 	}
@@ -628,6 +620,264 @@ final class DevUpdaterTest extends TestCase {
 		$asset               = new \YahnisElsts\PluginUpdateChecker\v5p7\Plugin\PluginInfo();
 		$asset->download_url = self::ASSET_URL_PREFIX . '123';
 		$this->assertSame( $asset, $this->apply_request_info_filter( $checker, $asset ), 'With a token, the API asset URL was dropped.' );
+	}
+
+	/**
+	 * The tag and the zip name must name the same version, so a zip whose name differs from its tag is dropped.
+	 */
+	public function test_tokenless_filter_drops_a_tag_and_zip_version_mismatch(): void {
+		$this->load_library();
+		$checker = Updater::create_checker( '' );
+		$this->assertNotNull( $checker, 'create_checker() returned null without a token; the library class may be unavailable.' );
+
+		$info               = new \YahnisElsts\PluginUpdateChecker\v5p7\Plugin\PluginInfo();
+		$info->download_url = 'https://github.com/makr-holdings/steadhand/releases/download/v9.9.9/steadhand-dev-0.1.0.zip';
+		$info->version      = '9.9.9';
+
+		$this->assertNull( $this->apply_request_info_filter( $checker, $info ), 'A tag and zip name with different versions were not dropped.' );
+	}
+
+	public function test_tokenless_filter_drops_an_info_version_that_differs_from_the_url(): void {
+		$this->load_library();
+		$checker = Updater::create_checker( '' );
+		$this->assertNotNull( $checker, 'create_checker() returned null without a token; the library class may be unavailable.' );
+
+		$info               = new \YahnisElsts\PluginUpdateChecker\v5p7\Plugin\PluginInfo();
+		$info->download_url = 'https://github.com/makr-holdings/steadhand/releases/download/v1.2.3/steadhand-dev-1.2.3.zip';
+		$info->version      = '9.9.9';
+
+		$this->assertNull( $this->apply_request_info_filter( $checker, $info ), 'An info version that differs from the URL version was not dropped.' );
+	}
+
+	public function test_tokenless_filter_drops_an_info_without_a_version(): void {
+		$this->load_library();
+		$checker = Updater::create_checker( '' );
+		$this->assertNotNull( $checker, 'create_checker() returned null without a token; the library class may be unavailable.' );
+
+		$info               = new \stdClass();
+		$info->download_url = 'https://github.com/makr-holdings/steadhand/releases/download/v1.2.3/steadhand-dev-1.2.3.zip';
+
+		$this->assertNull( $this->apply_request_info_filter( $checker, $info ), 'An info without a version was not dropped.' );
+	}
+
+	/**
+	 * Versions on the info object that are not strings.
+	 *
+	 * @return array<string, array{0: mixed}>
+	 */
+	public static function versions_that_are_not_strings(): array {
+		return array(
+			'null'  => array( null ),
+			'int'   => array( 123 ),
+			'array' => array( array( '1.2.3' ) ),
+		);
+	}
+
+	/**
+	 * A version that is not a string never matches, so the download is dropped.
+	 *
+	 * @dataProvider versions_that_are_not_strings
+	 * @param mixed $version The version on the info object.
+	 */
+	public function test_tokenless_filter_drops_a_non_string_version( mixed $version ): void {
+		$this->load_library();
+		$checker = Updater::create_checker( '' );
+		$this->assertNotNull( $checker, 'create_checker() returned null without a token; the library class may be unavailable.' );
+
+		$info               = new \YahnisElsts\PluginUpdateChecker\v5p7\Plugin\PluginInfo();
+		$info->download_url = 'https://github.com/makr-holdings/steadhand/releases/download/v1.2.3/steadhand-dev-1.2.3.zip';
+		$info->version      = $version;
+
+		$this->assertNull( $this->apply_request_info_filter( $checker, $info ), 'A non-string version was not dropped.' );
+	}
+
+	public function test_is_allowed_download_ignores_the_version_with_a_token_and_refuses_non_strings(): void {
+		$asset = self::ASSET_URL_PREFIX . '123';
+		$this->assertTrue( Updater::is_allowed_download( $asset, false, '0.0.1' ), 'With a token the version must not matter.' );
+		$this->assertTrue( Updater::is_allowed_download( $asset, false ), 'With a token the version must not matter.' );
+		$this->assertFalse( Updater::is_allowed_download( null, false ), 'A non-string URL was allowed.' );
+		$this->assertFalse( Updater::is_allowed_download( null, true, '1.2.3' ), 'A non-string URL was allowed without a token.' );
+	}
+
+	/**
+	 * Replaces the mocked remote steadhand.php at the tag, so the test controls its Version header.
+	 *
+	 * @param string $version Version in the header.
+	 */
+	private function mock_remote_plugin_header( string $version ): void {
+		$source = "<?php\n/**\n * Plugin Name: Steadhand\n * Version: {$version}\n */\n";
+
+		$this->http_routes[ self::API_PATH_PREFIX . 'contents/steadhand.php' ] = array(
+			200,
+			array(
+				'content'  => base64_encode( $source ), // phpcs:ignore WordPress.PHP.DiscouragedPHPFunctions.obfuscation_base64_encode -- Builds a mocked GitHub file body.
+				'encoding' => 'base64',
+			),
+		);
+	}
+
+	public function test_tokenless_release_whose_remote_version_header_differs_from_the_tag_is_not_offered(): void {
+		$this->load_library();
+		$this->mock_github_release(
+			array(
+				array(
+					'name' => 'steadhand-dev-9.9.9.zip',
+					'url'  => self::ASSET_URL_PREFIX . '123',
+				),
+			)
+		);
+		$this->mock_remote_plugin_header( '9.9.8' );
+
+		$checker = Updater::create_checker( '' );
+		$this->assertNotNull( $checker, 'create_checker() returned null without a token; the library class may be unavailable.' );
+
+		$update = $checker->checkForUpdates();
+
+		$this->assert_no_zipball_offered( $update );
+		$this->assertNull( $update, 'A release whose steadhand.php Version header differs from its tag was offered.' );
+		$this->assert_only_latest_release_consulted();
+		$this->assert_no_unmocked_http_requests();
+		$this->assertSame( array(), $this->requests_with_authorization(), 'The tokenless update check sent an Authorization header.' );
+	}
+
+	public function test_tokenless_release_whose_remote_version_header_matches_the_tag_is_offered(): void {
+		$this->load_library();
+		$this->mock_github_release(
+			array(
+				array(
+					'name' => 'steadhand-dev-9.9.9.zip',
+					'url'  => self::ASSET_URL_PREFIX . '123',
+				),
+			)
+		);
+		$this->mock_remote_plugin_header( '9.9.9' );
+
+		$checker = Updater::create_checker( '' );
+		$this->assertNotNull( $checker, 'create_checker() returned null without a token; the library class may be unavailable.' );
+
+		$update = $checker->checkForUpdates();
+
+		$this->assertNotNull( $update, 'A release whose steadhand.php Version header matches its tag was not offered.' );
+		$this->assertSame( '9.9.9', $update->version );
+		$this->assertSame( 'https://github.com/makr-holdings/steadhand/releases/download/v9.9.9/steadhand-dev-9.9.9.zip', $update->download_url );
+		$this->assert_no_unmocked_http_requests();
+	}
+
+	/**
+	 * Stores an update in the state option as an earlier check would have, without running any request filter.
+	 *
+	 * @param string $download_url Download URL of the cached update.
+	 * @param string $version      Version of the cached update.
+	 */
+	private function seed_cached_update( string $download_url, string $version ): void {
+		$update = \YahnisElsts\PluginUpdateChecker\v5p7\Plugin\Update::fromObject(
+			(object) array(
+				'slug'         => 'steadhand',
+				'version'      => $version,
+				'download_url' => $download_url,
+			)
+		);
+		$store  = new \YahnisElsts\PluginUpdateChecker\v5p7\StateStore( 'external_updates-steadhand' );
+		$store->setUpdate( $update )->save();
+	}
+
+	public function test_tokenless_checker_drops_a_cached_api_asset_update(): void {
+		$this->load_library();
+		$this->seed_cached_update( self::ASSET_URL_PREFIX . '123', '9.9.9' );
+
+		$checker = Updater::create_checker( '' );
+		$this->assertNotNull( $checker, 'create_checker() returned null without a token; the library class may be unavailable.' );
+
+		$this->assertNull( $checker->getUpdateState()->getUpdate(), 'The tokenless checker kept a cached API asset update.' );
+	}
+
+	public function test_token_checker_drops_a_cached_github_download_update(): void {
+		$this->load_library();
+		$this->seed_cached_update( 'https://github.com/makr-holdings/steadhand/releases/download/v9.9.9/steadhand-dev-9.9.9.zip', '9.9.9' );
+
+		$checker = Updater::create_checker( self::DUMMY_TOKEN );
+		$this->assertNotNull( $checker, 'create_checker() returned null with a token; the library class may be unavailable.' );
+
+		$this->assertNull( $checker->getUpdateState()->getUpdate(), 'The token checker kept a cached github.com download update.' );
+	}
+
+	/**
+	 * A cached update that is valid for the mode is kept, and the state option is not rewritten.
+	 */
+	public function test_a_cached_update_valid_for_the_mode_is_kept_and_not_rewritten(): void {
+		$this->load_library();
+		$this->seed_cached_update( 'https://github.com/makr-holdings/steadhand/releases/download/v9.9.9/steadhand-dev-9.9.9.zip', '9.9.9' );
+		$before = get_site_option( 'external_updates-steadhand' );
+
+		$checker = Updater::create_checker( '' );
+		$this->assertNotNull( $checker, 'create_checker() returned null without a token; the library class may be unavailable.' );
+
+		$cached = $checker->getUpdateState()->getUpdate();
+		$this->assertNotNull( $cached, 'A valid cached update for the tokenless mode was dropped.' );
+		$this->assertSame( 'https://github.com/makr-holdings/steadhand/releases/download/v9.9.9/steadhand-dev-9.9.9.zip', $cached->download_url );
+		$this->assertEquals( $before, get_site_option( 'external_updates-steadhand' ), 'The state option was rewritten although the cached update was valid.' );
+	}
+
+	public function test_a_cached_api_asset_update_is_kept_with_a_token(): void {
+		$this->load_library();
+		$this->seed_cached_update( self::ASSET_URL_PREFIX . '123', '9.9.9' );
+
+		$checker = Updater::create_checker( self::DUMMY_TOKEN );
+		$this->assertNotNull( $checker, 'create_checker() returned null with a token; the library class may be unavailable.' );
+
+		$this->assertNotNull( $checker->getUpdateState()->getUpdate(), 'A valid cached API asset update was dropped by the token checker.' );
+	}
+
+	/**
+	 * Callbacks on the hook, by function value. Used to find what building a checker added.
+	 *
+	 * @param string $hook Hook name.
+	 * @return array<int, mixed>
+	 */
+	private function callbacks_on( string $hook ): array {
+		$wp_hook = $GLOBALS['wp_filter'][ $hook ] ?? null;
+		if ( ! $wp_hook instanceof WP_Hook ) {
+			return array();
+		}
+		$functions = array();
+		foreach ( $wp_hook->callbacks as $callbacks ) {
+			foreach ( $callbacks as $callback ) {
+				$functions[] = $callback['function'];
+			}
+		}
+		return $functions;
+	}
+
+	/**
+	 * Building a tokenless checker adds no download, redirect or request-args callback that Updater owns. The library's
+	 * own constructor and download hooks are allowed: its download filter adds an Authorization header only when
+	 * authentication is enabled, which the flow tests above check never happens for the tokenless checker.
+	 */
+	public function test_tokenless_checker_adds_no_download_or_redirect_hooks_of_its_own(): void {
+		$this->load_library();
+		$hooks = array( 'upgrader_pre_download', 'pre_http_request', 'http_request_redirection_count', 'http_request_args', 'http_request_host_is_external' );
+
+		$before = array();
+		foreach ( $hooks as $hook ) {
+			$before[ $hook ] = $this->callbacks_on( $hook );
+		}
+		$checker = Updater::create_checker( '' );
+		$this->assertNotNull( $checker, 'create_checker() returned null without a token; the library class may be unavailable.' );
+
+		foreach ( $hooks as $hook ) {
+			$added = array_values(
+				array_filter(
+					$this->callbacks_on( $hook ),
+					static fn( $callback ): bool => ! in_array( $callback, $before[ $hook ], true )
+				)
+			);
+			foreach ( $added as $callback ) {
+				$owned_by_library = is_array( $callback )
+					&& ( ( $callback[0] ?? null ) instanceof \YahnisElsts\PluginUpdateChecker\v5p7\Plugin\UpdateChecker
+						|| ( $callback[0] ?? null ) instanceof \YahnisElsts\PluginUpdateChecker\v5p7\Vcs\Api );
+				$this->assertTrue( $owned_by_library, 'The tokenless checker added a callback of its own to ' . $hook . '.' );
+			}
+		}
 	}
 
 	/**
@@ -798,11 +1048,151 @@ final class DevUpdaterTest extends TestCase {
 		$this->assertSame( $sentinel, get_option( 'external_updates-steadhand', $sentinel ), 'register() stored update state without a token.' );
 	}
 
+	/**
+	 * Values of the opt-in constant that are not boolean true, which must not load anything.
+	 *
+	 * @return array<string, array{0: mixed}>
+	 */
+	public static function non_boolean_true_opt_in_values(): array {
+		return array(
+			'int 1'       => array( 1 ),
+			'string true' => array( 'true' ),
+		);
+	}
+
+	/**
+	 * Each case defines the constant in its own process, so it never reaches the shared test process.
+	 *
+	 * @runInSeparateProcess
+	 * @preserveGlobalState disabled
+	 * @dataProvider non_boolean_true_opt_in_values
+	 * @param mixed $value The value the opt-in constant is defined with.
+	 */
+	public function test_opt_in_that_is_not_boolean_true_loads_nothing( mixed $value ): void {
+		$this->define_in_this_process( Updater::OPT_IN_CONSTANT, $value );
+		$hooks_before = $this->hook_counts();
+
+		ob_start();
+		Updater::register();
+		$output = (string) ob_get_clean();
+
+		$this->assertSame( '', $output );
+		$this->assertSame( array(), $this->loaded_library_files(), 'register() loaded the library for a non-true opt-in.' );
+		$this->assertNull( $this->find_checker_in_hooks(), 'register() built a checker for a non-true opt-in.' );
+		$this->assertSame( $hooks_before, $this->hook_counts(), 'register() hooked something for a non-true opt-in.' );
+	}
+
+	/**
+	 * Defines the opt-in constant in its own process, so it never reaches the shared test process.
+	 *
+	 * @runInSeparateProcess
+	 * @preserveGlobalState disabled
+	 */
+	public function test_opt_in_true_loads_the_library_and_builds_a_tokenless_checker(): void {
+		$this->define_in_this_process( Updater::OPT_IN_CONSTANT, true );
+
+		ob_start();
+		Updater::register();
+		$output = (string) ob_get_clean();
+
+		$this->assertSame( '', $output );
+		$this->assertNotSame( array(), $this->loaded_library_files(), 'register() did not load the library for the opt-in.' );
+		$checker = $this->find_checker_in_hooks();
+		$this->assertNotNull( $checker, 'register() built no checker for the opt-in.' );
+		$this->assertFalse( $checker->getVcsApi()->isAuthenticationEnabled(), 'The opt-in checker enabled authentication.' );
+	}
+
+	/**
+	 * With both constants defined, the checker is tokenless: the token is never sent, not even in a request header.
+	 *
+	 * @runInSeparateProcess
+	 * @preserveGlobalState disabled
+	 */
+	public function test_opt_in_with_a_token_also_defined_is_tokenless_and_never_sends_the_token(): void {
+		$this->define_in_this_process( Updater::OPT_IN_CONSTANT, true );
+		$this->define_in_this_process( Updater::TOKEN_CONSTANT, self::DUMMY_TOKEN );
+
+		ob_start();
+		Updater::register();
+		$output = (string) ob_get_clean();
+
+		$this->assertSame( '', $output );
+		$checker = $this->find_checker_in_hooks();
+		$this->assertNotNull( $checker, 'register() built no checker with both constants defined.' );
+		$this->assertFalse( $checker->getVcsApi()->isAuthenticationEnabled(), 'The checker authenticated although the opt-in is true.' );
+
+		$this->mock_github_release(
+			array(
+				array(
+					'name' => 'steadhand-dev-9.9.9.zip',
+					'url'  => self::ASSET_URL_PREFIX . '123',
+				),
+			)
+		);
+		$update = $checker->checkForUpdates();
+
+		$this->assertNotNull( $update, 'The tokenless checker did not offer the dev zip.' );
+		$this->assertSame( 'https://github.com/makr-holdings/steadhand/releases/download/v9.9.9/steadhand-dev-9.9.9.zip', $update->download_url );
+		$this->assert_no_unmocked_http_requests();
+		$this->assertSame( array(), $this->requests_with_authorization(), 'An Authorization header was sent.' );
+		foreach ( $this->http_log as $request ) {
+			foreach ( $request['headers'] as $value ) {
+				$this->assertStringNotContainsString( self::DUMMY_TOKEN, $value, 'The token was sent in a request header.' );
+			}
+		}
+	}
+
 	public function test_asset_pattern_matches_only_the_dev_zip(): void {
 		$this->assertMatchesRegularExpression( Updater::ASSET_PATTERN, 'steadhand-dev-0.1.0.zip' );
 		$this->assertDoesNotMatchRegularExpression( Updater::ASSET_PATTERN, 'steadhand-0.1.0.zip' );
 		$this->assertDoesNotMatchRegularExpression( Updater::ASSET_PATTERN, 'steadhand-dev-0.1.0.zip.exe' );
 		$this->assertDoesNotMatchRegularExpression( Updater::ASSET_PATTERN, "steadhand-dev-0.1.0.zip\n" );
+	}
+
+	/**
+	 * Defines a constant in this process. Only the tests marked as running in their own process call it.
+	 *
+	 * @param string $name  Constant name.
+	 * @param mixed  $value Constant value.
+	 */
+	private function define_in_this_process( string $name, mixed $value ): void {
+		define( $name, $value ); // phpcs:ignore WordPress.NamingConventions.PrefixAllGlobals.VariableConstantNameFound -- The name is the updater's own prefixed constant, and only a test in its own process calls this.
+	}
+
+	/**
+	 * Library files loaded in this process that belong to the bundled update checker.
+	 *
+	 * @return array<int, string>
+	 */
+	private function loaded_library_files(): array {
+		return array_values(
+			array_filter(
+				get_included_files(),
+				static fn( string $file ): bool => str_ends_with( $file, '/includes/Dev/vendor/autoload.php' )
+			)
+		);
+	}
+
+	/**
+	 * The checker that register() built. The library keeps no reference to it, but its own hooks hold one.
+	 *
+	 * @return object|null The checker, or null when no checker's hook is installed.
+	 */
+	private function find_checker_in_hooks(): ?object {
+		foreach ( $GLOBALS['wp_filter'] as $wp_hook ) {
+			if ( ! $wp_hook instanceof WP_Hook ) {
+				continue;
+			}
+			foreach ( $wp_hook->callbacks as $callbacks ) {
+				foreach ( $callbacks as $callback ) {
+					$function = $callback['function'];
+					if ( is_array( $function ) && ( $function[0] ?? null ) instanceof \YahnisElsts\PluginUpdateChecker\v5p7\Plugin\UpdateChecker ) {
+						return $function[0];
+					}
+				}
+			}
+		}
+		return null;
 	}
 
 	/**
