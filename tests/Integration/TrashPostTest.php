@@ -16,6 +16,7 @@ use Steadhand\Log\DbLogger;
 use Steadhand\Log\Schema;
 use Steadhand\Pipeline\Pipeline;
 use Steadhand\Pipeline\PostWriter;
+use Steadhand\Pipeline\TrashRules;
 use Steadhand\Plugin;
 use Steadhand\Roles;
 
@@ -555,13 +556,114 @@ final class TrashPostTest extends TrashTestCase {
 	}
 
 	/**
-	 * Uninstall removes both trash markers from every post, and nothing else of the post. The file is run for real. Its role and
+	 * A trash stores all four markers, each with the value that its rule checks, and a restore clears all four. The modified-time marker is
+	 * the post's own post_modified_gmt, read again after the trash, and the post-ID marker is the post's ID.
+	 */
+	public function test_a_trash_stores_all_four_markers_and_a_restore_clears_them(): void {
+		$post  = $this->draft_post();
+		$agent = $this->act_as_agent( array( Capabilities::TRASH => true ) );
+		$this->trash( $post );
+
+		$this->assertSame( (string) $agent, $this->meta_of( $post, PostWriter::TRASHED_BY_META ) );
+		$this->assertSame( $this->meta_of( $post, PostWriter::TRASH_CORE_TIME_META ), $this->meta_of( $post, PostWriter::TRASH_TIME_META ) );
+		$this->assertSame( TrashRules::current_modified_gmt( $post ), $this->meta_of( $post, PostWriter::TRASH_MODIFIED_META ) );
+		$this->assertSame( (string) $post, $this->meta_of( $post, PostWriter::TRASH_POST_META ) );
+		foreach ( TrashRules::MARKER_KEYS as $key ) {
+			$this->assertSame( 1, $this->rows_of( $post, $key ), "The marker $key holds exactly one row." );
+		}
+
+		$this->assertIsArray( $this->restore( $post ) );
+		foreach ( TrashRules::MARKER_KEYS as $key ) {
+			$this->assertSame( 0, $this->rows_of( $post, $key ), "The restore removed $key." );
+		}
+	}
+
+	/**
+	 * Core's pre_trash_post filter refuses the trash. The stale core trash keys of an earlier trash stay as they were, one row each, and no
+	 * marker is stored. Removing the stale keys happens only once core has allowed the trash, so a refused trash changes nothing.
+	 */
+	public function test_a_trash_that_core_refuses_leaves_the_stale_core_rows_and_stores_no_marker(): void {
+		$post = $this->draft_post();
+		add_post_meta( $post, TrashRules::CORE_STATUS_META, 'draft' );
+		add_post_meta( $post, PostWriter::TRASH_CORE_TIME_META, '1700000000' );
+		$this->on( 'pre_trash_post', static fn(): bool => false, 10, 3 );
+		$this->act_as_agent( array( Capabilities::TRASH => true ) );
+		$before = $this->state( $post );
+
+		$this->assert_refused( $this->trash( $post ), 'steadhand_update_failed' );
+
+		$this->assertSame( $before, $this->state( $post ) );
+		$this->assertSame( 1, $this->rows_of( $post, TrashRules::CORE_STATUS_META ), 'The stale stored-status row is still there.' );
+		$this->assertSame( 1, $this->rows_of( $post, PostWriter::TRASH_CORE_TIME_META ), 'The stale trash-time row is still there.' );
+		foreach ( TrashRules::MARKER_KEYS as $key ) {
+			$this->assertSame( 0, $this->rows_of( $post, $key ), "No marker is stored for $key." );
+		}
+	}
+
+	/**
+	 * A trash that follows stale core rows ends with exactly one row of each core key, and with the markers, so the ownership rule can
+	 * restore it.
+	 */
+	public function test_a_trash_after_stale_core_rows_ends_with_exactly_one_row_of_each_core_key(): void {
+		$post = $this->draft_post();
+		add_post_meta( $post, TrashRules::CORE_STATUS_META, 'draft' );
+		add_post_meta( $post, PostWriter::TRASH_CORE_TIME_META, '1700000000' );
+		$agent = $this->act_as_agent( array( Capabilities::TRASH => true ) );
+
+		$this->assertIsArray( $this->trash( $post ) );
+
+		$this->assertSame( 1, $this->rows_of( $post, TrashRules::CORE_STATUS_META ) );
+		$this->assertSame( 1, $this->rows_of( $post, PostWriter::TRASH_CORE_TIME_META ) );
+		$this->assertSame( (string) $agent, $this->meta_of( $post, PostWriter::TRASHED_BY_META ) );
+		$this->assertSame( $this->meta_of( $post, PostWriter::TRASH_CORE_TIME_META ), $this->meta_of( $post, PostWriter::TRASH_TIME_META ) );
+		$this->assertTrue( TrashRules::own_trash( $post, $agent ) );
+	}
+
+	/**
+	 * The marker listeners take whatever another plugin passes: null, an object, a string, an array and numbers that are not positive IDs.
+	 * None throws, and a value that is not a post ID changes no marker. A WP_Post is not a post ID either, so it is ignored by the
+	 * trash and untrash listeners.
+	 */
+	public function test_the_marker_listeners_accept_any_value_a_caller_passes_without_throwing(): void {
+		$post = $this->draft_post();
+		update_post_meta( $post, PostWriter::TRASHED_BY_META, '5' );
+		$post_object = get_post( $post );
+
+		// Core's own listeners read the post from the value they are given: _reset_front_page_settings_for_post on wp_trash_post, and
+		// _transition_post_status on transition_post_status. Both fail for a value that is not a post, so the test detaches the first
+		// for its duration, and calls PostWriter::left_trash() directly for the transition, which is the method that hook is bound to.
+		remove_action( 'wp_trash_post', '_reset_front_page_settings_for_post', 10 );
+		try {
+			// phpcs:disable WordPress.NamingConventions.PrefixAllGlobals.NonPrefixedHooknameFound -- Core's hooks, fired on purpose with values a plugin might pass.
+			$values = array( null, $post_object, 'abc', array(), -4, 0, '', true );
+			foreach ( $values as $value ) {
+				do_action( 'wp_trash_post', $value );
+				do_action( 'untrashed_post', $value );
+			}
+
+			// A WP_Post is a valid third argument for left_trash() (a post that really left the trash clears its markers), so it is
+			// not passed here. The values that are not a post are.
+			foreach ( array( null, 'abc', array(), -4, 0, '', true ) as $value ) {
+				PostWriter::left_trash( 'draft', 'trash', $value );
+			}
+			// phpcs:enable WordPress.NamingConventions.PrefixAllGlobals.NonPrefixedHooknameFound
+		} finally {
+			add_action( 'wp_trash_post', '_reset_front_page_settings_for_post', 10 );
+		}
+
+		$this->assertSame( '5', $this->meta_of( $post, PostWriter::TRASHED_BY_META ), 'No value that is not a post ID cleared the marker.' );
+	}
+
+	/**
+	 * Uninstall removes all four trash markers from every post, and nothing else of the post. The file is run for real. Its role and
 	 * change-log table are put back afterwards, as RegistrationTest and SchemaTest do.
 	 */
-	public function test_uninstall_removes_both_trash_markers_from_every_post(): void {
+	public function test_uninstall_removes_all_four_trash_markers_from_every_post(): void {
 		$post  = $this->draft_post();
 		$other = $this->live_post();
 		update_post_meta( $post, PostWriter::TRASHED_BY_META, '5' );
+		update_post_meta( $post, PostWriter::TRASH_MODIFIED_META, '2026-01-01 00:00:00' );
+		update_post_meta( $post, PostWriter::TRASH_POST_META, (string) $post );
 		update_post_meta( $other, PostWriter::TRASH_TIME_META, '1700000000' );
 
 		// phpcs:ignore WordPress.NamingConventions.PrefixAllGlobals.NonPrefixedConstantFound -- The constant core's uninstall files check.
@@ -577,8 +679,10 @@ final class TrashPostTest extends TrashTestCase {
 			Schema::install();
 		}
 
-		$this->assertSame( '', $this->meta_of( $post, PostWriter::TRASHED_BY_META ) );
-		$this->assertSame( '', $this->meta_of( $other, PostWriter::TRASH_TIME_META ) );
+		foreach ( TrashRules::MARKER_KEYS as $key ) {
+			$this->assertSame( 0, $this->rows_of( $post, $key ), "Uninstall removed $key from the post." );
+			$this->assertSame( 0, $this->rows_of( $other, $key ), "Uninstall removed $key from the other post." );
+		}
 		$this->assertSame( 'Fixture post', get_post( $post )->post_title, 'The post itself is untouched.' );
 	}
 

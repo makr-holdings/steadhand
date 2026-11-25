@@ -24,6 +24,20 @@ final class TrashRules {
 	public const CORE_STATUS_META = '_wp_trash_meta_status';
 
 	/**
+	 * The four post meta keys that mark a post Steadhand trashed: the agent's user ID, the trash time WordPress stored, the post's
+	 * modified time as it was just after the trash, and the post's own ID. Every store, clear and uninstall reads this list, so the
+	 * keys are named in one place. Each one protects against a different route (see PostWriter::store_markers()).
+	 *
+	 * @var string[]
+	 */
+	public const MARKER_KEYS = array(
+		PostWriter::TRASHED_BY_META,
+		PostWriter::TRASH_TIME_META,
+		PostWriter::TRASH_MODIFIED_META,
+		PostWriter::TRASH_POST_META,
+	);
+
+	/**
 	 * A string of digits, the form in which WordPress and Steadhand store a time and a user ID.
 	 */
 	private const DIGITS = '/^\d+\z/';
@@ -50,10 +64,14 @@ final class TrashRules {
 
 	/**
 	 * Whether this user trashed the post through steadhand/trash-post, and that trash is still the current one. It is true only when
-	 * each of the three keys has exactly one row, the single trashed-by marker is the user's ID, and the single trash-time marker is
-	 * the same string of digits as the single trash time WordPress holds now. Any other count, or any value that is not digits, is
-	 * false. So an administrator who restored the post and trashed it again is refused, even when both trashes happened in the
-	 * same second, and so is a post whose markers were left behind by a status update.
+	 * each of the five keys (the four in MARKER_KEYS, with WordPress's own trash time) has exactly one row, and:
+	 * - the trashed-by marker is the user's ID, and the trash-time marker is the same string of digits as the single trash time
+	 *   WordPress holds now;
+	 * - the post-ID marker is the post's own ID, so a copy of the post with its meta is refused;
+	 * - the modified-time marker is non-empty and equals the post's post_modified_gmt read again now, so any later save of the
+	 *   post, including a status update that moved it out of the trash and back, is refused even when no listener ran.
+	 * Any other count, or any value that is not digits, is false. An administrator who restored the post and trashed it again is
+	 * refused, even when both trashes happened in the same second.
 	 *
 	 * @param int $post_id Post ID.
 	 * @param int $user_id The user who would restore the post.
@@ -64,19 +82,41 @@ final class TrashRules {
 			return false;
 		}
 
-		$by    = self::value( $post_id, PostWriter::TRASHED_BY_META );
-		$time  = self::value( $post_id, PostWriter::TRASH_TIME_META );
-		$trash = self::value( $post_id, PostWriter::TRASH_CORE_TIME_META );
+		$by       = self::value( $post_id, PostWriter::TRASHED_BY_META );
+		$time     = self::value( $post_id, PostWriter::TRASH_TIME_META );
+		$trash    = self::value( $post_id, PostWriter::TRASH_CORE_TIME_META );
+		$modified = self::value( $post_id, PostWriter::TRASH_MODIFIED_META );
+		$owner    = self::value( $post_id, PostWriter::TRASH_POST_META );
 
-		if ( null === $by || null === $time || null === $trash ) {
+		if ( null === $by || null === $time || null === $trash || null === $modified || null === $owner ) {
 			return false;
 		}
 
-		if ( 1 !== preg_match( self::DIGITS, $by ) || 1 !== preg_match( self::DIGITS, $time ) || 1 !== preg_match( self::DIGITS, $trash ) ) {
+		foreach ( array( $by, $time, $trash, $owner ) as $digits ) {
+			if ( 1 !== preg_match( self::DIGITS, $digits ) ) {
+				return false;
+			}
+		}
+
+		if ( (int) $by !== $user_id || $time !== $trash || $owner !== (string) $post_id ) {
 			return false;
 		}
 
-		return (int) $by === $user_id && $time === $trash;
+		return '' !== $modified && self::current_modified_gmt( $post_id ) === $modified;
+	}
+
+	/**
+	 * The post's post_modified_gmt, read uncached, or null when the post does not exist. A meta write does not change it, so the
+	 * value is the one the last save of the post stored.
+	 *
+	 * @param int $post_id Post ID.
+	 * @return string|null
+	 */
+	public static function current_modified_gmt( int $post_id ): ?string {
+		clean_post_cache( $post_id );
+		$post = get_post( $post_id );
+
+		return $post instanceof \WP_Post ? (string) $post->post_modified_gmt : null;
 	}
 
 	/**

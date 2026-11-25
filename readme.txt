@@ -89,7 +89,7 @@ No. Only a user whose only role is the agent role can connect. Create an agent o
 
 = What can an agent change by default? =
 
-Drafts. A new agent can read content, create drafts, edit drafts of any author and set their terms. It cannot publish until an administrator turns on the publish capability, and it cannot upload images or set featured images until an administrator turns on the media capability. It cannot change menus, settings, users or plugins, and no tool deletes a post or page. Trashing a post or page, or restoring one it trashed, needs the trash capability, which is off until an administrator turns it on. A sticky post, the front page and the posts page cannot be trashed.
+Drafts. A new agent can read content, create drafts, edit drafts of any author and set their terms. It cannot publish until an administrator turns on the publish capability, and it cannot upload images or set featured images until an administrator turns on the media capability. It cannot change menus, settings, users or plugins, and no tool deletes a post or page. Trashing a post or page, or restoring one it trashed, needs the trash capability, which is off until an administrator turns it on. Restoring a draft also needs the drafts capability. A sticky post, the front page and the posts page cannot be trashed.
 
 = Can an agent publish? =
 

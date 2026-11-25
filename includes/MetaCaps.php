@@ -244,6 +244,10 @@ final class MetaCaps {
 			return array( self::NO_GRANT );
 		}
 
+		// Restore grants only steadhand_trash. The status the post comes back to decides a second capability: steadhand_write_drafts for a
+		// draft or pending restore, and steadhand_publish for a live one. That is checked where the status is known, in
+		// RestorePost::authorize_object() and PostWriter::untrash(), and not here, because this layer is asked only for the post.
+		// Ownership is required here in every case, so the grant is for the agent's own trash alone.
 		if ( self::RESTORE_ABILITY === $ability ) {
 			$own = 'trash' === $post->post_status && TrashRules::own_trash( (int) $post->ID, $user_id );
 

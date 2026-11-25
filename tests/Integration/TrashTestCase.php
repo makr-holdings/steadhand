@@ -192,6 +192,18 @@ abstract class TrashTestCase extends PostWriteTestCase {
 	}
 
 	/**
+	 * The number of rows WordPress holds for a meta key, read uncached.
+	 *
+	 * @param int    $post_id Post ID.
+	 * @param string $key     Meta key.
+	 */
+	protected function rows_of( int $post_id, string $key ): int {
+		wp_cache_delete( $post_id, 'post_meta' );
+
+		return count( get_post_meta( $post_id, $key, false ) );
+	}
+
+	/**
 	 * Everything a refused or unchanged call must leave as it was: the status, the text, the slug and the trash markers, with the
 	 * core trash keys.
 	 *
