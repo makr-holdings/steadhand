@@ -459,4 +459,83 @@ final class MenuMetaCapsTest extends MenuToolTestCase {
 			$this->assertFalse( $this->answers_inside( self::UPDATE, $item, $fixture['menu'] )['edit_item'], "edit_post for an item: $case." );
 		}
 	}
+
+	/**
+	 * Core answers edit_post_meta, add_post_meta and delete_post_meta from edit_post. Inside update-menu, all three are refused on a menu
+	 * item for every key: a protected one and an ordinary one alike.
+	 */
+	public function test_post_meta_capabilities_on_a_menu_item_are_refused_inside_update_menu_for_protected_and_unprotected_keys(): void {
+		$fixture = $this->fixture();
+		$this->act_as_agent(
+			array(
+				Capabilities::MENUS   => true,
+				Capabilities::PUBLISH => true,
+			)
+		);
+		$item = $fixture['live'];
+
+		foreach ( array( 'steadhand_note', '_steadhand_note' ) as $key ) {
+			$answers = $this->inside(
+				self::UPDATE,
+				static fn(): array => array(
+					'edit'   => current_user_can( 'edit_post_meta', $item, $key ),
+					'add'    => current_user_can( 'add_post_meta', $item, $key ),
+					'delete' => current_user_can( 'delete_post_meta', $item, $key ),
+				)
+			);
+
+			$this->assertSame(
+				array(
+					'edit'   => false,
+					'add'    => false,
+					'delete' => false,
+				),
+				$answers,
+				"Post meta on a menu item for the key $key inside update-menu."
+			);
+		}
+	}
+
+	/**
+	 * A draft menu item is refused for read_post inside update-menu, as a published one is. Only edit_post is granted, for a draft too.
+	 */
+	public function test_read_post_on_a_draft_menu_item_is_refused_inside_update_menu(): void {
+		$fixture = $this->fixture();
+		$this->act_as_agent(
+			array(
+				Capabilities::MENUS   => true,
+				Capabilities::PUBLISH => true,
+			)
+		);
+
+		$answers = $this->answers_inside( self::UPDATE, $fixture['draft'], $fixture['menu'] );
+		$this->assertFalse( $answers['read_item'], 'read_post on a draft menu item.' );
+		$this->assertTrue( $answers['edit_item'], 'Control: edit_post on the draft menu item.' );
+	}
+
+	/**
+	 * The post meta refusal is for classic menu items only. On an ordinary draft, an unprotected key keeps core's answer inside update-menu.
+	 */
+	public function test_post_meta_on_a_normal_post_keeps_core_answers_inside_update_menu(): void {
+		$fixture = $this->fixture();
+		$post    = $this->admin_post( array( 'post_status' => 'draft' ) );
+		$this->act_as_agent(
+			array(
+				Capabilities::MENUS   => true,
+				Capabilities::PUBLISH => true,
+			)
+		);
+
+		$answers = $this->inside(
+			self::UPDATE,
+			static fn(): array => array(
+				'edit' => current_user_can( 'edit_post_meta', $post, 'steadhand_note' ),
+				'add'  => current_user_can( 'add_post_meta', $post, 'steadhand_note' ),
+			)
+		);
+
+		$this->assertTrue( $answers['edit'], 'edit_post_meta on an ordinary draft, which the agent may edit.' );
+		$this->assertTrue( $answers['add'], 'add_post_meta on an ordinary draft, which the agent may edit.' );
+		$this->assertNotEmpty( $fixture['menu'] );
+	}
 }

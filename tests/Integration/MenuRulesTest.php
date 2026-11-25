@@ -306,4 +306,15 @@ final class MenuRulesTest extends MenuToolTestCase {
 		$this->assertTrue( MenuRules::is_orphaned( $item ) );
 		$this->assertFalse( MenuRules::is_orphaned( 0 ) );
 	}
+
+	public function test_parse_parent_reads_digits_as_an_id_and_everything_else_as_minus_one_or_zero(): void {
+		$this->assertSame( 0, MenuRules::parse_parent( '' ) );
+		$this->assertSame( 0, MenuRules::parse_parent( null ) );
+		$this->assertSame( 0, MenuRules::parse_parent( '0' ) );
+		$this->assertSame( 7, MenuRules::parse_parent( '7' ) );
+		$this->assertSame( 7, MenuRules::parse_parent( 7 ) );
+		$this->assertSame( -1, MenuRules::parse_parent( '-5' ) );
+		$this->assertSame( -1, MenuRules::parse_parent( '12abc' ) );
+		$this->assertSame( -1, MenuRules::parse_parent( array( 1 ) ) );
+	}
 }

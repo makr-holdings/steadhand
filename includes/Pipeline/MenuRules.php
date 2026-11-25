@@ -1,7 +1,7 @@
 <?php
 /**
  * Read-only rules about classic menu items: the menu an item belongs to, its parent, depth and subtree, and whether Steadhand hid it.
- * Reads only; every write is in MenuWriter.
+ * Reads only. The update-menu writer, which will ask these questions too, comes in the next step and is not in this file.
  *
  * @package Steadhand
  */
@@ -13,16 +13,20 @@ namespace Steadhand\Pipeline;
 defined( 'ABSPATH' ) || exit;
 
 /**
- * The shared menu rules. The menu tools and the update-menu writer ask these questions, so the answer is the same wherever it is
- * asked. Every database read is uncached, so a change made earlier in the same request is seen.
+ * The shared menu rules: which items a classic menu has, and how they nest. MenuReader uses them now; the update-menu writer
+ * is the next step. Reads go through core's caches. items_raw() primes the post meta and the linked objects of a whole menu in one
+ * go, and the rules that take a row read nothing from the database. hidden_by_steadhand() is the one exception: it reads the
+ * marker through TrashRules::value(), which bypasses the cache, so a marker written earlier in the same request is seen.
  *
  * Rows. items_raw() returns one row per item of a classic menu, in menu order, as an array with these keys:
- * - id:     int, the nav_menu_item post ID.
- * - parent: int, the stored _menu_item_menu_item_parent: 0 at top level, the parent's ID otherwise. A stored value that is not a
- *           whole number is -1, which matches no item, so the rule functions treat that item as broken.
- * - order:  int, the stored menu_order. Core never renumbers siblings, so these may have gaps or repeats.
- * - status: string, publish or draft.
- * - post:   \WP_Post, the item.
+ * - id:       int, the nav_menu_item post ID.
+ * - parent:   int, the stored _menu_item_menu_item_parent, read by parse_parent(): 0 at top level, the parent's ID otherwise.
+ *             A stored value that is not a whole number is -1, which matches no item, so the rule functions treat that item
+ *             as broken.
+ * - order:    int, the stored menu_order. Core never renumbers siblings, so these may have gaps or repeats.
+ * - status:   string, publish or draft.
+ * - orphaned: bool, whether the item carries core's orphan mark (ORPHANED_META).
+ * - post:     \WP_Post, the item.
  *
  * The functions that take rows (children(), depth(), subtree_height(), would_cycle()) never read the database. They are
  * safe on malformed data: a parent that is missing, belongs to another menu or forms a cycle never loops, and the functions
@@ -52,8 +56,9 @@ final class MenuRules {
 	public const HIDDEN_META = '_steadhand_menu_hidden';
 
 	/**
-	 * The post meta key core sets on a draft menu item whose menu was deleted (core's _wp_delete_orphaned_draft_menu_items() deletes
-	 * such drafts). A draft that carries it is never shown, and never hidden or shown by Steadhand.
+	 * The post meta key core sets on an item saved with menu ID 0, that is, a draft menu item not yet saved to a menu. Core's
+	 * _wp_delete_orphaned_draft_menu_items() deletes such drafts later. A draft that carries it is never shown, and Steadhand
+	 * never hides or shows it.
 	 */
 	public const ORPHANED_META = '_menu_item_orphaned';
 
@@ -78,48 +83,65 @@ final class MenuRules {
 	private const USER_ID = '/^[1-9]\d*\z/';
 
 	/**
-	 * The items of a classic menu, in menu order, with their stored state. Every item of the menu in publish or draft is returned,
+	 * The query for a classic menu's items, in core's shape: the arguments wp_get_nav_menu_items() builds, with the statuses named
+	 * explicitly. The reader passes the same array to the wp_get_nav_menu_items filter, so a filter sees what the query asked for.
+	 *
+	 * @param \WP_Term $menu A classic menu.
+	 * @return array<string, mixed>
+	 */
+	public static function query_args( \WP_Term $menu ): array {
+		return array(
+			'order'                  => 'ASC',
+			'orderby'                => array(
+				'menu_order' => 'ASC',
+				'ID'         => 'ASC',
+			),
+			'post_type'              => 'nav_menu_item',
+			'post_status'            => self::STATUSES,
+			'output'                 => ARRAY_A,
+			'output_key'             => 'menu_order',
+			'nopaging'               => true,
+			'no_found_rows'          => true,
+			'suppress_filters'       => true,
+			'ignore_sticky_posts'    => true,
+			'update_post_term_cache' => false,
+			'update_post_meta_cache' => true,
+			'update_menu_item_cache' => true,
+			'tax_query'              => array( // phpcs:ignore WordPress.DB.SlowDBQuery.slow_db_query_tax_query -- One menu's items; the term is given by ID.
+				array(
+					'taxonomy' => 'nav_menu',
+					'field'    => 'term_taxonomy_id',
+					'terms'    => (int) $menu->term_taxonomy_id,
+				),
+			),
+		);
+	}
+
+	/**
+	 * The items of a classic menu in menu order, with their stored state. Every item of the menu in publish or draft is returned,
 	 * including the draft ones that core's wp_get_nav_menu_items() would skip. That function returns nothing at all when the
 	 * stored count of published items is 0, so it cannot see a menu whose items are all drafts. This query does not use it.
 	 *
-	 * Filters on wp_get_nav_menu_items and pre_wp_setup_nav_menu_item do not run here. Items that are not valid (a trashed or
-	 * missing linked object) and orphaned drafts are returned too. A caller decides what to skip. The list is not capped.
+	 * The query primes the linked posts and terms of the whole menu (update_menu_item_cache) and the items' meta
+	 * (update_post_meta_cache), so the rows that follow cost no query each. Filters on wp_get_nav_menu_items and pre_wp_setup_nav_menu_item do not run
+	 * here. Items that are not valid (a trashed or missing linked object) and orphaned drafts are returned too; a caller decides what
+	 * to skip. The list is not capped: the writer compares count() with MAX_ITEMS, and the reader stops early (see MenuReader::page()).
 	 *
 	 * @param \WP_Term $menu A classic menu.
-	 * @return array<int, array{id: int, parent: int, order: int, status: string, post: \WP_Post}>
+	 * @return array<int, array{id: int, parent: int, order: int, status: string, orphaned: bool, post: \WP_Post}>
 	 */
 	public static function items_raw( \WP_Term $menu ): array {
-		$items = get_posts(
-			array(
-				'post_type'              => 'nav_menu_item',
-				'post_status'            => self::STATUSES,
-				'nopaging'               => true,
-				'no_found_rows'          => true,
-				'suppress_filters'       => true,
-				'ignore_sticky_posts'    => true,
-				'update_post_term_cache' => false,
-				'orderby'                => array(
-					'menu_order' => 'ASC',
-					'ID'         => 'ASC',
-				),
-				'tax_query'              => array( // phpcs:ignore WordPress.DB.SlowDBQuery.slow_db_query_tax_query -- One menu's items; the term is given by ID.
-					array(
-						'taxonomy' => 'nav_menu',
-						'field'    => 'term_taxonomy_id',
-						'terms'    => (int) $menu->term_taxonomy_id,
-					),
-				),
-			)
-		);
+		$items = get_posts( self::query_args( $menu ) );
 
 		$rows = array();
 		foreach ( $items as $item ) {
 			$rows[] = array(
-				'id'     => (int) $item->ID,
-				'parent' => self::parent_of( (int) $item->ID ),
-				'order'  => (int) $item->menu_order,
-				'status' => (string) $item->post_status,
-				'post'   => $item,
+				'id'       => (int) $item->ID,
+				'parent'   => self::parent_of( (int) $item->ID ),
+				'order'    => (int) $item->menu_order,
+				'status'   => (string) $item->post_status,
+				'orphaned' => self::is_orphaned( (int) $item->ID ),
+				'post'     => $item,
 			);
 		}
 
@@ -127,13 +149,22 @@ final class MenuRules {
 	}
 
 	/**
-	 * The stored parent of an item: 0 when none is stored, the parent's ID, or -1 when the stored value is not a whole number.
+	 * The stored parent of an item, read by parse_parent().
 	 *
 	 * @param int $item_id Item post ID.
 	 */
 	private static function parent_of( int $item_id ): int {
-		$raw = get_post_meta( $item_id, self::PARENT_META, true );
-		if ( '' === $raw ) {
+		return self::parse_parent( get_post_meta( $item_id, self::PARENT_META, true ) );
+	}
+
+	/**
+	 * The parent ID that a stored parent value means: 0 for an empty value (top level), the number for a value that is only digits,
+	 * and -1 for anything else (a negative number, a number followed by text, an array). -1 matches no item.
+	 *
+	 * @param mixed $raw The stored value, as get_post_meta() or a menu item's menu_item_parent property holds it.
+	 */
+	public static function parse_parent( mixed $raw ): int {
+		if ( null === $raw || '' === $raw ) {
 			return 0;
 		}
 
@@ -170,9 +201,9 @@ final class MenuRules {
 	/**
 	 * The direct children of an item, in the order of the rows.
 	 *
-	 * @param array<int, array{id: int, parent: int, order: int, status: string, post: \WP_Post}> $rows      Rows from items_raw().
-	 * @param int                                                                                 $parent_id The parent's ID, or 0 for the top level.
-	 * @return array<int, array{id: int, parent: int, order: int, status: string, post: \WP_Post}>
+	 * @param array<int, array{id: int, parent: int, order: int, status: string, orphaned: bool, post: \WP_Post}> $rows      Rows from items_raw().
+	 * @param int                                                                                                 $parent_id The parent's ID, or 0 for the top level.
+	 * @return array<int, array{id: int, parent: int, order: int, status: string, orphaned: bool, post: \WP_Post}>
 	 */
 	public static function children( array $rows, int $parent_id ): array {
 		$found = array();
@@ -192,8 +223,8 @@ final class MenuRules {
 	 * Null when the item is not in the rows, when its parent chain reaches an ID that is not in the rows (a missing item, one of
 	 * another menu, or a malformed parent), when it loops, or when the chain is longer than MAX_ITEMS.
 	 *
-	 * @param array<int, array{id: int, parent: int, order: int, status: string, post: \WP_Post}> $rows Rows from items_raw().
-	 * @param int                                                                                 $id   The item's ID.
+	 * @param array<int, array{id: int, parent: int, order: int, status: string, orphaned: bool, post: \WP_Post}> $rows Rows from items_raw().
+	 * @param int                                                                                                 $id   The item's ID.
 	 */
 	public static function depth( array $rows, int $id ): ?int {
 		$by_id   = self::index( $rows );
@@ -224,8 +255,8 @@ final class MenuRules {
 	 * Null when the item is not in the rows, when the subtree reaches an item twice (a loop), or when it has more than MAX_ITEMS
 	 * items.
 	 *
-	 * @param array<int, array{id: int, parent: int, order: int, status: string, post: \WP_Post}> $rows Rows from items_raw().
-	 * @param int                                                                                 $id   The subtree's root.
+	 * @param array<int, array{id: int, parent: int, order: int, status: string, orphaned: bool, post: \WP_Post}> $rows Rows from items_raw().
+	 * @param int                                                                                                 $id   The subtree's root.
 	 */
 	public static function subtree_height( array $rows, int $id ): ?int {
 		if ( ! isset( self::index( $rows )[ $id ] ) ) {
@@ -264,9 +295,9 @@ final class MenuRules {
 	 * walk up from the new parent does not finish within MAX_ITEMS steps (a loop elsewhere in the menu). A refusal is the safe
 	 * answer to every one of these.
 	 *
-	 * @param array<int, array{id: int, parent: int, order: int, status: string, post: \WP_Post}> $rows          Rows from items_raw().
-	 * @param int                                                                                 $item_id       The item that would move.
-	 * @param int                                                                                 $new_parent_id The proposed parent, or 0.
+	 * @param array<int, array{id: int, parent: int, order: int, status: string, orphaned: bool, post: \WP_Post}> $rows          Rows from items_raw().
+	 * @param int                                                                                                 $item_id       The item that would move.
+	 * @param int                                                                                                 $new_parent_id The proposed parent, or 0.
 	 */
 	public static function would_cycle( array $rows, int $item_id, int $new_parent_id ): bool {
 		if ( 0 === $new_parent_id ) {
@@ -311,7 +342,8 @@ final class MenuRules {
 	}
 
 	/**
-	 * Whether the item carries core's orphan mark (see ORPHANED_META). Any row counts, so a malformed mark is still a mark.
+	 * Whether the item carries core's orphan mark (see ORPHANED_META). Any row counts, so a malformed mark is still a mark. Reads
+	 * through the post meta cache, so after items_raw() it costs no query.
 	 *
 	 * @param int $item_id Item post ID.
 	 */
@@ -320,16 +352,14 @@ final class MenuRules {
 			return false;
 		}
 
-		wp_cache_delete( $item_id, 'post_meta' );
-
 		return metadata_exists( 'post', $item_id, self::ORPHANED_META );
 	}
 
 	/**
 	 * The rows keyed by item ID. A later row with the same ID replaces an earlier one; items_raw() never repeats an ID.
 	 *
-	 * @param array<int, array{id: int, parent: int, order: int, status: string, post: \WP_Post}> $rows Rows from items_raw().
-	 * @return array<int, array{id: int, parent: int, order: int, status: string, post: \WP_Post}>
+	 * @param array<int, array{id: int, parent: int, order: int, status: string, orphaned: bool, post: \WP_Post}> $rows Rows from items_raw().
+	 * @return array<int, array{id: int, parent: int, order: int, status: string, orphaned: bool, post: \WP_Post}>
 	 */
 	private static function index( array $rows ): array {
 		$by_id = array();

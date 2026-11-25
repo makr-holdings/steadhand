@@ -9,6 +9,7 @@ declare( strict_types=1 );
 
 namespace Steadhand\Tests\Integration;
 
+use Steadhand\Abilities\MenuReader;
 use Steadhand\Capabilities;
 use Steadhand\Pipeline\Pipeline;
 
@@ -521,5 +522,271 @@ final class GetMenuTest extends MenuToolTestCase {
 		);
 
 		$this->assertDoesNotMatchRegularExpression( '/password|email|login|user_pass/i', implode( ' ', $keys ) );
+	}
+
+	/**
+	 * Calls get-menu for a classic menu with the wp_get_nav_menu_items filter set to $filter, and returns the items.
+	 *
+	 * @param int      $menu   Menu term ID.
+	 * @param callable $filter The filter callback, which takes (array $items, \WP_Term $menu, array $args).
+	 * @return array<int, array<string, mixed>>
+	 */
+	private function items_through_filter( int $menu, callable $filter ): array {
+		add_filter( 'wp_get_nav_menu_items', $filter, 10, 3 );
+		try {
+			return $this->items_of( $menu );
+		} finally {
+			remove_all_filters( 'wp_get_nav_menu_items' );
+		}
+	}
+
+	public function test_a_filter_that_drops_an_item_drops_it_from_get_menu(): void {
+		$this->act_as_agent();
+		$menu = $this->classic_menu( 'Steadhand filter drop' );
+		$keep = $this->custom_item( $menu, 'Keep', 'https://example.test/keep/', 0, 1 );
+		$drop = $this->draft_custom_item( $menu, 'Drop', 'https://example.test/drop/', 0, 2 );
+
+		$items = $this->items_through_filter(
+			$menu,
+			static fn( array $items ): array => array_values( array_filter( $items, static fn( $item ): bool => (int) $item->ID !== $drop ) )
+		);
+
+		$this->assertSame( array( $keep ), array_column( $items, 'id' ) );
+	}
+
+	/**
+	 * A filter may not add an item: a foreign object, an item of another menu, a stranger's object with a kept ID, a string and a number are
+	 * all ignored. The items of this menu come back unchanged.
+	 */
+	public function test_a_filter_that_adds_foreign_objects_gets_them_ignored(): void {
+		$this->act_as_agent();
+		$menu    = $this->classic_menu( 'Steadhand filter add' );
+		$keep    = $this->custom_item( $menu, 'Keep', 'https://example.test/keep/', 0, 1 );
+		$draft   = $this->draft_custom_item( $menu, 'Draft', 'https://example.test/draft/', 0, 2 );
+		$other   = $this->classic_menu( 'Steadhand filter other' );
+		$foreign = $this->custom_item( $other, 'Foreign', 'https://example.test/foreign/', 0, 1 );
+
+		$items = $this->items_through_filter(
+			$menu,
+			static function ( array $items ) use ( $foreign, $keep ): array {
+				$items[] = get_post( $foreign );
+				$items[] = (object) array(
+					'ID'        => $keep,
+					'post_type' => 'nav_menu_item',
+					'title'     => 'Impostor',
+				);
+				$items[] = 'not an object';
+				$items[] = 42;
+
+				return $items;
+			}
+		);
+
+		$this->assertSame( array( $keep, $draft ), array_column( $items, 'id' ) );
+		$this->assertSame( array( 'Keep', 'Draft' ), array_column( $items, 'title' ) );
+	}
+
+	/**
+	 * A filter may change a title. The changed title goes through the same plain-text and length treatment as any title.
+	 */
+	public function test_a_filter_that_changes_a_title_gets_the_plain_text_and_length_treatment(): void {
+		$this->act_as_agent();
+		$menu = $this->classic_menu( 'Steadhand filter title' );
+		$keep = $this->custom_item( $menu, 'Keep', 'https://example.test/keep/', 0, 1 );
+
+		$items = $this->items_through_filter(
+			$menu,
+			static function ( array $items ) use ( $keep ): array {
+				foreach ( $items as $item ) {
+					if ( (int) $item->ID === $keep ) {
+						$item->title = '<b>Changed</b> &amp; ' . str_repeat( "\u{00e9}", 1500 );
+					}
+				}
+
+				return $items;
+			}
+		);
+
+		$this->assertSame( 1, count( $items ) );
+		$this->assertStringStartsWith( 'Changed & ', $items[0]['title'] );
+		$this->assertLessThanOrEqual( 1000, strlen( $items[0]['title'] ) );
+		$this->assertSame( 1, preg_match( '//u', $items[0]['title'] ), 'The title stays valid UTF-8.' );
+	}
+
+	/**
+	 * A filter that returns something other than an array means no items. The call does not fail.
+	 */
+	public function test_a_filter_that_returns_a_non_array_gives_an_empty_list(): void {
+		$this->act_as_agent();
+		$menu = $this->classic_menu( 'Steadhand filter scalar' );
+		$this->custom_item( $menu, 'Gone', 'https://example.test/gone/', 0, 1 );
+
+		$this->assertSame( array(), $this->items_through_filter( $menu, static fn(): string => 'nothing' ) );
+	}
+
+	/**
+	 * A pre_wp_setup_nav_menu_item filter that returns a modified item sets the title and URL get-menu prints.
+	 */
+	public function test_a_pre_wp_setup_filter_that_returns_a_modified_item_is_used(): void {
+		$this->act_as_agent();
+		$menu = $this->classic_menu( 'Steadhand pre setup' );
+		$keep = $this->custom_item( $menu, 'Original', 'https://example.test/original/', 0, 1 );
+		add_filter(
+			'pre_wp_setup_nav_menu_item',
+			static function ( $pre, $menu_item ) use ( $keep ) {
+				if ( $menu_item instanceof \WP_Post && (int) $menu_item->ID === $keep ) {
+					$menu_item->type  = 'custom';
+					$menu_item->title = 'From the pre filter';
+					$menu_item->url   = 'https://example.test/pre/';
+
+					return $menu_item;
+				}
+
+				return $pre;
+			},
+			10,
+			2
+		);
+
+		try {
+			$items = $this->items_of( $menu );
+		} finally {
+			remove_all_filters( 'pre_wp_setup_nav_menu_item' );
+		}
+
+		$this->assertSame( 'From the pre filter', $items[0]['title'] );
+		$this->assertSame( 'https://example.test/pre/', $items[0]['url'] );
+	}
+
+	/**
+	 * A published child under a draft parent is returned as visible, with the stored parent ID, and the draft parent is returned as hidden.
+	 */
+	public function test_a_published_child_under_a_draft_parent_is_returned_with_the_parent_id(): void {
+		$this->act_as_agent();
+		$menu   = $this->classic_menu( 'Steadhand draft parent' );
+		$parent = $this->draft_custom_item( $menu, 'Hidden parent', 'https://example.test/parent/', 0, 1 );
+		$child  = $this->custom_item( $menu, 'Visible child', 'https://example.test/child/', $parent, 2 );
+
+		$items = array_column( $this->items_of( $menu ), null, 'id' );
+
+		$this->assertTrue( $items[ $parent ]['hidden'] );
+		$this->assertFalse( $items[ $child ]['hidden'] );
+		$this->assertSame( $parent, $items[ $child ]['parent'] );
+	}
+
+	/**
+	 * A stored parent that is negative or not a whole number is returned as 0, and the item is still listed.
+	 */
+	public function test_a_negative_or_non_numeric_stored_parent_is_returned_as_zero(): void {
+		$this->act_as_agent();
+		$menu = $this->classic_menu( 'Steadhand bad parent' );
+		$neg  = $this->custom_item( $menu, 'Negative', 'https://example.test/neg/', 0, 1 );
+		$text = $this->custom_item( $menu, 'Text', 'https://example.test/text/', 0, 2 );
+		update_post_meta( $neg, '_menu_item_menu_item_parent', '-5' );
+		update_post_meta( $text, '_menu_item_menu_item_parent', '12abc' );
+
+		$items = array_column( $this->items_of( $menu ), null, 'id' );
+
+		$this->assertSame( array( $neg, $text ), array_keys( $items ) );
+		$this->assertSame( 0, $items[ $neg ]['parent'] );
+		$this->assertSame( 0, $items[ $text ]['parent'] );
+	}
+
+	/**
+	 * Order and truncated on a menu that mixes draft and published items: order counts the hidden items, and a short menu is not truncated.
+	 */
+	public function test_order_counts_hidden_items_and_a_mixed_short_menu_is_not_truncated(): void {
+		$this->act_as_agent();
+		$menu = $this->classic_menu( 'Steadhand mixed order' );
+		$a    = $this->custom_item( $menu, 'A', 'https://example.test/a/', 0, 1 );
+		$b    = $this->draft_custom_item( $menu, 'B', 'https://example.test/b/', 0, 2 );
+		$c    = $this->custom_item( $menu, 'C', 'https://example.test/c/', 0, 3 );
+
+		$output = $this->output(
+			self::TOOL_NAME,
+			array(
+				'kind' => 'classic',
+				'id'   => $menu,
+			)
+		);
+
+		$this->assertSame( array( $a, $b, $c ), array_column( $output['items'], 'id' ) );
+		$this->assertSame( array( 1, 2, 3 ), array_column( $output['items'], 'order' ) );
+		$this->assertSame( array( false, true, false ), array_column( $output['items'], 'hidden' ) );
+		$this->assertFalse( $output['truncated'] );
+	}
+
+	/**
+	 * A menu of more than 500 items that mixes drafts and published items is cut to 500, and truncated is true.
+	 */
+	public function test_a_mixed_menu_over_the_limit_is_cut_to_500_and_truncated(): void {
+		$this->act_as_agent();
+		$menu = $this->classic_menu( 'Steadhand mixed long' );
+		for ( $i = 1; $i <= 501; $i++ ) {
+			if ( 1 === $i % 100 ) {
+				$this->draft_custom_item( $menu, 'Draft ' . $i, 'https://example.test/d/' . $i, 0, $i );
+			} else {
+				$this->custom_item( $menu, 'Item ' . $i, 'https://example.test/i/' . $i, 0, $i );
+			}
+		}
+
+		$output = $this->output(
+			self::TOOL_NAME,
+			array(
+				'kind' => 'classic',
+				'id'   => $menu,
+			)
+		);
+
+		$this->assertCount( 500, $output['items'] );
+		$this->assertTrue( $output['truncated'] );
+		$this->assertSame( range( 1, 500 ), array_column( $output['items'], 'order' ) );
+	}
+
+	/**
+	 * The number of queries to read a menu does not grow with its items. A 30-item menu costs about what a 10-item menu costs.
+	 */
+	public function test_the_number_of_queries_does_not_grow_with_the_number_of_items(): void {
+		$this->act_as_agent();
+
+		$measure = function ( int $count ): int {
+			$menu = $this->classic_menu( 'Steadhand queries ' . $count );
+			for ( $i = 1; $i <= $count; $i++ ) {
+				$page = $this->admin_post(
+					array(
+						'post_type'  => 'page',
+						'post_title' => "Query page $count-$i",
+					)
+				);
+				wp_update_nav_menu_item(
+					$menu,
+					0,
+					array(
+						'menu-item-type'      => 'post_type',
+						'menu-item-object'    => 'page',
+						'menu-item-object-id' => $page,
+						'menu-item-status'    => 0 === $i % 3 ? 'draft' : 'publish',
+						'menu-item-position'  => $i,
+					)
+				);
+			}
+
+			wp_cache_flush();
+			$term   = get_term( $menu, 'nav_menu' );
+			$before = $GLOBALS['wpdb']->num_queries;
+			$page   = MenuReader::page( $term );
+			foreach ( $page['items'] as $item ) {
+				MenuReader::item( $item );
+			}
+
+			$this->assertCount( $count, $page['items'], 'Control: every item is read.' );
+
+			return $GLOBALS['wpdb']->num_queries - $before;
+		};
+
+		$small = $measure( 10 );
+		$large = $measure( 30 );
+
+		$this->assertLessThanOrEqual( $small + 3, $large, "10 items took $small queries, 30 items took $large." );
 	}
 }

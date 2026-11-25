@@ -66,6 +66,8 @@ defined( 'ABSPATH' ) || exit;
  *   or in two, is refused.
  * Every other capability on a menu or a menu item keeps the refusal it had: edit_term and delete_term on a menu,
  * read_post, publish_post and delete_post on a menu item, and edit_theme_options itself. A trashed menu item is refused.
+ * edit_post_meta, add_post_meta and delete_post_meta on a menu item are refused for a dedicated agent during any Steadhand call, for
+ * every key, because core derives them from edit_post.
  *
  * Core's extra requirements survive. The mapping replaces the post type's own capabilities (every value in
  * get_post_type_object()->cap), and never anything stricter. If core asks for anything else as well, for example
@@ -118,6 +120,12 @@ final class MetaCaps {
 	 * The statuses of a classic menu item that the menu branch may grant edit_post for.
 	 */
 	private const MENU_ITEM_STATUSES = array( 'publish', 'draft' );
+
+	/**
+	 * The post meta capabilities. Core derives each from edit_post, so the classic menu grant would reach them too. They are refused
+	 * for a classic menu item inside a Steadhand call (see map_menu_item_meta()).
+	 */
+	private const POST_META_CAPS = array( 'edit_post_meta', 'add_post_meta', 'delete_post_meta' );
 
 	/**
 	 * The Steadhand capability edit_post needs for a post in this status, or null when no status rule covers it. This is the
@@ -174,6 +182,11 @@ final class MetaCaps {
 		// assign_term on a classic menu is the one term grant. It is not a post capability, so it is handled before MAPPED.
 		if ( 'assign_term' === $cap ) {
 			return $this->map_menu_term( $caps, $user_id, $args );
+		}
+
+		// Post meta on a classic menu item is refused for an agent during a call, whatever the key. See map_menu_item_meta().
+		if ( in_array( $cap, self::POST_META_CAPS, true ) ) {
+			return $this->map_menu_item_meta( $caps, $user_id, $args );
 		}
 
 		if ( ! in_array( $cap, self::MAPPED, true ) ) {
@@ -294,6 +307,33 @@ final class MetaCaps {
 		}
 
 		return array( Capabilities::MENUS, Capabilities::PUBLISH );
+	}
+
+	/**
+	 * Refuses edit_post_meta, add_post_meta and delete_post_meta on a classic menu item, for a dedicated agent, inside a Steadhand call.
+	 * Core answers these from edit_post, which the classic menu grant maps to steadhand_menus and steadhand_publish, so without this
+	 * refusal every menu item would take its meta in an update-menu call. Any other post, any key, any non-agent and any answer outside
+	 * a call keep core's answer. An earlier do_not_allow never reaches this method (map() returns it first).
+	 *
+	 * @param array $caps    Core's answer.
+	 * @param int   $user_id The user the check is about.
+	 * @param array $args    Extra arguments; the first is the post ID.
+	 * @return array
+	 */
+	private function map_menu_item_meta( array $caps, int $user_id, array $args ): array {
+		$user = get_userdata( $user_id );
+		if ( ! $user instanceof \WP_User || ! Agents::is_agent( $user ) ) {
+			return $caps;
+		}
+
+		$post_id = (int) ( $args[0] ?? 0 );
+		$post    = $post_id > 0 ? get_post( $post_id ) : null;
+
+		if ( $post instanceof \WP_Post && 'nav_menu_item' === $post->post_type ) {
+			return array( 'do_not_allow' );
+		}
+
+		return $caps;
 	}
 
 	/**

@@ -81,22 +81,29 @@ final class MenuReader {
 	}
 
 	/**
-	 * The items of a classic menu in menu order: the published items and the draft ones, which are hidden from the public site.
-	 * Items that core would not print are left out: a trashed or missing linked object (an invalid item), and an orphaned draft
-	 * (MenuRules::ORPHANED_META). Each item is set up the way core sets up a menu item (wp_setup_nav_menu_item()), so its title and
-	 * URL are the ones the public menu prints, for a draft too. The menu_order of each kept item is then renumbered 1, 2, 3, as
-	 * wp_get_nav_menu_items() does, so item order is the position among the items returned.
+	 * The items of a classic menu, in menu order, for get-menu: the published items and the draft ones, which the public site does not
+	 * print. Returns the items and whether the menu has more than MAX_ITEMS of them.
 	 *
-	 * This does not call wp_get_nav_menu_items(). That function returns nothing when the menu's stored item count is 0, and the
-	 * stored count counts only published items, so a menu whose items are all hidden would look empty.
+	 * Items core would not print are left out: a trashed or missing linked object (an invalid item), and an orphaned draft
+	 * (MenuRules::ORPHANED_META). Each kept item is set up the way core sets up a menu item (wp_setup_nav_menu_item(), with the
+	 * pre_wp_setup_nav_menu_item filter), so its title and URL are the ones the public menu prints, for a draft too. The menu_order
+	 * of the kept items is renumbered 1, 2, 3 as wp_get_nav_menu_items() does, before the wp_get_nav_menu_items filter runs.
+	 *
+	 * The wp_get_nav_menu_items filter then runs on the kept items, as core runs it, and the result is trusted only in part: a
+	 * returned entry is kept only when it is a WP_Post of a nav_menu_item whose ID was in the list passed in, and only once per ID.
+	 * So a filter may drop an item or change its title, URL, parent or order, but cannot add one. A non-array result means no items.
+	 *
+	 * Setup stops after MAX_ITEMS + 1 kept items, one more than the reader returns, so truncated stays right without loading an
+	 * unbounded menu. This does not call wp_get_nav_menu_items(): that function returns nothing when the menu's stored item count is 0,
+	 * and the stored count counts only published items, so a menu whose items are all hidden would look empty.
 	 *
 	 * @param \WP_Term $menu Classic menu.
-	 * @return \WP_Post[]
+	 * @return array{items: \WP_Post[], truncated: bool}
 	 */
-	public static function items( \WP_Term $menu ): array {
+	public static function page( \WP_Term $menu ): array {
 		$kept = array();
 		foreach ( MenuRules::items_raw( $menu ) as $row ) {
-			if ( 'draft' === $row['status'] && MenuRules::is_orphaned( $row['id'] ) ) {
+			if ( $row['orphaned'] ) {
 				continue;
 			}
 
@@ -107,14 +114,56 @@ final class MenuReader {
 			}
 
 			$kept[] = $item;
+			if ( count( $kept ) > self::MAX_ITEMS ) {
+				break;
+			}
 		}
+
+		$truncated = count( $kept ) > self::MAX_ITEMS;
 
 		$position = 1;
 		foreach ( $kept as $item ) {
 			$item->menu_order = $position++;
 		}
 
-		return $kept;
+		$allowed = array();
+		foreach ( $kept as $item ) {
+			$allowed[ (int) $item->ID ] = true;
+		}
+
+		// phpcs:ignore WordPress.NamingConventions.PrefixAllGlobals.NonPrefixedHooknameFound -- Core's hook, run as core runs it.
+		$filtered = apply_filters( 'wp_get_nav_menu_items', $kept, $menu, MenuRules::query_args( $menu ) );
+		if ( ! is_array( $filtered ) ) {
+			return array(
+				'items'     => array(),
+				'truncated' => $truncated,
+			);
+		}
+
+		$items = array();
+		$seen  = array();
+		foreach ( $filtered as $entry ) {
+			if ( ! $entry instanceof \WP_Post || 'nav_menu_item' !== $entry->post_type ) {
+				continue;
+			}
+
+			$id = (int) $entry->ID;
+			if ( ! isset( $allowed[ $id ] ) || isset( $seen[ $id ] ) ) {
+				continue;
+			}
+
+			$seen[ $id ] = true;
+			$items[]     = $entry;
+		}
+
+		if ( count( $items ) > self::MAX_ITEMS ) {
+			$truncated = true;
+		}
+
+		return array(
+			'items'     => $items,
+			'truncated' => $truncated,
+		);
 	}
 
 	/**
@@ -141,7 +190,7 @@ final class MenuReader {
 	 * linked object is read. hidden is true for a draft item, which the public site does not print, and false for a
 	 * published one.
 	 *
-	 * @param \WP_Post $item Valid item from items().
+	 * @param \WP_Post $item Valid item from page().
 	 * @return array<string, mixed>
 	 */
 	public static function item( \WP_Post $item ): array {
@@ -155,7 +204,9 @@ final class MenuReader {
 			// Core stores 'custom' and the item's own ID for a custom link. Agents get '' and 0, as the tool describes.
 			'object'      => 'custom' === $type ? '' : PostReader::utf8( (string) ( $item->object ?? '' ) ),
 			'object_id'   => 'custom' === $type ? 0 : (int) ( $item->object_id ?? 0 ),
-			'parent'      => (int) ( $item->menu_item_parent ?? 0 ),
+			// The stored parent, parsed as MenuRules does. A value that is not a whole number is shown as 0 (top level), so get-menu
+			// never returns a negative parent. The item itself is still listed.
+			'parent'      => max( 0, MenuRules::parse_parent( $item->menu_item_parent ?? '' ) ),
 			'order'       => (int) $item->menu_order,
 			'target'      => PostReader::utf8( (string) ( $item->target ?? '' ) ),
 			'classes'     => self::classes( $item->classes ?? array() ),
