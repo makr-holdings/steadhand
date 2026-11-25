@@ -282,6 +282,15 @@ The redaction does **not** catch: an unlabelled short password in free text; a s
 
 The plugin list reveals the installed plugin versions to anyone who holds an agent credential with `steadhand_read`. The tool writes nothing and makes no outbound HTTP request. Its log messages and names are site data, not instructions.
 
+### After you update Steadhand, reconnect the client
+
+An MCP client reads the list of tools, with their input and output schemas, when it connects. Many clients keep that list for as long as the connection or the session lasts. After Steadhand is updated, a client that connected earlier still holds the old list:
+
+- It does not see tools the update added.
+- It may reject a tool's result. Steadhand's output schemas are strict, so when an update adds a field to a tool's output, a client that checks results against the old schema refuses the call. In Claude Code the message is "Structured content does not match the tool's output schema".
+
+Nothing is wrong on the site. The client rejects the result after the site has answered, so a write tool that fails this way has already made its change. Check the change log before you run it again. Reconnect the Steadhand server in the client, or start a new session, and the client reads the current list.
+
 ## Builds and releases
 
 Build a release zip:

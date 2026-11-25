@@ -392,7 +392,7 @@ Principle: **Free must be genuinely safe on its own.** Pro adds control and conv
 - No `eval`, no dynamic includes, no shell calls, no unserialize of untrusted input.
 - The administrator's undo (§7) is an admin-post action: POST only, a nonce bound to the entry, `manage_options`, and no agent role, checked again in the pipeline.
 - Uninstall (`uninstall.php`, which runs only when the Composer autoloader is present): remove our table (`{prefix}steadhand_log`), our options (`steadhand_db_version` and `steadhand_log_last_prune`) and the `steadhand_agent` role, strip every Steadhand capability from every user, and revoke the application passwords of users whose only role was the agent role (those credentials exist only for agent access). Users are never deleted, and users who also hold another role keep their application passwords. No orphans are left behind. The four trash marker keys (`TrashRules::MARKER_KEYS`) are removed from the current site's posts only, and only when the autoloader is present, as the rest of uninstall is. Multisite is not supported (D13), so uninstall does not go through the other sites of a network.
-- `SECURITY.md` with a disclosure policy. GitHub private vulnerability reporting is available only once the repository is public (M4); until then reports go privately to the maintainers. Security fixes are released within 7 days of a confirmed report.
+- `SECURITY.md` with a disclosure policy. Reports go through GitHub private vulnerability reporting, which has been on since the repository became public (D24). Security fixes are released within 7 days of a confirmed report.
 - Before each release: PHPCS (WordPress Coding Standards + security sniffs), Plugin Check, the test suite, and a MAKR pentest pass against a staging site (auth bypass, capability escalation, guardrail bypass, injection, SSRF).
 
 ## 11. Distribution and updates
@@ -406,7 +406,7 @@ Principle: **Free must be genuinely safe on its own.** Pro adds control and conv
 - Branches: `main` is always releasable; feature branches → PR → review → merge. Nobody pushes to `main` directly (enforce with branch protection once the repo is public).
 - Local dev: `@wordpress/env` (wp-env), with the MCP Adapter installed in the environment. Integration tests run in wp-env's isolated tests environment (`tests-cli` container, its own database), never against the development site.
 - CI (GitHub Actions, per D8): `ci.yml` jobs take their runner from the repository variable `STEADHAND_RUNNER` (default `ubuntu-latest`). `release.yml` jobs are fixed to `ubuntu-latest` on purpose, so the job that can publish releases cannot be moved by editing a repository variable. Jobs: PHPCS, PHPUnit (integration tests via wp-env), Plugin Check, building the release zip.
-- Issues: GitHub Issue Forms (bug, feature, guardrail request). Security reports never go to issues: they go privately to the maintainers, and through GitHub private vulnerability reporting once the repository is public (M4).
+- Issues: GitHub Issue Forms (bug, feature, guardrail request). Security reports never go to issues: they go through GitHub private vulnerability reporting.
 - Coding agent: the Claude Code GitHub Action runs **only** on issues or PRs where a maintainer applied the `agent-ready` label. It works on a branch, opens a PR, and cannot merge. Issue text is untrusted input. It is not part of M0 and is added only when the owner asks.
 
 ## 13. Milestones
@@ -430,7 +430,7 @@ No user-facing tools yet. M0 builds the foundation every later milestone sits on
 6. **CI:** GitHub Actions running phpcs, tests and Plugin Check on every PR that changes anything other than `docs/`, `README.md` or `CLAUDE.md`. On a docs-only PR those jobs are skipped, and the `CI result` check still reports and passes; it is the one check branch protection requires. CI also builds a release zip (two variants: a dev build *with* `includes/Dev/Updater.php`, and a WordPress.org build with no update-checker code at all, including the PUC library files, with a check that fails if any appears).
 7. **Dev updater (D4):** `includes/Dev/Updater.php` using Plugin Update Checker against this repo's GitHub releases, loaded only by a guarded `require` when the file exists.
 8. **Docs:** `README.md` (what it is, local dev setup, how to connect Claude to a local site), `docs/HOOKS.md` (stub listing any extension points created so far), `uninstall.php`, and the `CLAUDE.md` Commands section updated to match reality.
-9. **Repo hygiene:** `.gitignore`, `.distignore` (what's excluded from release zips), and `SECURITY.md` (disclosure policy: private reports to the maintainers now, GitHub private vulnerability reporting once the repository is public).
+9. **Repo hygiene:** `.gitignore`, `.distignore` (what's excluded from release zips), and `SECURITY.md` (disclosure policy: reports through GitHub private vulnerability reporting).
 
 ## 14. Decisions
 

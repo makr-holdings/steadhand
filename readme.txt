@@ -105,6 +105,10 @@ The agent calls steadhand-undo-change with the entry ID, which steadhand-get-cha
 
 Thirty days by default. Old entries are removed when new entries are written, in batches, so a site that is rarely written to can keep them longer.
 
+= A tool stopped working after I updated Steadhand. What should I do? =
+
+Reconnect the Steadhand server in your MCP client, or start a new session. A client reads the list of tools and their schemas when it connects, and many clients keep that list until they reconnect. After an update, a client that connected earlier does not see new tools, and it may reject a result that has a field the old schema does not list. Nothing is wrong on the site. If a write tool fails this way, the change was already made, so check the change log before you run it again.
+
 = What happens when I deactivate Steadhand? =
 
 The access rules stop while Steadhand is inactive. Agent users and their Application Passwords remain, and their Application Passwords work as ordinary low-privilege credentials on the REST API and XML-RPC until they are revoked. To take a site out of service, disable the agents on the Agents screen while Steadhand is active, which revokes their connections, or uninstall Steadhand. Uninstalling removes the agent role and the change log, and revokes the Application Passwords of accounts whose only role was the agent role. It never deletes users.

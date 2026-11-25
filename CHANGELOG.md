@@ -6,6 +6,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). The
 
 ## [Unreleased]
 
+### Changed
+- `SECURITY.md` gives one way to report a vulnerability, GitHub private vulnerability reporting, now that the repository is public.
+- `README.md` and `readme.txt` say to reconnect the MCP client after an update. A client that connected before the update keeps the old list of tools, so it does not see new tools and may reject a result that has a new field.
+
 ## [0.4.0] - 2026-11-25
 
 ### Added

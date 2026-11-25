@@ -6,10 +6,7 @@ Steadhand gives AI agents access to WordPress sites, so security reports matter.
 
 Do not open a public issue, pull request or discussion for a vulnerability.
 
-Report it privately:
-
-- While the repository is private, report directly and privately to the maintainers at MAKR Holdings, through the contact you already have with them.
-- Once the repository is public, report through GitHub private vulnerability reporting: https://github.com/makr-holdings/steadhand/security/advisories/new
+Report it privately, through GitHub private vulnerability reporting: https://github.com/makr-holdings/steadhand/security/advisories/new
 
 Include as much of the following as you can:
 
