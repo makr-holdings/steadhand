@@ -17,6 +17,23 @@ use Steadhand\Log\Schema;
  */
 final class SchemaTest extends LogTestCase {
 
+	/**
+	 * Every test starts from the baseline: both tables ready, the version recorded, no back-off and no prune marker. The
+	 * tests that run real DDL end in restore_baseline(), but a run that was interrupted can still leave committed state
+	 * behind, and no test may inherit it. The check reads only, so a healthy baseline costs no writes and no commit. Only
+	 * a broken baseline is restored, and that restore commits, which is the point of it.
+	 *
+	 * @return void
+	 */
+	protected function setUp(): void {
+		parent::setUp();
+
+		if ( ! $this->is_baseline() ) {
+			$this->restore_baseline();
+			$this->assertTrue( $this->is_baseline(), 'The baseline could not be restored before the test.' );
+		}
+	}
+
 	public function test_the_table_exists_after_install_with_every_column(): void {
 		Schema::install();
 
@@ -94,7 +111,7 @@ final class SchemaTest extends LogTestCase {
 			// Rows from before the upgrade have no after-state, so none of them may stay undoable (SPEC §7).
 			$this->assertSame( '0', (string) $kept['undoable'] );
 		} finally {
-			Schema::install();
+			$this->restore_baseline();
 		}
 
 		$this->assertSame( $this->expected_columns(), $this->column_names() );
@@ -119,7 +136,7 @@ final class SchemaTest extends LogTestCase {
 			$this->assertTrue( Schema::exists() );
 			$this->assertFalse( Schema::ready() );
 		} finally {
-			Schema::install();
+			$this->restore_baseline();
 		}
 
 		$this->assertTrue( Schema::ready() );
@@ -159,7 +176,7 @@ final class SchemaTest extends LogTestCase {
 			if ( null !== $filter ) {
 				remove_filter( 'query', $filter );
 			}
-			Schema::install();
+			$this->restore_baseline();
 		}
 
 		$this->assertTrue( Schema::ready() );
@@ -201,7 +218,7 @@ final class SchemaTest extends LogTestCase {
 			if ( null !== $filter ) {
 				remove_filter( 'query', $filter );
 			}
-			Schema::install();
+			$this->restore_baseline();
 		}
 	}
 
@@ -257,7 +274,7 @@ final class SchemaTest extends LogTestCase {
 			$this->assertFalse( get_option( Schema::OPTION ), 'uninstall must delete the version option.' );
 			$this->assertFalse( get_option( 'steadhand_log_last_prune' ), 'uninstall must delete the prune option.' );
 		} finally {
-			Schema::install();
+			$this->restore_baseline();
 		}
 
 		$this->assertTrue( Schema::exists(), 'The table must be back for the other tests.' );
@@ -294,7 +311,7 @@ final class SchemaTest extends LogTestCase {
 			$this->assertSame( 2, $creates, 'maybe_upgrade must run no CREATE while the back-off is set.' );
 		} finally {
 			remove_filter( 'query', $filter );
-			Schema::install();
+			$this->restore_baseline();
 		}
 
 		$this->assertTrue( Schema::exists(), 'The real table must be back for the other tests.' );
@@ -317,7 +334,7 @@ final class SchemaTest extends LogTestCase {
 			$this->assertSame( 2, $creates, 'install() tries even while the back-off is set.' );
 		} finally {
 			remove_filter( 'query', $filter );
-			Schema::install();
+			$this->restore_baseline();
 		}
 
 		$this->assertTrue( Schema::exists() );
@@ -335,7 +352,7 @@ final class SchemaTest extends LogTestCase {
 
 			$this->assertFalse( get_transient( Schema::RETRY_TRANSIENT ) );
 		} finally {
-			Schema::install();
+			$this->restore_baseline();
 		}
 
 		$this->assertTrue( Schema::exists() );
@@ -377,12 +394,46 @@ final class SchemaTest extends LogTestCase {
 			// The table name is fixed (see Schema::table()); SHOW INDEX cannot bind an identifier.
 			$rows = $wpdb->get_results( "SHOW INDEX FROM {$table}", ARRAY_A ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- Test reads the table definition; the table name is fixed.
 		} finally {
-			Schema::install();
+			$this->restore_baseline();
 		}
 
 		$keys = array_values( array_unique( array_column( (array) $rows, 'Key_name' ) ) );
 		sort( $keys );
 		$this->assertSame( array( 'PRIMARY', 'created_at', 'user_created', 'user_id_id' ), $keys );
+	}
+
+	/**
+	 * Whether the committed state is the baseline: both tables ready, the version recorded, and no back-off and no prune
+	 * marker. Reads only, so it writes nothing and commits nothing.
+	 *
+	 * @return bool
+	 */
+	private function is_baseline(): bool {
+		return Schema::ready()
+			&& Schema::snapshots_ready()
+			&& Schema::DB_VERSION === get_option( Schema::OPTION )
+			&& false === get_transient( Schema::RETRY_TRANSIENT )
+			&& false === get_option( 'steadhand_log_last_prune' );
+	}
+
+	/**
+	 * Puts the real tables and the rest of the state back to the baseline, and commits it. Every test that runs real DDL
+	 * calls this from its finally block, whatever happened in the test.
+	 *
+	 * The temporary-table filters are removed first, because under them CREATE and DROP touch only temporary tables. Then
+	 * uninstall() drops both tables, which removes every row the test committed (a DROP commits the rows written before
+	 * it), and it deletes the version option, the back-off and the prune marker. install() records the version only after
+	 * its last CREATE TABLE, so that write would stay in the open transaction and be rolled back at tearDown. The version
+	 * is therefore written before install(): the CREATE TABLE statements that follow commit it, with the rest.
+	 *
+	 * @return void
+	 */
+	private function restore_baseline(): void {
+		$this->let_ddl_reach_the_table();
+
+		Schema::uninstall();
+		update_option( Schema::OPTION, Schema::DB_VERSION );
+		Schema::install();
 	}
 
 	/**
@@ -554,7 +605,7 @@ final class SchemaTest extends LogTestCase {
 			$this->assertSame( '8', (string) $kept['after_snapshot_id'] );
 			$this->assertSame( '1', (string) $kept['undoable'], 'A row with an after-state keeps its undoable flag through the upgrade.' );
 		} finally {
-			Schema::install();
+			$this->restore_baseline();
 		}
 	}
 
@@ -587,7 +638,7 @@ final class SchemaTest extends LogTestCase {
 			$this->assertSame( 1, $this->count_rows( $user ) );
 		} finally {
 			remove_filter( 'query', $filter );
-			Schema::install();
+			$this->restore_baseline();
 		}
 
 		$this->assertTrue( Schema::snapshots_ready() );
@@ -610,7 +661,7 @@ final class SchemaTest extends LogTestCase {
 			$found = $wpdb->get_var( $wpdb->prepare( 'SHOW TABLES LIKE %s', $wpdb->esc_like( Schema::snapshots_table() ) ) ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching -- Test checks the table is gone.
 			$this->assertNull( $found, 'uninstall must drop the snapshots table.' );
 		} finally {
-			Schema::install();
+			$this->restore_baseline();
 		}
 
 		$this->assertTrue( Schema::snapshots_ready() );
