@@ -167,6 +167,25 @@ final class MenuReader {
 	}
 
 	/**
+	 * One item as get-menu lists it, found in page()'s list of its menu, or null when get-menu does not list the item (its linked object is
+	 * trashed or missing, it is an orphaned draft, or a filter left it out). The order is the item's position among the listed items,
+	 * which is what get-menu returns. update-menu uses this for the item it returns and for previous.order, so both match get-menu.
+	 *
+	 * @param \WP_Term $menu    Classic menu.
+	 * @param int      $item_id Item post ID.
+	 * @return array<string, mixed>|null The get-menu item shape (see item()), or null.
+	 */
+	public static function listed_item( \WP_Term $menu, int $item_id ): ?array {
+		foreach ( self::page( $menu )['items'] as $item ) {
+			if ( (int) $item->ID === $item_id ) {
+				return self::item( $item );
+			}
+		}
+
+		return null;
+	}
+
+	/**
 	 * The theme locations a classic menu is assigned to.
 	 *
 	 * @param int                  $menu_id   Menu term ID.

@@ -129,6 +129,10 @@ No. Steadhand never calls an AI provider and stores no AI keys. Content leaves t
 
 == Changelog ==
 
+= Unreleased =
+* steadhand-update-menu reports an item's order as steadhand-get-menu does: the position the item is listed at, not the stored menu order.
+* steadhand-get-menu has a new field, movable. It is false when a classic menu's stored order means a move may be refused, until an administrator saves the menu in Appearance > Menus. It is always false for block navigation. Reconnect your MCP client after this update.
+
 = 0.5.0 =
 * New tool: steadhand-update-menu adds, renames, moves, hides and shows the items of a classic navigation menu. It never deletes an item or a menu. It needs the menus capability and the publish capability, and the menus capability is off by default.
 * New tool: steadhand-update-option sets the site title or the tagline as plain text. No other option can be changed. It needs the settings capability and the publish capability, and the settings capability is off by default.

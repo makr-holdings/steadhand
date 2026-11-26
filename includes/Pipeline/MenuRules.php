@@ -503,8 +503,9 @@ final class MenuRules {
 
 	/**
 	 * Whether the stored order is consistent with the tree: every item comes after its parent (when the parent is in the rows), and the
-	 * items of every subtree are next to each other in menu order. Core's Save Menu always leaves both true; a menu that does not is
-	 * refused by a move, because the target order cannot be written safely over it.
+	 * items of every subtree are next to each other in menu order. A menu saved in Appearance > Menus normally leaves both true, but
+	 * other tools and imports can store an order that does not, and a menu that does not is refused by a move, because the target
+	 * order cannot be written safely over it.
 	 *
 	 * @param array<int, array{id: int, parent: int, order: int, status: string, orphaned: bool, post: \WP_Post}> $rows Rows from items_raw().
 	 */
@@ -669,18 +670,76 @@ final class MenuRules {
 			return null;
 		}
 
+		if ( ! self::ascending_positive( $orders, $low, $high ) ) {
+			return null;
+		}
+
 		$changes = array();
 		for ( $index = $low; $index <= $high; ++$index ) {
-			if ( $orders[ $index ] < 1 || ( $index > $low && $orders[ $index ] <= $orders[ $index - 1 ] ) ) {
-				return null;
-			}
-
 			if ( $target[ $index ] !== $flat[ $index ] ) {
 				$changes[ $target[ $index ] ] = $orders[ $index ];
 			}
 		}
 
 		return $changes;
+	}
+
+	/**
+	 * Whether the order values from $low to $high, in row order, are all positive integers that strictly increase: each is at least 1,
+	 * and each is greater than the one before it inside the range. The first value of the range is only checked for being positive.
+	 *
+	 * This is the check order_changes() makes on the span a move rewrites. movable() makes it on the whole menu.
+	 *
+	 * @param int[] $orders The stored order of each row, in row order.
+	 * @param int   $low    The first index.
+	 * @param int   $high   The last index. An empty range (high below low) is true.
+	 */
+	private static function ascending_positive( array $orders, int $low, int $high ): bool {
+		for ( $index = $low; $index <= $high; ++$index ) {
+			if ( $orders[ $index ] < 1 || ( $index > $low && $orders[ $index ] <= $orders[ $index - 1 ] ) ) {
+				return false;
+			}
+		}
+
+		return true;
+	}
+
+	/**
+	 * Whether a classic menu's stored order is one a move can rewrite, which is what get-menu reports as movable. True when the order is
+	 * consistent with the tree (consistent_with_tree()), every parent is a row of the menu or the top level (every_parent_listed()), and
+	 * every row's order is a positive integer that is greater than the row before it (ascending_positive() over the whole menu).
+	 *
+	 * The planner, plan_move(), refuses a move with MOVE_ORDER when the tree check fails (every move), when order_changes() finds the
+	 * span a move rewrites not positive and increasing, or a boundary out of order, and when inverse_restores() finds that the inverse
+	 * would not put the menu back. The span check is applied here to the whole menu, which is stricter, and the parent check covers the
+	 * inverse case. So when this is true, no move is refused with MOVE_ORDER. The menu's size, depth, hidden parent, edit rights and the
+	 * move's own target can still refuse a move for other reasons. When this is false, a move may be refused with MOVE_ORDER until the
+	 * menu is saved in Appearance > Menus, and a false menu can also accept every move.
+	 *
+	 * @param array<int, array{id: int, parent: int, order: int, status: string, orphaned: bool, post: \WP_Post}> $rows Rows from items_raw().
+	 */
+	public static function movable( array $rows ): bool {
+		return self::consistent_with_tree( $rows )
+			&& self::every_parent_listed( $rows )
+			&& self::ascending_positive( array_column( $rows, 'order' ), 0, count( $rows ) - 1 );
+	}
+
+	/**
+	 * Whether every row's parent is the top level (0) or an item of the menu. A row whose parent is missing, or malformed, is a root
+	 * to consistent_with_tree(), but its place can be the one an inverse move cannot restore (a row at the start that is not top
+	 * level), so movable() counts it as not movable. Read-only; the rows are not changed.
+	 *
+	 * @param array<int, array{id: int, parent: int, order: int, status: string, orphaned: bool, post: \WP_Post}> $rows Rows from items_raw().
+	 */
+	private static function every_parent_listed( array $rows ): bool {
+		$listed = array_flip( array_column( $rows, 'id' ) );
+		foreach ( $rows as $row ) {
+			if ( 0 !== $row['parent'] && ! isset( $listed[ $row['parent'] ] ) ) {
+				return false;
+			}
+		}
+
+		return true;
 	}
 
 	/**
