@@ -693,7 +693,7 @@ final class AgentsScreen {
 			'agent_disabled_no_password'     => array( 'error', __( 'This agent is disabled. Enable it before adding a connection.', 'steadhand' ) ),
 			'ips_saved'                      => array( 'success', __( 'The allowed IP addresses were saved.', 'steadhand' ) ),
 			'ips_invalid'                    => array( 'error', __( 'The allowed IP addresses were not saved. Each line must be one IPv4 or IPv6 address, or a range such as 203.0.113.0/24 or 2001:db8::/48, with at most 20 entries in all. If the saved list cannot be read, an empty box does not remove it: tick the box to remove the list and allow any address. Nothing was changed.', 'steadhand' ) ),
-			'ips_failed'                     => array( 'error', __( 'The allowed IP addresses could not be confirmed as saved. Check the list on this page before the agent is used.', 'steadhand' ) ),
+			'ips_failed'                     => array( 'error', __( 'The allowed IP addresses could not be confirmed as saved. Check the list on this page before the agent is used. If the page says the list cannot be read, remove it with the checkbox first, then save the new list.', 'steadhand' ) ),
 		);
 	}
 

@@ -48,7 +48,7 @@ final class Lockdown {
 
 	/**
 	 * Whether steadhand_agent_ip_refused has fired in this request. Cleared when Plugin::boot() runs, which happens on every request,
-	 * because PHP keeps static properties between the requests a worker serves.
+	 * so the value never carries over where one PHP process serves more than one request (a worker-mode runtime, or the test suite).
 	 *
 	 * @var bool
 	 */
