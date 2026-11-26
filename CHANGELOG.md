@@ -6,7 +6,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). The
 
 ## [Unreleased]
 
+### Added
+- `steadhand/get-menu` returns hidden items of a classic menu, and every item has a `hidden` field. A hidden item is one in the draft status, which the public menu does not print. This is the first step towards `steadhand/update-menu` (SPEC section 5, D25), which is not built yet.
+
 ### Changed
+- The output of `steadhand/get-menu` has a new field, so an MCP client that connected before the update must reconnect.
+- In `steadhand/get-menu`, an item's `order` now counts hidden items too.
+
+### Security
+- The capability mapping for `steadhand/update-menu` is in place ahead of the ability (SPEC section 14.1). It applies only inside a call of that ability, which is not registered yet, so nothing can reach it. It never grants `edit_theme_options`.
 - `SECURITY.md` gives one way to report a vulnerability, GitHub private vulnerability reporting, now that the repository is public.
 - `README.md` and `readme.txt` say to reconnect the MCP client after an update. A client that connected before the update keeps the old list of tools, so it does not see new tools and may reject a result that has a new field.
 

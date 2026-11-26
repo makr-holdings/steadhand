@@ -9,6 +9,8 @@ declare( strict_types=1 );
 
 namespace Steadhand\Abilities;
 
+use Steadhand\Pipeline\MenuRules;
+
 defined( 'ABSPATH' ) || exit;
 
 /**
@@ -79,29 +81,89 @@ final class MenuReader {
 	}
 
 	/**
-	 * The items of a classic menu in menu order, without items core marks invalid (a trashed or missing linked object).
+	 * The items of a classic menu, in menu order, for get-menu: the published items and the draft ones, which the public site does not
+	 * print. Returns the items and whether the menu has more than MAX_ITEMS of them.
 	 *
-	 * Core removes invalid items outside wp-admin (_is_valid_nav_menu_item() in wp_get_nav_menu_items()), and Steadhand
-	 * calls run there. This check is belt-and-braces, for a call made with is_admin() true. No test makes such a call,
-	 * so it is not covered by one.
+	 * Items core would not print are left out: a trashed or missing linked object (an invalid item), and an orphaned draft
+	 * (MenuRules::ORPHANED_META). Each kept item is set up the way core sets up a menu item (wp_setup_nav_menu_item(), with the
+	 * pre_wp_setup_nav_menu_item filter), so its title and URL are the ones the public menu prints, for a draft too. The menu_order
+	 * of the kept items is renumbered 1, 2, 3 as wp_get_nav_menu_items() does, before the wp_get_nav_menu_items filter runs.
+	 *
+	 * The wp_get_nav_menu_items filter then runs on the kept items, as core runs it, and the result is trusted only in part: a
+	 * returned entry is kept only when it is a WP_Post of a nav_menu_item whose ID was in the list passed in, and only once per ID.
+	 * So a filter may drop an item or change its title, URL, parent or order, but cannot add one. A non-array result means no items.
+	 *
+	 * Setup stops after MAX_ITEMS + 1 kept items, one more than the reader returns, so truncated stays right without loading an
+	 * unbounded menu. This does not call wp_get_nav_menu_items(): that function returns nothing when the menu's stored item count is 0,
+	 * and the stored count counts only published items, so a menu whose items are all hidden would look empty.
 	 *
 	 * @param \WP_Term $menu Classic menu.
-	 * @return \WP_Post[]
+	 * @return array{items: \WP_Post[], truncated: bool}
 	 */
-	public static function items( \WP_Term $menu ): array {
-		$items = wp_get_nav_menu_items( $menu, array( 'update_post_term_cache' => false ) );
-		if ( ! is_array( $items ) ) {
-			return array();
-		}
+	public static function page( \WP_Term $menu ): array {
+		$kept = array();
+		foreach ( MenuRules::items_raw( $menu ) as $row ) {
+			if ( 'draft' === $row['status'] && $row['orphaned'] ) {
+				continue;
+			}
 
-		$valid = array();
-		foreach ( $items as $item ) {
-			if ( $item instanceof \WP_Post && empty( $item->_invalid ) ) {
-				$valid[] = $item;
+			// A copy, so the menu_order change below never reaches the post object that get_posts() caches.
+			$item = wp_setup_nav_menu_item( clone $row['post'] );
+			if ( ! $item instanceof \WP_Post || ! empty( $item->_invalid ) ) {
+				continue;
+			}
+
+			$kept[] = $item;
+			if ( count( $kept ) > self::MAX_ITEMS ) {
+				break;
 			}
 		}
 
-		return array_values( $valid );
+		$truncated = count( $kept ) > self::MAX_ITEMS;
+
+		$position = 1;
+		foreach ( $kept as $item ) {
+			$item->menu_order = $position++;
+		}
+
+		$allowed = array();
+		foreach ( $kept as $item ) {
+			$allowed[ (int) $item->ID ] = true;
+		}
+
+		// phpcs:ignore WordPress.NamingConventions.PrefixAllGlobals.NonPrefixedHooknameFound -- Core's hook, run as core runs it.
+		$filtered = apply_filters( 'wp_get_nav_menu_items', $kept, $menu, MenuRules::query_args( $menu ) );
+		if ( ! is_array( $filtered ) ) {
+			return array(
+				'items'     => array(),
+				'truncated' => $truncated,
+			);
+		}
+
+		$items = array();
+		$seen  = array();
+		foreach ( $filtered as $entry ) {
+			if ( ! $entry instanceof \WP_Post || 'nav_menu_item' !== $entry->post_type ) {
+				continue;
+			}
+
+			$id = (int) $entry->ID;
+			if ( ! isset( $allowed[ $id ] ) || isset( $seen[ $id ] ) ) {
+				continue;
+			}
+
+			$seen[ $id ] = true;
+			$items[]     = $entry;
+		}
+
+		if ( count( $items ) > self::MAX_ITEMS ) {
+			$truncated = true;
+		}
+
+		return array(
+			'items'     => $items,
+			'truncated' => $truncated,
+		);
 	}
 
 	/**
@@ -125,9 +187,10 @@ final class MenuReader {
 	/**
 	 * One classic menu item, in the get-menu shape. Title and URL are what the menu shows: for an item linked to an
 	 * object, core derives them from that object, which is also what the front end prints. Nothing else about the
-	 * linked object is read.
+	 * linked object is read. hidden is true for a draft item, which the public site does not print, and false for a
+	 * published one.
 	 *
-	 * @param \WP_Post $item Valid item from items().
+	 * @param \WP_Post $item Valid item from page().
 	 * @return array<string, mixed>
 	 */
 	public static function item( \WP_Post $item ): array {
@@ -141,11 +204,14 @@ final class MenuReader {
 			// Core stores 'custom' and the item's own ID for a custom link. Agents get '' and 0, as the tool describes.
 			'object'      => 'custom' === $type ? '' : PostReader::utf8( (string) ( $item->object ?? '' ) ),
 			'object_id'   => 'custom' === $type ? 0 : (int) ( $item->object_id ?? 0 ),
-			'parent'      => (int) ( $item->menu_item_parent ?? 0 ),
+			// The stored parent, parsed as MenuRules does. A value that is not a whole number is shown as 0 (top level), so get-menu
+			// never returns a negative parent. The item itself is still listed.
+			'parent'      => max( 0, MenuRules::parse_parent( $item->menu_item_parent ?? '' ) ),
 			'order'       => (int) $item->menu_order,
 			'target'      => PostReader::utf8( (string) ( $item->target ?? '' ) ),
 			'classes'     => self::classes( $item->classes ?? array() ),
 			'description' => TermReader::description( (string) ( $item->description ?? '' ) ),
+			'hidden'      => 'draft' === (string) $item->post_status,
 		);
 	}
 
@@ -197,6 +263,7 @@ final class MenuReader {
 				'items' => array( 'type' => 'string' ),
 			),
 			'description' => array( 'type' => 'string' ),
+			'hidden'      => array( 'type' => 'boolean' ),
 		);
 
 		return array(

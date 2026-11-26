@@ -137,4 +137,28 @@ final class MenuConsistencyTest extends MenuToolTestCase {
 		$this->assertLessThanOrEqual( 1000, strlen( $items[ $long ]['title'] ) );
 		$this->assertSame( 1, preg_match( '//u', $items[ $long ]['title'] ), 'The cut title must stay valid UTF-8.' );
 	}
+
+	/**
+	 * A classic menu whose only item is hidden is listed by list-menus, with an item_count of 0, and get-menu returns its one item,
+	 * hidden. The two tools agree on the menu; they differ only in the count, which is the stored count of published items.
+	 */
+	public function test_a_classic_menu_with_only_a_hidden_item_is_listed_and_its_item_is_readable(): void {
+		$this->act_as_agent();
+		$menu = $this->classic_menu( 'Steadhand only hidden' );
+		$item = $this->draft_custom_item( $menu, 'Only hidden', 'https://example.test/only-hidden/', 0, 1 );
+
+		$listed = array_column( $this->output( self::LIST_TOOL )['menus'], null, 'id' );
+		$this->assertArrayHasKey( $menu, $listed, 'list-menus lists the classic menu.' );
+		$this->assertSame( 0, $listed[ $menu ]['item_count'] );
+
+		$menu_output = $this->output(
+			self::GET_TOOL,
+			array(
+				'kind' => 'classic',
+				'id'   => $menu,
+			)
+		);
+		$this->assertSame( array( $item ), array_column( $menu_output['items'], 'id' ), 'get-menu returns the hidden item.' );
+		$this->assertTrue( $menu_output['items'][0]['hidden'] );
+	}
 }

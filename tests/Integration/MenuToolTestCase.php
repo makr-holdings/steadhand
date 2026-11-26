@@ -76,6 +76,33 @@ abstract class MenuToolTestCase extends ReadToolTestCase {
 	}
 
 	/**
+	 * Adds a draft custom-link item to a classic menu (a hidden item) and returns the item's post ID.
+	 *
+	 * @param int    $menu        Menu term ID.
+	 * @param string $title       Item title.
+	 * @param string $url         Item URL.
+	 * @param int    $parent_item Parent item ID, or 0.
+	 * @param int    $position    Position in the menu.
+	 */
+	protected function draft_custom_item( int $menu, string $title, string $url, int $parent_item = 0, int $position = 0 ): int {
+		$item = wp_update_nav_menu_item(
+			$menu,
+			0,
+			array(
+				'menu-item-type'      => 'custom',
+				'menu-item-title'     => $title,
+				'menu-item-url'       => $url,
+				'menu-item-status'    => 'draft',
+				'menu-item-parent-id' => $parent_item,
+				'menu-item-position'  => $position,
+			)
+		);
+		$this->assertIsInt( $item, 'The draft item fixture must be created: ' . $title );
+
+		return $item;
+	}
+
+	/**
 	 * Assigns a classic menu to the test's theme location.
 	 *
 	 * @param int $menu Menu term ID.
