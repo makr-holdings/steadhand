@@ -4,7 +4,7 @@ Tags: mcp, ai, security, agents, audit-log
 Requires at least: 6.9
 Tested up to: 7.1
 Requires PHP: 8.1
-Stable tag: 0.4.0
+Stable tag: 0.5.0
 License: GPL-2.0-or-later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -129,7 +129,11 @@ No. Steadhand never calls an AI provider and stores no AI keys. Content leaves t
 
 == Changelog ==
 
-= Unreleased =
+= 0.5.0 =
+* New tool: steadhand-update-menu adds, renames, moves, hides and shows the items of a classic navigation menu. It never deletes an item or a menu. It needs the menus capability and the publish capability, and the menus capability is off by default.
+* New tool: steadhand-update-option sets the site title or the tagline as plain text. No other option can be changed. It needs the settings capability and the publish capability, and the settings capability is off by default.
+* steadhand-get-menu also returns hidden menu items, and every item has a hidden field. Reconnect your MCP client after this update.
+* A Guardrails screen lists the rules that are always on, and has one preset, Rank Math options, which is on by default.
 * An administrator can limit an agent to a list of IP addresses and ranges on the Agents screen. While the list has entries, the agent's Application Passwords work only from an address on it. Off by default. Behind a reverse proxy, read the notes in the README before you rely on the list.
 
 = 0.4.0 =
@@ -174,6 +178,9 @@ No. Steadhand never calls an AI provider and stores no AI keys. Content leaves t
 The full changelog is in CHANGELOG.md in the plugin folder.
 
 == Upgrade Notice ==
+
+= 0.5.0 =
+Adds menu and site title tools, a Guardrails screen and an IP allowlist for agents, all off by default. Reconnect your MCP client after updating.
 
 = 0.4.0 =
 Adds trash and restore tools for agents, behind a capability that is off by default.
