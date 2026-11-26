@@ -33,6 +33,9 @@ final class SnapshotStore {
 	/** The state of one classic menu item before an update-menu call: its menu, status, title, parent and order. Never undoable yet. */
 	public const KIND_MENU_ITEM = 'menu_item';
 
+	/** An option's value before an update-option call. The object is the option, which has no post ID, so its object ID is 0. */
+	public const KIND_OPTION = 'option';
+
 	/**
 	 * The most bytes one saved state may take, as encoded JSON. A post with the most terms set-post-terms can see (500 in one
 	 * taxonomy, each ID at most 10 digits and a comma) fits well inside it. A larger state is not saved, so the write is not
@@ -41,7 +44,7 @@ final class SnapshotStore {
 	public const MAX_STATE_BYTES = 16384;
 
 	/** The kinds save() accepts. */
-	private const KINDS = array( self::KIND_POST_TERMS, self::KIND_FEATURED_IMAGE, self::KIND_MENU_ITEM );
+	private const KINDS = array( self::KIND_POST_TERMS, self::KIND_FEATURED_IMAGE, self::KIND_MENU_ITEM, self::KIND_OPTION );
 
 	/** The longest object type that fits the table. */
 	private const MAX_OBJECT_TYPE_BYTES = 32;
@@ -58,7 +61,7 @@ final class SnapshotStore {
 	 *
 	 * @param string               $kind        One of the KIND_ constants.
 	 * @param string               $object_type The object's type, for the post: 'post'. At most 32 bytes.
-	 * @param int                  $object_id   The object's ID, at least 1.
+	 * @param int                  $object_id   The object's ID, at least 1; 0 for an option (KIND_OPTION).
 	 * @param array<string, mixed> $state      The state to save. Encoded as JSON.
 	 * @return int The row ID, or 0.
 	 * @throws \LogicException When called outside a write.
@@ -136,7 +139,9 @@ final class SnapshotStore {
 	private static function insert( string $kind, string $object_type, int $object_id, array $state ): int {
 		global $wpdb;
 
-		if ( ! in_array( $kind, self::KINDS, true ) || '' === $object_type || strlen( $object_type ) > self::MAX_OBJECT_TYPE_BYTES || $object_id < 1 ) {
+		// An object ID of 0 is allowed only for an option, which has no post ID (KIND_OPTION).
+		$id_ok = $object_id >= 1 || ( 0 === $object_id && self::KIND_OPTION === $kind );
+		if ( ! in_array( $kind, self::KINDS, true ) || '' === $object_type || strlen( $object_type ) > self::MAX_OBJECT_TYPE_BYTES || ! $id_ok ) {
 			return 0;
 		}
 

@@ -15,6 +15,7 @@ use Steadhand\Guardrails\Engine;
 use Steadhand\Log\SnapshotStore;
 use Steadhand\Pipeline\MenuRules;
 use Steadhand\Pipeline\MenuWriter;
+use Steadhand\Pipeline\PlainText;
 
 defined( 'ABSPATH' ) || exit;
 
@@ -40,22 +41,6 @@ final class UpdateMenu extends Ability {
 	 * The most bytes a menu item title may take in the output, as MenuReader clamps it.
 	 */
 	private const MAX_TITLE_BYTES = 1000;
-
-	/**
-	 * Patterns a title may not match. Markup, any entity other than &amp; (named, decimal and hex, and a bare &), control, format,
-	 * private-use and unassigned characters, line and paragraph separators, every space separator other than U+0020, a few invisible
-	 * filler and combining characters (U+034F, the Hangul fillers, U+2800), variation selectors, leading, trailing or repeated ASCII
-	 * spaces, and a percent-encoded octet. A preg error counts as a match, so a title the check cannot read is refused.
-	 *
-	 * @var string[]
-	 */
-	private const TITLE_REFUSED = array(
-		'/[<>]/',
-		'/&(?!amp;)/',
-		'/[\p{Cc}\p{Cf}\p{Co}\p{Cn}\p{Zl}\p{Zp}\x{034F}\x{115F}\x{1160}\x{3164}\x{FFA0}\x{2800}\x{FE00}-\x{FE0F}\x{E0100}-\x{E01EF}]|(?!\x20)\p{Zs}/u',
-		'/^\s|\s$|\s\s/u',
-		'/%[0-9A-Fa-f]{2}/',
-	);
 
 	/**
 	 * Whether the snapshot of the item before this call could not be saved, so the call cannot be undone and says so (set by snapshot()).
@@ -1190,30 +1175,13 @@ final class UpdateMenu extends Ability {
 	}
 
 	/**
-	 * Whether a title is plain text that WordPress stores as sent: valid UTF-8, not blank, and no match for any pattern in TITLE_REFUSED.
-	 * A preg error counts as a refusal. The title is at most 200 characters, and is unchanged by sanitize_text_field() and by the
-	 * entity normalisation the save applies. An empty title is not checked here: its meaning depends on the item.
+	 * Whether a title is plain text that WordPress stores as sent, at most 200 characters (PlainText::valid()). An empty title is not
+	 * checked here: its meaning depends on the item.
 	 *
 	 * @param string $title The title, as sent or as stored.
 	 */
 	private static function valid_title( string $title ): bool {
-		if ( 1 !== preg_match( '//u', $title ) || '' === trim( $title ) ) {
-			return false;
-		}
-
-		foreach ( self::TITLE_REFUSED as $pattern ) {
-			// A match refuses, and so does a preg error (false): the title is not checked any further.
-			if ( 0 !== preg_match( $pattern, $title ) ) {
-				return false;
-			}
-		}
-
-		// Matches when the title is at most 200 characters. Zero means it is longer; false is a preg error. Both refuse.
-		if ( 1 !== preg_match( '/^.{0,200}\z/su', $title ) ) {
-			return false;
-		}
-
-		return sanitize_text_field( $title ) === $title && wp_kses_normalize_entities( $title ) === $title;
+		return PlainText::valid( $title, 200 );
 	}
 
 	/**

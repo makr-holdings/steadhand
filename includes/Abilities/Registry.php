@@ -73,6 +73,7 @@ final class Registry {
 			new TrashPost(),
 			new RestorePost(),
 			new UpdateMenu(),
+			new UpdateOption(),
 			new UndoChange( $this->change_log ),
 		);
 	}

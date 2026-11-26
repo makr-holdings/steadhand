@@ -55,14 +55,16 @@ Write:
 * Undo its own change to post text, terms or a featured image
 * Move a post or page to the trash and restore one it trashed, with the trash capability. It cannot delete permanently.
 * Add, rename, move, hide and show items of a classic menu, with the menus and publish capabilities. It cannot delete an item or a menu, or change where a theme shows a menu.
+* Change the site title and the tagline, with the settings and publish capabilities. It cannot change any other option, create an option or delete one.
 
 = What an agent can never do while Steadhand is active =
 
 * Use the REST API, XML-RPC or wp-admin. Its credentials work only at the Steadhand endpoint.
 * Sign in with a password.
-* Manage users, roles, plugins or settings, delete a post or page permanently, or run PHP, SQL or shell commands. No tool does these.
+* Manage users, roles or plugins, change a setting other than the site title and tagline, delete a post or page permanently, or run PHP, SQL or shell commands. No tool does these.
 * Publish, schedule or make content private, unless an administrator turns on the publish capability for it. It is off by default.
 * Change a menu, unless an administrator turns on the menus capability and the publish capability. Both are off by default. A menu change is live on the public site at once.
+* Change the site title or tagline, unless an administrator turns on the settings capability and the publish capability. Both are off by default. The change is live on every page at once.
 * Trash a post or page, or restore one, unless an administrator turns on the trash capability. It is off by default. WordPress itself deletes a trashed post for good after the site's trash period.
 * Connect with any account that holds a role besides the agent role, such as an administrator.
 

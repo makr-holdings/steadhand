@@ -154,11 +154,15 @@ final class AgentsHandler {
 	/**
 	 * Constructor.
 	 *
-	 * @param Registry  $registry The ability registry. Its abilities decide which capabilities the screen offers.
-	 * @param bool|null $network  Test seam only. Null, the value Plugin always uses, asks is_multisite(). A test passes true to take the
-	 *                            multisite branch on a single-site test install. It is not a filter, and nothing in production sets it.
+	 * @param Registry      $registry The ability registry. Its abilities decide which capabilities the screen offers.
+	 * @param bool|null     $network  Test seam only. Null, the value Plugin always uses, asks is_multisite(). A test passes true to take the
+	 *                                multisite branch on a single-site test install. It is not a filter, and nothing in production sets it.
+	 * @param string[]|null $offered  Test seam only. Null, the value Plugin always uses, offers every capability a registered ability uses.
+	 *                                A test passes a list to offer exactly those (plus steadhand_connect), for example one without
+	 *                                steadhand_settings, so the handling of a capability the screen does not offer can be tested. Nothing in
+	 *                                production sets it.
 	 */
-	public function __construct( private Registry $registry, private ?bool $network = null ) {}
+	public function __construct( private Registry $registry, private ?bool $network = null, private ?array $offered = null ) {}
 
 	/**
 	 * The nonce action for one of the actions. A target user is named in the action where there is one, so a nonce for one user
@@ -187,7 +191,8 @@ final class AgentsHandler {
 	 * @return string[] In canonical order.
 	 */
 	public function offered_capabilities(): array {
-		$offered = array_unique( array_merge( array( Capabilities::CONNECT ), $this->registry->capabilities_used() ) );
+		$offered = $this->offered ?? $this->registry->capabilities_used();
+		$offered = array_unique( array_merge( array( Capabilities::CONNECT ), $offered ) );
 
 		return array_values( array_intersect( Capabilities::all(), $offered ) );
 	}

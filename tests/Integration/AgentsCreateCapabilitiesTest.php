@@ -106,6 +106,15 @@ final class AgentsCreateCapabilitiesTest extends TestCase {
 	 * @param array|null $capabilities Null for the defaults, or the checked names.
 	 * @return array
 	 */
+	/**
+	 * A handler whose screen offers every capability except steadhand_settings, so a test can cover a capability the screen does not offer.
+	 */
+	private function handler_without_settings(): AgentsHandler {
+		$offered = array_values( array_diff( Capabilities::all(), array( Capabilities::SETTINGS ) ) );
+
+		return new AgentsHandler( ( new Plugin() )->registry(), null, $offered );
+	}
+
 	private function create( string $login, ?array $capabilities ): array {
 		return $this->handler->create( $this->nonce(), $login, 'Desk', $capabilities );
 	}
@@ -308,7 +317,25 @@ final class AgentsCreateCapabilitiesTest extends TestCase {
 		}
 	}
 
+	public function test_a_listener_that_sets_a_non_offered_steadhand_capability_true_refuses_and_rolls_back(): void {
+		$this->handler = $this->handler_without_settings();
+
+		$this->assertNotContains( Capabilities::SETTINGS, $this->handler->offered_capabilities(), 'Precondition: settings is not offered.' );
+		$this->on(
+			'steadhand_agent_created',
+			static function ( $user_id ): void {
+				get_userdata( $user_id )->add_cap( Capabilities::SETTINGS, true );
+			}
+		);
+
+		$result = $this->create( 'menus-listener', array( Capabilities::CONNECT, Capabilities::READ ) );
+
+		$this->assert_refused( $result, 'create_failed', 'menus-listener' );
+	}
+
 	public function test_non_offered_non_steadhand_names_are_never_stored_and_non_offered_steadhand_names_are_stored_false(): void {
+		$this->handler = $this->handler_without_settings();
+
 		$this->assertNotContains( Capabilities::SETTINGS, $this->handler->offered_capabilities(), 'Precondition: settings is not offered.' );
 
 		$posted = array( Capabilities::CONNECT, Capabilities::READ, 'manage_options', 'administrator', 'edit_posts', Capabilities::SETTINGS, Capabilities::NO_GRANT, Roles::ROLE );
@@ -522,20 +549,6 @@ final class AgentsCreateCapabilitiesTest extends TestCase {
 		$result = $this->create( 'flipped-publish', array( Capabilities::CONNECT, Capabilities::READ ) );
 
 		$this->assert_refused( $result, 'create_failed', 'flipped-publish' );
-	}
-
-	public function test_a_listener_that_sets_a_non_offered_steadhand_capability_true_refuses_and_rolls_back(): void {
-		$this->assertNotContains( Capabilities::SETTINGS, $this->handler->offered_capabilities(), 'Precondition: settings is not offered.' );
-		$this->on(
-			'steadhand_agent_created',
-			static function ( $user_id ): void {
-				get_userdata( $user_id )->add_cap( Capabilities::SETTINGS, true );
-			}
-		);
-
-		$result = $this->create( 'menus-listener', array( Capabilities::CONNECT, Capabilities::READ ) );
-
-		$this->assert_refused( $result, 'create_failed', 'menus-listener' );
 	}
 
 	public function test_the_capabilities_changed_action_does_not_fire_from_create(): void {

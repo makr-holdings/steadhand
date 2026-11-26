@@ -198,6 +198,16 @@ final class Redactor {
 	private const CONTROL_CHARACTERS = '~[\x00-\x08\x0b-\x1f\x7f]|\xc2[\x80-\x9f]~';
 
 	/**
+	 * The words that make a key sensitive, as the redactor uses them (KEY_WORDS). Read-only: a rule that must agree with the redactor on which
+	 * names are secret (update-option's hard-coded blocks) reads the list here, so the two cannot drift apart.
+	 *
+	 * @return string[]
+	 */
+	public static function key_words(): array {
+		return self::KEY_WORDS;
+	}
+
+	/**
 	 * Returns the text with every recognised secret replaced by MASK, with control characters and ANSI escape sequences
 	 * removed, and with invalid UTF-8 removed.
 	 *

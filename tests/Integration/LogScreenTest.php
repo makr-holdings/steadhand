@@ -194,6 +194,41 @@ final class LogScreenTest extends PostWriteTestCase {
 		return (int) $wpdb->get_var( 'SELECT COUNT(*) FROM ' . Schema::table() ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.NotPrepared -- Test reads the table to check that nothing was written.
 	}
 
+	/**
+	 * An update-option entry is about no post (object type option, object ID 0), so the list and the entry view show it in full. Its message is
+	 * the text a refusal really produces (OptionRules::stored_error(), for an option with no row), and its input names the option.
+	 */
+	public function test_an_update_option_entry_renders_in_the_list_and_the_entry_view(): void {
+		$message = 'This option does not exist in the database. Steadhand never creates an option, so nothing was changed.';
+		$id      = $this->log_row(
+			array(
+				'ability'     => 'steadhand/update-option',
+				'object_type' => 'option',
+				'object_id'   => 0,
+				'result'      => Entry::RESULT_ERROR,
+				'message'     => $message,
+				'input'       => wp_json_encode(
+					array(
+						'option' => 'blogname',
+						'value'  => 'Named in the input',
+					)
+				),
+			)
+		);
+
+		$list = $this->render_as( $this->admin_id() );
+		$this->assertNull( $list['died'] );
+		$this->assertStringContainsString( 'steadhand/update-option', $list['html'] );
+		$this->assertStringContainsString( 'option #0', $list['html'] );
+		$this->assertStringContainsString( $message, $list['html'] );
+
+		$entry = $this->render_as( $this->admin_id(), array( 'entry' => (string) $id ) );
+		$this->assertNull( $entry['died'] );
+		$this->assertStringContainsString( 'option #0', $entry['html'] );
+		$this->assertStringContainsString( $message, $entry['html'] );
+		$this->assertStringContainsString( 'blogname', $entry['html'] );
+	}
+
 	public function test_a_logged_out_visitor_is_refused_and_sees_no_log_data(): void {
 		$this->log_row( array( 'message' => self::SECRET ) );
 

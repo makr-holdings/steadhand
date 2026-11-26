@@ -1094,6 +1094,7 @@ final class AgentsScreen {
 			Capabilities::MEDIA        => __( 'Media', 'steadhand' ),
 			Capabilities::MENUS        => __( 'Menus', 'steadhand' ),
 			Capabilities::TRASH        => __( 'Trash and restore', 'steadhand' ),
+			Capabilities::SETTINGS     => __( 'Site options', 'steadhand' ),
 			default                    => $capability,
 		};
 	}
@@ -1113,6 +1114,7 @@ final class AgentsScreen {
 			Capabilities::MEDIA        => __( 'Upload media and set featured images. An uploaded file is public at once, at its uploads URL. This changes the public site.', 'steadhand' ),
 			Capabilities::MENUS        => __( 'Add, rename, move, hide and show items of classic navigation menus. This changes the public site at once, and it needs steadhand_publish as well. It cannot delete items or menus, or change theme locations.', 'steadhand' ),
 			Capabilities::TRASH        => __( 'Move posts and pages to the trash and restore the ones it trashed. It can never delete permanently. WordPress deletes trashed posts permanently after a number of days.', 'steadhand' ),
+			Capabilities::SETTINGS     => __( 'Change the site title and tagline, the only site options it may change. This changes the public site at once, on every page, and it needs steadhand_publish as well.', 'steadhand' ),
 			default                    => $capability,
 		};
 	}

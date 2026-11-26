@@ -70,6 +70,7 @@ final class Plugin {
 				new Guardrails\Rules\RateLimit( $change_log, fn(): array => $this->registry->write_names() ),
 				new Guardrails\Rules\DailyUploadLimit( $change_log ),
 				new Guardrails\Rules\EditLock(),
+				new Guardrails\Rules\ProtectedOptions(),
 			),
 			array(
 				new Guardrails\Rules\ContentLimits(),

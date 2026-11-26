@@ -52,7 +52,7 @@ final class ReadToolsRegistrationTest extends TestCase {
 	);
 
 	/**
-	 * The ten write tools, which come after the read tools in the registry.
+	 * The eleven write tools, which come after the read tools in the registry.
 	 */
 	private const WRITE_ABILITIES = array(
 		'steadhand/create-post',
@@ -64,6 +64,7 @@ final class ReadToolsRegistrationTest extends TestCase {
 		'steadhand/trash-post',
 		'steadhand/restore-post',
 		'steadhand/update-menu',
+		'steadhand/update-option',
 		'steadhand/undo-change',
 	);
 
@@ -77,6 +78,7 @@ final class ReadToolsRegistrationTest extends TestCase {
 		'steadhand-trash-post',
 		'steadhand-restore-post',
 		'steadhand-update-menu',
+		'steadhand-update-option',
 		'steadhand-undo-change',
 	);
 
@@ -106,6 +108,7 @@ final class ReadToolsRegistrationTest extends TestCase {
 		'steadhand/trash-post',
 		'steadhand/restore-post',
 		'steadhand/update-menu',
+		'steadhand/update-option',
 		'steadhand/undo-change',
 	);
 

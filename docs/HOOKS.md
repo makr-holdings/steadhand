@@ -6,7 +6,7 @@
 
 Steadhand defines four filters, documented in [Filters](#filters), and seven actions, documented in [Actions](#actions). The [Guardrail API](#guardrail-api) section documents the public classes that third-party guardrail rules use.
 
-To check, run this from the repository root. It lists Steadhand's own hooks: the filters `steadhand_allowed_post_types`, `steadhand_log_read_calls`, `steadhand_log_retention_days` and `steadhand_rate_limit_per_minute`, and the actions `steadhand_admin_agent_row`, `steadhand_admin_log_entry`, `steadhand_admin_log_toolbar`, `steadhand_agent_capabilities_changed`, `steadhand_agent_created`, `steadhand_agent_deleted`, `steadhand_agent_disabled`, `steadhand_agent_enabled`, `steadhand_log_entry_stored` and `steadhand_register_guardrails`. It also lists three WordPress hooks that Steadhand calls rather than attaches to: `the_content`, which `get-rendered` runs on purpose, and `wp_check_post_lock_window`, which the edit-lock rule reads, and `image_memory_limit`, which the media tools read. Today the output has seventeen lines: one for each of the fourteen Steadhand hooks (four filters and ten actions), and one for each of the three WordPress hooks. Any other `apply_filters()` or `do_action()` call in this output is a mistake, or a new extension point that needs a section here:
+To check, run this from the repository root. It lists Steadhand's own hooks: the filters `steadhand_allowed_options`, `steadhand_allowed_post_types`, `steadhand_log_read_calls`, `steadhand_log_retention_days` and `steadhand_rate_limit_per_minute`, and the actions `steadhand_admin_agent_row`, `steadhand_admin_log_entry`, `steadhand_admin_log_toolbar`, `steadhand_agent_capabilities_changed`, `steadhand_agent_created`, `steadhand_agent_deleted`, `steadhand_agent_disabled`, `steadhand_agent_enabled`, `steadhand_log_entry_stored` and `steadhand_register_guardrails`. It also lists three WordPress hooks that Steadhand calls rather than attaches to: `the_content`, which `get-rendered` runs on purpose, and `wp_check_post_lock_window`, which the edit-lock rule reads, and `image_memory_limit`, which the media tools read. Today the output has eighteen lines: one for each of the fifteen Steadhand hooks (five filters and ten actions), and one for each of the three WordPress hooks. Any other `apply_filters()` or `do_action()` call in this output is a mistake, or a new extension point that needs a section here:
 
 ```
 grep -rnE "apply_filters\(|do_action\(" includes steadhand.php uninstall.php --exclude-dir=vendor
@@ -22,6 +22,43 @@ These rules apply to every extension point listed here once it exists:
 - New parameters go at the end of the signature only.
 
 ## Filters
+
+### `steadhand_allowed_options`
+
+Chooses which site options `steadhand/update-option` may change. It is applied by `Steadhand\Pipeline\OptionRules::allowed()`. That function reads the filter on every call of the ability and of the writer, so the allowlist that decides a call is always current, and it fails closed both ways: a result it cannot use gives the built-in list, and a name it does not keep is refused. The tool's input schema lists the allowlist when the tool is registered, so a name added after registration is refused by the schema the tool was registered with, and a name removed after registration is refused by the call.
+
+- **Since:** unreleased (the release after 0.4.0).
+- **Type:** filter.
+- **Parameter:** `$options` (`array<string, array{max_length: int, min_length: int}>`). The default is `array( 'blogname' => array( 'max_length' => 200, 'min_length' => 1 ), 'blogdescription' => array( 'max_length' => 500, 'min_length' => 0 ) )`. Each name is an option name, and each entry gives the most and the fewest characters a value of that option may take.
+- **Return:** the same shape. Whatever the filter returns, Steadhand checks it before use:
+  - A value that is not an array falls back to the default list, and so does a filter that throws.
+  - An entry is dropped unless its name is a string of 1 to 64 letters, digits, underscores or hyphens. A purely numeric name is an integer key in PHP, so it is dropped.
+  - An entry is dropped when its name is hard-blocked, or when an entry kept before it has the same name in another letter case. So `BlogName` cannot stand beside `blogname`.
+  - An entry's definition must be an array with an integer `max_length` from 1 to 2000. `min_length` is an optional integer from 0 to `max_length`. A built-in name that gives no `min_length` keeps its built-in one, so an owner who redeclares `blogname` cannot allow an empty title by leaving the minimum out. Any other name gets 0.
+  - At most 50 entries are kept: the built-in names first, then the others in the order the filter gave them.
+  - Nothing is reported and no warning is raised.
+- **Hard-blocked names:** no filter can add one, whatever this filter returns. Steadhand refuses every option WordPress creates on a new site except `blogname` and `blogdescription` (the list is in SPEC section 5), and every name that contains one of the words the redactor treats as secret (`Redactor::key_words()`) or one of `key`, `token`, `secret`, `pass`, `pwd`, `pswd`, `auth`, `salt`, `nonce`, `license`, `licence`, `credential`, `cookie`, `session`, `private`, `bearer`, `signature`, `hash`, `webhook`, `dsn`, `smtp`, `jwt`, `otp` or `cert`, in any letter case. The word match is a substring match on purpose, so it also refuses harmless names such as `myplugin_author_name` (auth) and `focus_keyword` (key). The prefixes `widget_`, `theme_mods_`, `steadhand_`, `_transient_` and `_site_transient_` are blocked too, and so is any name ending in `user_roles` or containing `capabilities` or `user_level`.
+- **Removing:** the filter can remove a built-in entry. An owner who does not want agents to change the title can remove `blogname`.
+- **What it does not do:** adding an option only makes it eligible. A call still needs `steadhand_settings`, `steadhand_read` and `steadhand_publish`. The option must already exist in the database, because Steadhand never creates an option. It must not hold structured data (a serialized array or object), and no read-side callback may be registered on it: a `pre_option_{name}`, the generic `pre_option`, an `option_{name}`, a `default_option_{name}` or an `alloptions` callback refuses the option. A `sanitize_option_{name}` callback or a `register_setting` callback runs during the permission check, before any write, because the value rule calls `sanitize_option()`. A value is display text on one line, of the option's length limits, and it must decode back to what was sent (the value is stored HTML-escaped). A bare `&`, an apostrophe and a double quote are allowed; markup, and an HTML entity written as text, are refused.
+- **What is recorded:** the sent value, after the normal redaction, is in the change-log entry's input, and the previous value is saved in the snapshot table as the raw stored value. Add only options whose values may appear there. Every option shares the log object `option` #0; the option's name is in the input. A third-party fix rule can move a call between two allowed options, never to a blocked name.
+
+This example allows a second plain-text option:
+
+```php
+add_filter(
+	'steadhand_allowed_options',
+	static function ( array $options ): array {
+		$options['my_tagline_extra'] = array(
+			'max_length' => 120,
+			'min_length' => 0,
+		);
+
+		return $options;
+	}
+);
+```
+
+This filter is public API. The [stability policy](#stability-policy) above applies: it will not be renamed, removed or changed in signature without a deprecation notice and a [CHANGELOG.md](../CHANGELOG.md) entry. Any new parameter will go at the end.
 
 ### `steadhand_allowed_post_types`
 
