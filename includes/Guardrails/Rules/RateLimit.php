@@ -86,7 +86,7 @@ final class RateLimit implements Rule {
 	 * @param int $user_id Agent user ID.
 	 * @return int
 	 */
-	private function limit( int $user_id ): int {
+	public function limit( int $user_id ): int {
 		try {
 			$limit = apply_filters( 'steadhand_rate_limit_per_minute', self::DEFAULT_LIMIT, $user_id );
 		} catch ( \Throwable ) {

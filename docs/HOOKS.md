@@ -1,12 +1,12 @@
 # Steadhand extension points
 
-**Status:** Steadhand defines four filters and seven actions so far (see [Filters](#filters) and [Actions](#actions)), and the public guardrail classes in the [Guardrail API](#guardrail-api) section. This page is the reference for the public extension points that Steadhand Pro and third-party code will build on. It fills in as each extension point is built. The plan is in [SPEC.md](SPEC.md), section 9.1.
+**Status:** Steadhand defines five filters and twelve actions so far (see [Filters](#filters) and [Actions](#actions)), and the public guardrail classes in the [Guardrail API](#guardrail-api) section. This page is the reference for the public extension points that Steadhand Pro and third-party code will build on. It fills in as each extension point is built. The plan is in [SPEC.md](SPEC.md), section 9.1.
 
 ## Current extension points
 
-Steadhand defines four filters, documented in [Filters](#filters), and seven actions, documented in [Actions](#actions). The [Guardrail API](#guardrail-api) section documents the public classes that third-party guardrail rules use.
+Steadhand defines five filters, documented in [Filters](#filters), and twelve actions, documented in [Actions](#actions). The [Guardrail API](#guardrail-api) section documents the public classes that third-party guardrail rules use.
 
-To check, run this from the repository root. It lists Steadhand's own hooks: the filters `steadhand_allowed_options`, `steadhand_allowed_post_types`, `steadhand_log_read_calls`, `steadhand_log_retention_days` and `steadhand_rate_limit_per_minute`, and the actions `steadhand_admin_agent_row`, `steadhand_admin_log_entry`, `steadhand_admin_log_toolbar`, `steadhand_agent_capabilities_changed`, `steadhand_agent_created`, `steadhand_agent_deleted`, `steadhand_agent_disabled`, `steadhand_agent_enabled`, `steadhand_log_entry_stored` and `steadhand_register_guardrails`. It also lists three WordPress hooks that Steadhand calls rather than attaches to: `the_content`, which `get-rendered` runs on purpose, and `wp_check_post_lock_window`, which the edit-lock rule reads, and `image_memory_limit`, which the media tools read. Today the output has eighteen lines: one for each of the fifteen Steadhand hooks (five filters and ten actions), and one for each of the three WordPress hooks. Any other `apply_filters()` or `do_action()` call in this output is a mistake, or a new extension point that needs a section here:
+To check, run this from the repository root. It lists the call sites of Steadhand's own hooks: the filters `steadhand_allowed_options`, `steadhand_allowed_post_types`, `steadhand_log_read_calls`, `steadhand_log_retention_days` and `steadhand_rate_limit_per_minute`, and the actions `steadhand_admin_agent_row`, `steadhand_admin_guardrails`, `steadhand_admin_log_entry`, `steadhand_admin_log_toolbar`, `steadhand_agent_capabilities_changed`, `steadhand_agent_created`, `steadhand_agent_deleted`, `steadhand_agent_disabled`, `steadhand_agent_enabled`, `steadhand_log_entry_stored`, `steadhand_presets_changed` and `steadhand_register_guardrails`. It also lists the WordPress hooks that Steadhand calls rather than attaches to: `the_content` (which `get-rendered` runs on purpose), `wp_get_nav_menu_items` (the classic menu reader), `image_memory_limit` (the media tools), `wp_check_post_lock_window` (the edit-lock rule) and `wp_update_nav_menu` (which the menu writer fires, as wp-admin does). Today the output has twenty-three lines: one for each of the seventeen Steadhand hook calls (five filters and twelve actions), one for each of the other WordPress hook calls, and one comment line that mentions `wp_update_nav_menu`. Any other `apply_filters()` or `do_action()` call in this output is a mistake, or a new extension point that needs a section here:
 
 ```
 grep -rnE "apply_filters\(|do_action\(" includes steadhand.php uninstall.php --exclude-dir=vendor
@@ -412,6 +412,34 @@ Runs on the Agents screen's detail view of one dedicated agent (a user whose onl
 
 This action is public API. The [stability policy](#stability-policy) above applies. Any new parameter will go at the end.
 
+### `steadhand_admin_guardrails`
+
+Runs on the Guardrails screen (under Steadhand in the admin menu, SPEC section 6), after the presets form and the list of rules that other plugins added. Use it to add a section to the screen.
+
+- **Since:** unreleased (the release after 0.4.0).
+- **Type:** action.
+- **Parameters:** none.
+- **When it runs:** once for each render of the screen, after the capability check has passed, on a single site. It does not run on a multisite network, where the screen shows only a notice, and it does not run for a viewer who is refused.
+- **Who gets it:** the same viewers as the screen: an administrator who holds no agent role.
+- **If a listener throws:** the exception is caught and ignored, so the screen still renders.
+- **Trust and output:** listeners are trusted code, and they run inside an administrator's request. Whatever a listener prints appears on the page, so the listener must escape its own output.
+- **What it does not do:** it cannot change the presets, the rules or the screen. It has no return value.
+
+This action is public API. The [stability policy](#stability-policy) above applies. Any new parameter will go at the end.
+
+### `steadhand_presets_changed`
+
+Runs after the Guardrails screen saves a change to the presets. A preset is an optional guardrail, such as the Rank Math options preset (SPEC section 6.2). The fixed list of presets is in code: no filter adds one in this version.
+
+- **Since:** unreleased (the release after 0.4.0).
+- **Type:** action.
+- **Parameters:** `$current` (`array<string, bool>`), every known preset with its state after the save; `$previous` (`array<string, bool>`), every known preset with its state before the save; `$user_id` (`int`), the administrator who saved the presets.
+- **When it runs:** after the save is stored and read back, and only when at least one preset changed its value. It does not run for a save that changed nothing, for a refused request, or for a save that did not read back.
+- **If a listener throws:** the exception is caught and ignored. The save stays stored, and the redirect is the same.
+- **What it does not do:** it cannot change the save or the presets. It has no return value.
+
+This action is public API. The [stability policy](#stability-policy) above applies. Any new parameter will go at the end.
+
 ## Guardrail API
 
 Third-party guardrail rules are written against four classes in `Steadhand\Guardrails`: `Rule`, `Context`, `Result` and `Registry`. They are public API under the [stability policy](#stability-policy). The engine (`Engine`) and the verdict (`Verdict`) are internal and may change.
@@ -517,7 +545,7 @@ SPEC section 9.1 says Free will provide these extension points for Pro. Their ho
 - Pre-execute interception, used for approvals.
 - Log export filters.
 
-The admin screen slots of the change-log screen are the actions `steadhand_admin_log_toolbar` and `steadhand_admin_log_entry`, documented above. The slots of the agents and guardrails screens come with those screens.
+The admin screen slots of the change-log screen are the actions `steadhand_admin_log_toolbar` and `steadhand_admin_log_entry`, documented above. The admin screen slots of the agents screen and the guardrails screen are the actions `steadhand_admin_agent_row` and `steadhand_admin_guardrails`, documented above.
 
 **Tool registration is not public yet.** `Steadhand\Abilities\Ability` is an internal base class. The tool list is a fixed list in `Steadhand\Abilities\Registry::abilities()`, and no filter or action adds a tool, so a third party cannot add an MCP tool today.
 

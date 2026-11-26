@@ -13,6 +13,7 @@ if ( is_readable( __DIR__ . '/vendor/autoload.php' ) ) {
 	require_once __DIR__ . '/vendor/autoload.php';
 	\Steadhand\Roles::uninstall();
 	\Steadhand\Log\Schema::uninstall();
+	\Steadhand\Guardrails\Presets::uninstall();
 
 	// The markers steadhand/trash-post stores on a post it trashed, from the one list of keys (TrashRules::MARKER_KEYS). They are
 	// removed from the current site's posts only, as the rest of uninstall is (SPEC D13). Like the rest, they are removed only when

@@ -59,6 +59,13 @@ final class Plugin {
 	private Admin\Admin $admin;
 
 	/**
+	 * The guardrail engine, which the Guardrails screen lists the built-in and third-party rules of.
+	 *
+	 * @var Guardrails\Engine
+	 */
+	private Guardrails\Engine $engine;
+
+	/**
 	 * Constructor. Builds the service graph; registers no hooks.
 	 */
 	public function __construct() {
@@ -78,6 +85,7 @@ final class Plugin {
 			)
 		);
 
+		$this->engine           = $engine;
 		$pipeline               = new Pipeline\Pipeline( $change_log, $engine );
 		$this->registry         = new Abilities\Registry( $pipeline, $change_log );
 		$this->server           = new Server( $this->registry );
@@ -87,7 +95,9 @@ final class Plugin {
 		$this->admin            = new Admin\Admin(
 			new Admin\LogScreen( $change_log, $this->registry ),
 			new Admin\UndoHandler( $pipeline, $change_log ),
-			new Admin\AgentsScreen( new Admin\AgentsHandler( $this->registry ) )
+			new Admin\AgentsScreen( new Admin\AgentsHandler( $this->registry ) ),
+			new Admin\GuardrailsScreen( $engine ),
+			new Admin\GuardrailsHandler()
 		);
 	}
 
@@ -98,6 +108,15 @@ final class Plugin {
 	 */
 	public function registry(): Abilities\Registry {
 		return $this->registry;
+	}
+
+	/**
+	 * Returns the guardrail engine. The Guardrails screen reads the built-in rules from it.
+	 *
+	 * @return Guardrails\Engine
+	 */
+	public function engine(): Guardrails\Engine {
+		return $this->engine;
 	}
 
 	/**

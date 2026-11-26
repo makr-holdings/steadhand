@@ -133,7 +133,7 @@ final class EditLock implements Rule {
 	 *
 	 * @return int
 	 */
-	private static function window(): int {
+	public static function window(): int {
 		try {
 			// Core's own filter, so its name is not ours to prefix.
 			$window = apply_filters( 'wp_check_post_lock_window', self::DEFAULT_WINDOW ); // phpcs:ignore WordPress.NamingConventions.PrefixAllGlobals.NonPrefixedHooknameFound -- Core's filter.
