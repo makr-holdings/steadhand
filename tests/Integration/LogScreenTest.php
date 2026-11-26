@@ -194,6 +194,31 @@ final class LogScreenTest extends PostWriteTestCase {
 		return (int) $wpdb->get_var( 'SELECT COUNT(*) FROM ' . Schema::table() ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.NotPrepared -- Test reads the table to check that nothing was written.
 	}
 
+	/**
+	 * An update-option entry is about no post (object type option, object ID 0), so the list and the entry view render it in full
+	 * without error, as any entry about no post is shown.
+	 */
+	public function test_an_update_option_entry_renders_in_the_list_and_the_entry_view(): void {
+		$id = $this->log_row(
+			array(
+				'ability'     => 'steadhand/update-option',
+				'object_type' => 'option',
+				'object_id'   => 0,
+				'message'     => 'Set the option blogname.',
+			)
+		);
+
+		$list = $this->render_as( $this->admin_id() );
+		$this->assertNull( $list['died'] );
+		$this->assertStringContainsString( 'steadhand/update-option', $list['html'] );
+		$this->assertStringContainsString( 'option #0', $list['html'] );
+
+		$entry = $this->render_as( $this->admin_id(), array( 'entry' => (string) $id ) );
+		$this->assertNull( $entry['died'] );
+		$this->assertStringContainsString( 'option #0', $entry['html'] );
+		$this->assertStringContainsString( 'Set the option blogname.', $entry['html'] );
+	}
+
 	public function test_a_logged_out_visitor_is_refused_and_sees_no_log_data(): void {
 		$this->log_row( array( 'message' => self::SECRET ) );
 

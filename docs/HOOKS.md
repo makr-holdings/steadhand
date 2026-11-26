@@ -6,7 +6,7 @@
 
 Steadhand defines four filters, documented in [Filters](#filters), and seven actions, documented in [Actions](#actions). The [Guardrail API](#guardrail-api) section documents the public classes that third-party guardrail rules use.
 
-To check, run this from the repository root. It lists Steadhand's own hooks: the filters `steadhand_allowed_post_types`, `steadhand_log_read_calls`, `steadhand_log_retention_days` and `steadhand_rate_limit_per_minute`, and the actions `steadhand_admin_agent_row`, `steadhand_admin_log_entry`, `steadhand_admin_log_toolbar`, `steadhand_agent_capabilities_changed`, `steadhand_agent_created`, `steadhand_agent_deleted`, `steadhand_agent_disabled`, `steadhand_agent_enabled`, `steadhand_log_entry_stored` and `steadhand_register_guardrails`. It also lists three WordPress hooks that Steadhand calls rather than attaches to: `the_content`, which `get-rendered` runs on purpose, and `wp_check_post_lock_window`, which the edit-lock rule reads, and `image_memory_limit`, which the media tools read. Today the output has seventeen lines: one for each of the fourteen Steadhand hooks (four filters and ten actions), and one for each of the three WordPress hooks. Any other `apply_filters()` or `do_action()` call in this output is a mistake, or a new extension point that needs a section here:
+To check, run this from the repository root. It lists Steadhand's own hooks: the filters `steadhand_allowed_options`, `steadhand_allowed_post_types`, `steadhand_log_read_calls`, `steadhand_log_retention_days` and `steadhand_rate_limit_per_minute`, and the actions `steadhand_admin_agent_row`, `steadhand_admin_log_entry`, `steadhand_admin_log_toolbar`, `steadhand_agent_capabilities_changed`, `steadhand_agent_created`, `steadhand_agent_deleted`, `steadhand_agent_disabled`, `steadhand_agent_enabled`, `steadhand_log_entry_stored` and `steadhand_register_guardrails`. It also lists three WordPress hooks that Steadhand calls rather than attaches to: `the_content`, which `get-rendered` runs on purpose, and `wp_check_post_lock_window`, which the edit-lock rule reads, and `image_memory_limit`, which the media tools read. Today the output has eighteen lines: one for each of the fifteen Steadhand hooks (five filters and ten actions), and one for each of the three WordPress hooks. Any other `apply_filters()` or `do_action()` call in this output is a mistake, or a new extension point that needs a section here:
 
 ```
 grep -rnE "apply_filters\(|do_action\(" includes steadhand.php uninstall.php --exclude-dir=vendor
@@ -22,6 +22,37 @@ These rules apply to every extension point listed here once it exists:
 - New parameters go at the end of the signature only.
 
 ## Filters
+
+### `steadhand_allowed_options`
+
+Chooses which site options `steadhand/update-option` may change. It is applied by `Steadhand\Pipeline\OptionRules::allowed()`, which the ability and the writer call on every use, so nothing is cached.
+
+- **Since:** unreleased (the release after 0.4.0).
+- **Type:** filter.
+- **Parameter:** `$options` (`array<string, array{max_length: int}>`). The default is `array( 'blogname' => array( 'max_length' => 200 ), 'blogdescription' => array( 'max_length' => 500 ) )`. Each name is an option name, and each entry gives the most characters a plain-text value of that option may take.
+- **Return:** the same shape. Whatever the filter returns, Steadhand checks it before use:
+  - A value that is not an array falls back to the default list, and so does a filter that throws.
+  - An entry is dropped unless its name is a string of 1 to 64 letters, digits, underscores or hyphens, its definition is an array with an integer `max_length` from 1 to 2000, and its name is not hard-blocked.
+  - At most 50 entries are kept: the built-in names first, then the others in the order the filter gave them.
+  - Nothing is reported and no warning is raised.
+- **Hard-blocked names:** the exact names, prefixes and name patterns listed in SPEC section 5 for `update-option`, among them `siteurl`, `home`, `active_plugins`, `sidebars_widgets`, `widget_block`, `template`, `stylesheet`, `admin_email`, the prefixes `widget_`, `theme_mods_`, `steadhand_`, `_transient_` and `_site_transient_`, and any name ending in `user_roles` or containing `capabilities` or `user_level`. They are compared in lower case. No filter can add one, whatever this filter returns.
+- **Removing:** the filter can remove a built-in entry. An owner who does not want agents to change the title can remove `blogname`.
+- **What it does not do:** adding an option only makes it eligible. A call still needs `steadhand_settings`, `steadhand_read` and `steadhand_publish`. The option must already exist in the database, because Steadhand never creates an option. It must not hold structured data (a serialized array or object), and no `pre_option_` filter may override it. The value must be plain text on one line that WordPress stores unchanged. The value sent and the previous value are written to the change log, so add only options whose values may appear there.
+
+This example allows a second plain-text option:
+
+```php
+add_filter(
+	'steadhand_allowed_options',
+	static function ( array $options ): array {
+		$options['my_tagline_extra'] = array( 'max_length' => 120 );
+
+		return $options;
+	}
+);
+```
+
+This filter is public API. The [stability policy](#stability-policy) above applies: it will not be renamed, removed or changed in signature without a deprecation notice and a [CHANGELOG.md](../CHANGELOG.md) entry. Any new parameter will go at the end.
 
 ### `steadhand_allowed_post_types`
 

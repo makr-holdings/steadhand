@@ -308,10 +308,10 @@ final class AgentsCreateCapabilitiesTest extends TestCase {
 		}
 	}
 
-	public function test_non_offered_non_steadhand_names_are_never_stored_and_non_offered_steadhand_names_are_stored_false(): void {
-		$this->assertNotContains( Capabilities::SETTINGS, $this->handler->offered_capabilities(), 'Precondition: settings is not offered.' );
-
-		$posted = array( Capabilities::CONNECT, Capabilities::READ, 'manage_options', 'administrator', 'edit_posts', Capabilities::SETTINGS, Capabilities::NO_GRANT, Roles::ROLE );
+	public function test_non_steadhand_names_are_never_stored_and_an_unchecked_offered_name_is_stored_false(): void {
+		// Every Steadhand capability is offered now, so the case "a name that is not offered" cannot be built from the real list. An
+		// offered name that is not checked is stored as an explicit false, which is the same rule for every offered name.
+		$posted = array( Capabilities::CONNECT, Capabilities::READ, 'manage_options', 'administrator', 'edit_posts', Capabilities::NO_GRANT, Roles::ROLE );
 		$result = $this->create( 'refused-names', $posted );
 
 		$this->assertSame( 'created', $result['code'] );
@@ -320,8 +320,7 @@ final class AgentsCreateCapabilitiesTest extends TestCase {
 		foreach ( array( 'manage_options', 'administrator', 'edit_posts', Capabilities::NO_GRANT ) as $name ) {
 			$this->assertArrayNotHasKey( $name, $user->caps, $name );
 		}
-		// Steadhand names that are not offered are stored as an explicit false, never as a grant.
-		$this->assertFalse( $user->caps[ Capabilities::SETTINGS ] );
+		$this->assertFalse( $user->caps[ Capabilities::SETTINGS ], 'An offered name that is not checked is stored as false.' );
 		$this->assertSame( array( Roles::ROLE ), array_values( $user->roles ) );
 		$this->assertFalse( user_can( $result['user_id'], 'manage_options' ) );
 		$this->assertFalse( user_can( $result['user_id'], 'edit_posts' ) );
@@ -524,19 +523,7 @@ final class AgentsCreateCapabilitiesTest extends TestCase {
 		$this->assert_refused( $result, 'create_failed', 'flipped-publish' );
 	}
 
-	public function test_a_listener_that_sets_a_non_offered_steadhand_capability_true_refuses_and_rolls_back(): void {
-		$this->assertNotContains( Capabilities::SETTINGS, $this->handler->offered_capabilities(), 'Precondition: settings is not offered.' );
-		$this->on(
-			'steadhand_agent_created',
-			static function ( $user_id ): void {
-				get_userdata( $user_id )->add_cap( Capabilities::SETTINGS, true );
-			}
-		);
 
-		$result = $this->create( 'menus-listener', array( Capabilities::CONNECT, Capabilities::READ ) );
-
-		$this->assert_refused( $result, 'create_failed', 'menus-listener' );
-	}
 
 	public function test_the_capabilities_changed_action_does_not_fire_from_create(): void {
 		$fired = false;
