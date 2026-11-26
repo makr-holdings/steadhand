@@ -103,7 +103,7 @@ final class MenuReader {
 	public static function page( \WP_Term $menu ): array {
 		$kept = array();
 		foreach ( MenuRules::items_raw( $menu ) as $row ) {
-			if ( $row['orphaned'] ) {
+			if ( 'draft' === $row['status'] && $row['orphaned'] ) {
 				continue;
 			}
 

@@ -461,8 +461,10 @@ final class MenuMetaCapsTest extends MenuToolTestCase {
 	}
 
 	/**
-	 * Core answers edit_post_meta, add_post_meta and delete_post_meta from edit_post. Inside update-menu, all three are refused on a menu
-	 * item for every key: a protected one and an ordinary one alike.
+	 * Core answers edit_post_meta, add_post_meta and delete_post_meta from edit_post. Inside update-menu all three are refused on a menu
+	 * item for an ordinary key. For a protected key, core refuses unless an auth filter allows it; this test registers that filter to
+	 * allow the key, so core would grant the agent, and asserts that the three are still refused. A control shows the filter works: an
+	 * administrator is allowed the same key through it.
 	 */
 	public function test_post_meta_capabilities_on_a_menu_item_are_refused_inside_update_menu_for_protected_and_unprotected_keys(): void {
 		$fixture = $this->fixture();
@@ -472,27 +474,67 @@ final class MenuMetaCapsTest extends MenuToolTestCase {
 				Capabilities::PUBLISH => true,
 			)
 		);
-		$item = $fixture['live'];
+		$item      = $fixture['live'];
+		$plain     = 'steadhand_note';
+		$protected = '_steadhand_note';
+		$admin     = $this->admin_id();
 
-		foreach ( array( 'steadhand_note', '_steadhand_note' ) as $key ) {
-			$answers = $this->inside(
-				self::UPDATE,
-				static fn(): array => array(
-					'edit'   => current_user_can( 'edit_post_meta', $item, $key ),
-					'add'    => current_user_can( 'add_post_meta', $item, $key ),
-					'delete' => current_user_can( 'delete_post_meta', $item, $key ),
-				)
-			);
+		$ask = static fn( string $key ): array => array(
+			'edit'   => current_user_can( 'edit_post_meta', $item, $key ),
+			'add'    => current_user_can( 'add_post_meta', $item, $key ),
+			'delete' => current_user_can( 'delete_post_meta', $item, $key ),
+		);
 
+		$this->assertSame(
+			array(
+				'edit'   => false,
+				'add'    => false,
+				'delete' => false,
+			),
+			$this->inside( self::UPDATE, static fn(): array => $ask( $plain ) ),
+			'An ordinary key inside update-menu.'
+		);
+
+		$allow = static fn(): bool => true;
+		add_filter( "auth_post_meta_{$protected}", $allow, 10, 6 );
+		try {
 			$this->assertSame(
 				array(
 					'edit'   => false,
 					'add'    => false,
 					'delete' => false,
 				),
-				$answers,
-				"Post meta on a menu item for the key $key inside update-menu."
+				$this->inside( self::UPDATE, static fn(): array => $ask( $protected ) ),
+				'A protected key that an auth filter allows, inside update-menu.'
 			);
+
+			$admin_answers = $this->inside(
+				self::UPDATE,
+				static function () use ( $admin, $item, $protected ): array {
+					$agent = get_current_user_id();
+					wp_set_current_user( $admin );
+					try {
+						return array(
+							'edit'   => current_user_can( 'edit_post_meta', $item, $protected ),
+							'add'    => current_user_can( 'add_post_meta', $item, $protected ),
+							'delete' => current_user_can( 'delete_post_meta', $item, $protected ),
+						);
+					} finally {
+						wp_set_current_user( $agent );
+					}
+				}
+			);
+			$this->assertSame(
+				array(
+					'edit'   => true,
+					'add'    => true,
+					'delete' => true,
+				),
+				$admin_answers,
+				'Control: the auth filter lets an administrator use the protected key.'
+			);
+		} finally {
+			remove_filter( "auth_post_meta_{$protected}", $allow, 10 );
 		}
 	}
 

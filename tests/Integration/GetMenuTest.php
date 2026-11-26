@@ -407,6 +407,21 @@ final class GetMenuTest extends MenuToolTestCase {
 		$this->assertFalse( $output['truncated'] );
 	}
 
+	/**
+	 * Core's orphan mark only hides a draft. A published item that carries a stale mark is printed by the public menu, so it is returned.
+	 */
+	public function test_a_published_item_with_a_stale_orphan_mark_is_returned(): void {
+		$this->act_as_agent();
+		$menu = $this->classic_menu( 'Steadhand stale mark' );
+		$live = $this->custom_item( $menu, 'Live', 'https://example.test/live/', 0, 1 );
+		update_post_meta( $live, '_menu_item_orphaned', (string) time() );
+
+		$items = $this->items_of( $menu );
+
+		$this->assertSame( array( $live ), array_column( $items, 'id' ) );
+		$this->assertFalse( $items[0]['hidden'] );
+	}
+
 	public function test_an_orphaned_draft_is_not_returned(): void {
 		$this->act_as_agent();
 		$menu     = $this->classic_menu( 'Steadhand orphan' );
@@ -555,8 +570,10 @@ final class GetMenuTest extends MenuToolTestCase {
 	}
 
 	/**
-	 * A filter may not add an item: a foreign object, an item of another menu, a stranger's object with a kept ID, a string and a number are
-	 * all ignored. The items of this menu come back unchanged.
+	 * A filter may not add an item. The entries it may add are ignored: a WP_Post of another menu (its ID was not passed in), and a
+	 * string and a number (not objects). An object that is not a WP_Post, even one that carries a kept ID, is ignored too. A WP_Post
+	 * that carries a kept ID is accepted by design: it is the item the filter was given, possibly changed. The items of this menu
+	 * come back unchanged.
 	 */
 	public function test_a_filter_that_adds_foreign_objects_gets_them_ignored(): void {
 		$this->act_as_agent();
@@ -584,6 +601,63 @@ final class GetMenuTest extends MenuToolTestCase {
 
 		$this->assertSame( array( $keep, $draft ), array_column( $items, 'id' ) );
 		$this->assertSame( array( 'Keep', 'Draft' ), array_column( $items, 'title' ) );
+	}
+
+	/**
+	 * A menu of exactly 500 items returns all 500, and truncated is false: the limit is inclusive.
+	 */
+	public function test_a_menu_of_exactly_500_items_returns_all_of_them_untruncated(): void {
+		$this->act_as_agent();
+		$menu = $this->classic_menu( 'Steadhand exactly 500' );
+		for ( $i = 1; $i <= 500; $i++ ) {
+			$this->custom_item( $menu, 'Item ' . $i, 'https://example.test/e/' . $i, 0, $i );
+		}
+
+		$output = $this->output(
+			self::TOOL_NAME,
+			array(
+				'kind' => 'classic',
+				'id'   => $menu,
+			)
+		);
+
+		$this->assertCount( 500, $output['items'] );
+		$this->assertFalse( $output['truncated'] );
+	}
+
+	/**
+	 * Current behaviour, asserted as it is: a menu of 501 items where a wp_get_nav_menu_items filter removes one returns the other 500,
+	 * and truncated stays true. The reader stops at 501 kept items before the filter runs, and truncated is decided from that count, so
+	 * the removal does not clear it. Nothing beyond the 501 is read.
+	 */
+	public function test_a_filter_that_removes_one_of_501_items_leaves_500_and_truncated_stays_true(): void {
+		$this->act_as_agent();
+		$menu  = $this->classic_menu( 'Steadhand 501 filtered' );
+		$first = 0;
+		for ( $i = 1; $i <= 501; $i++ ) {
+			$id = $this->custom_item( $menu, 'Item ' . $i, 'https://example.test/f/' . $i, 0, $i );
+			if ( 1 === $i ) {
+				$first = $id;
+			}
+		}
+
+		$items = $this->items_through_filter(
+			$menu,
+			static fn( array $items ): array => array_values( array_filter( $items, static fn( $item ): bool => (int) $item->ID !== $first ) )
+		);
+
+		$this->assertCount( 500, $items );
+		$this->assertNotContains( $first, array_column( $items, 'id' ) );
+		$this->assertTrue(
+			$this->output(
+				self::TOOL_NAME,
+				array(
+					'kind' => 'classic',
+					'id'   => $menu,
+				)
+			)['truncated'],
+			'Control: without the filter the menu is truncated.'
+		);
 	}
 
 	/**
