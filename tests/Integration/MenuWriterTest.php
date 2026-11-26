@@ -444,4 +444,311 @@ final class MenuWriterTest extends MenuWriteTestCase {
 	private function item_count( int $menu_id ): int {
 		return count( MenuRules::items_raw( $this->menu_term( $menu_id ) ) );
 	}
+
+	/**
+	 * A menu with three published custom links, A, B and C, in that order, and their IDs.
+	 *
+	 * @return array{0: int, 1: int, 2: int, 3: int}
+	 */
+	private function menu_with_three(): array {
+		$menu = $this->classic_menu( 'Move ' . wp_generate_password( 6, false ) );
+		$a    = $this->custom_item( $menu, 'A', 'https://example.com/a', 0, 1 );
+		$b    = $this->custom_item( $menu, 'B', 'https://example.com/b', 0, 2 );
+		$c    = $this->custom_item( $menu, 'C', 'https://example.com/c', 0, 3 );
+
+		return array( $menu, $a, $b, $c );
+	}
+
+	/**
+	 * The plan and the states a caller would read for a move, built the way the ability builds them.
+	 *
+	 * @param int $menu   Menu term ID.
+	 * @param int $item   Item.
+	 * @param int $new_parent New parent, or 0.
+	 * @param int $after  New predecessor, or 0.
+	 * @return array{target: int[], orders: array<int, int>, states: array<int, array<string, mixed>>}
+	 */
+	private function plan_for( int $menu, int $item, int $new_parent, int $after ): array {
+		$rows = MenuRules::items_raw( $this->menu_term( $menu ) );
+		$plan = MenuRules::plan_move( $rows, $item, $new_parent, $after );
+		$this->assertNull( $plan['refusal'], 'The test move must be a valid move.' );
+
+		$ids = array_merge( array( $item ), array_keys( $plan['orders'] ) );
+		if ( 0 !== $new_parent ) {
+			$ids[] = $new_parent;
+		}
+		if ( 0 !== $after ) {
+			$ids[] = $after;
+		}
+
+		$states = array();
+		foreach ( $rows as $row ) {
+			if ( in_array( $row['id'], $ids, true ) ) {
+				$states[ $row['id'] ] = array(
+					'menu'   => $menu,
+					'status' => $row['status'],
+					'title'  => (string) $row['post']->post_title,
+					'parent' => $row['parent'],
+					'order'  => $row['order'],
+				);
+			}
+		}
+
+		return array(
+			'target' => $plan['target'],
+			'orders' => $plan['orders'],
+			'states' => $states,
+		);
+	}
+
+	/**
+	 * Runs MenuWriter::move() inside a write as the agent, with the plan the caller read (or the given one).
+	 *
+	 * @param int        $menu     Menu term ID.
+	 * @param int        $item     Item.
+	 * @param int        $new_parent   New parent, or 0.
+	 * @param int        $after    New predecessor, or 0.
+	 * @param array|null $expected The plan the caller read, or null to read it now.
+	 * @return mixed
+	 */
+	private function move_in_write( int $menu, int $item, int $new_parent, int $after, ?array $expected = null ): mixed {
+		$expected ??= $this->plan_for( $menu, $item, $new_parent, $after );
+
+		return $this->act_as_agent_in_write(
+			fn(): mixed => MenuWriter::move( $this->menu_term( $menu ), $item, $new_parent, $after, $expected, static fn(): bool => true )
+		);
+	}
+
+	/**
+	 * The shape of a menu: each item's ID, parent and order, in flat order.
+	 *
+	 * @param int $menu Menu term ID.
+	 * @return array<int, array{0: int, 1: int, 2: int}>
+	 */
+	private function shape_of( int $menu ): array {
+		return array_map(
+			static fn( array $row ): array => array( $row['id'], $row['parent'], $row['order'] ),
+			MenuRules::items_raw( $this->menu_term( $menu ) )
+		);
+	}
+
+	public function test_move_throws_outside_a_write(): void {
+		[ $menu, $a, $b ] = $this->menu_with_three();
+		$expected         = $this->plan_for( $menu, $b, 0, 0 );
+
+		$this->expectException( \LogicException::class );
+		MenuWriter::move( $this->menu_term( $menu ), $b, 0, 0, $expected, static fn(): bool => true );
+	}
+
+
+	public function test_a_change_made_between_read_and_write_is_refused_as_content_changed_and_nothing_is_written(): void {
+		[ $menu, $a, $b, $c ] = $this->menu_with_three();
+		$expected             = $this->plan_for( $menu, $c, 0, 0 );
+		$before               = $this->shape_of( $menu );
+
+		// Another request hides A after the read, so A's state no longer matches what the caller read.
+		wp_update_post(
+			array(
+				'ID'          => $a,
+				'post_status' => 'draft',
+			)
+		);
+
+		$result = $this->move_in_write( $menu, $c, 0, 0, $expected );
+
+		$this->assert_refused( $result, 'steadhand_refused_content_changed' );
+		$this->assertSame( $before, $this->shape_of( $menu ), 'Nothing is written when the state changed.' );
+		$this->assertSame( 0, (int) get_post_meta( $c, MenuRules::PARENT_META, true ), 'The parent meta of C is the one it had.' );
+	}
+
+
+	public function test_an_item_added_after_the_read_changes_the_plan_and_nothing_is_written(): void {
+		[ $menu, $a, $b, $c ] = $this->menu_with_three();
+		$expected             = $this->plan_for( $menu, $c, 0, 0 );
+
+		// A new item at the end is in no state the caller read, but it changes the whole-menu order the plan was made from.
+		$new    = $this->custom_item( $menu, 'D', 'https://example.com/d', 0, 4 );
+		$before = $this->shape_of( $menu );
+
+		$result = $this->move_in_write( $menu, $c, 0, 0, $expected );
+
+		$this->assert_refused( $result, 'steadhand_refused_content_changed' );
+		$this->assertSame( $before, $this->shape_of( $menu ), 'Nothing is written.' );
+		$this->assertContains( $new, array_column( MenuRules::items_raw( $this->menu_term( $menu ) ), 'id' ) );
+	}
+
+	public function test_a_move_to_where_the_item_already_is_changes_nothing_and_fires_nothing(): void {
+		[ $menu, $a, $b ] = $this->menu_with_three();
+		$this->count_announcements();
+		$before = $this->shape_of( $menu );
+
+		// B is already the second top-level item after A.
+		$result = $this->move_in_write( $menu, $b, 0, $a );
+
+		$this->assertSame(
+			array(
+				'id'      => $b,
+				'changed' => false,
+			),
+			$result
+		);
+		$this->assertSame( $before, $this->shape_of( $menu ) );
+		$this->assertSame( 0, $this->announced, 'A move that changes nothing announces nothing.' );
+	}
+
+	public function test_a_move_changes_only_the_parent_and_the_order_and_announces_once(): void {
+		[ $menu, $a, $b, $c ] = $this->menu_with_three();
+		$this->count_announcements();
+		$texts = array();
+		foreach ( array( $a, $b, $c ) as $id ) {
+			$post         = $this->raw_row( $id );
+			$texts[ $id ] = array( $post->post_title, $post->post_content, $post->post_excerpt, $post->post_status );
+		}
+
+		$result = $this->move_in_write( $menu, $c, 0, 0 );
+
+		$this->assertSame(
+			array(
+				'id'      => $c,
+				'changed' => true,
+			),
+			$result
+		);
+		$this->assertSame( array( $c, $a, $b ), array_column( MenuRules::items_raw( $this->menu_term( $menu ) ), 'id' ) );
+		foreach ( array( $a, $b, $c ) as $id ) {
+			$post = $this->raw_row( $id );
+			$this->assertSame( $texts[ $id ], array( $post->post_title, $post->post_content, $post->post_excerpt, $post->post_status ), "Item $id keeps its text and status." );
+		}
+		$this->assertSame( 1, $this->announced, 'One move fires wp_update_nav_menu once.' );
+	}
+
+	public function test_a_listener_that_changes_an_order_write_is_reported_as_partial_and_no_item_is_lost(): void {
+		[ $menu, $a, $b, $c ] = $this->menu_with_three();
+
+		$this->on(
+			'wp_insert_post_data',
+			static function ( array $data, array $postarr ) use ( $a ): array {
+				if ( (int) ( $postarr['ID'] ?? 0 ) === $a && isset( $postarr['menu_order'] ) ) {
+					$data['menu_order'] = 999;
+				}
+
+				return $data;
+			},
+			10,
+			2
+		);
+
+		$result = $this->move_in_write( $menu, $c, 0, 0 );
+
+		$this->assert_refused( $result, 'steadhand_update_partial' );
+		$this->assertStringContainsString( (string) $c, $result->get_error_message(), 'The message names the moved item.' );
+		$this->assertStringContainsString( 'get-menu', $result->get_error_message() );
+		$this->assertCount( 3, MenuRules::items_raw( $this->menu_term( $menu ) ), 'No item is lost.' );
+	}
+
+	public function test_a_parent_hidden_in_the_gap_is_put_back_and_reported_as_partial(): void {
+		[ $menu, $a, $b, $c ] = $this->menu_with_three();
+		$child                = $this->custom_item( $menu, 'Child', 'https://example.com/child', 0, 4 );
+
+		// The move puts the child under B, and another request hides B between the parent write and the check.
+		$this->on(
+			'updated_post_meta',
+			static function ( mixed $meta_id, mixed $object_id, mixed $meta_key ) use ( $b, $child ): void {
+				unset( $meta_id );
+				if ( MenuRules::PARENT_META === $meta_key && (int) $object_id === $child ) {
+					wp_update_post(
+						array(
+							'ID'          => $b,
+							'post_status' => 'draft',
+						)
+					);
+				}
+			},
+			10,
+			3
+		);
+
+		$result = $this->move_in_write( $menu, $child, $b, 0 );
+
+		$this->assert_refused( $result, 'steadhand_update_partial' );
+		$this->assertStringContainsString( 'moved it back', $result->get_error_message() );
+		$this->assertSame( 0, (int) get_post_meta( $child, MenuRules::PARENT_META, true ), 'The parent meta is back to the top level.' );
+	}
+
+
+	public function test_a_move_and_its_inverse_restore_the_exact_orders_and_parents(): void {
+		// A has a child A1 placed right after it, so every subtree is next to each other, as Save Menu leaves them.
+		$menu = $this->classic_menu( 'Round ' . wp_generate_password( 6, false ) );
+		$a    = $this->custom_item( $menu, 'A', 'https://example.com/a', 0, 1 );
+		$a1   = $this->custom_item( $menu, 'A1', 'https://example.com/a1', $a, 2 );
+		$b    = $this->custom_item( $menu, 'B', 'https://example.com/b', 0, 3 );
+		$c    = $this->custom_item( $menu, 'C', 'https://example.com/c', 0, 4 );
+		$this->custom_item( $menu, 'D', 'https://example.com/d', 0, 5 );
+		$before = $this->shape_of( $menu );
+
+		// C goes under A after A1. Its old predecessor was B, at the top level.
+		$this->move_in_write( $menu, $c, $a, $a1 );
+		$this->assertNotSame( $before, $this->shape_of( $menu ) );
+
+		$this->move_in_write( $menu, $c, 0, $b );
+
+		$this->assertSame( $before, $this->shape_of( $menu ), 'The inverse restores every order and parent.' );
+	}
+
+
+	public function test_a_hidden_item_moved_keeps_its_hide_record_and_can_be_shown(): void {
+		[ $menu, $a, $b ] = $this->menu_with_three();
+		$term             = $this->menu_term( $menu );
+
+		$this->act_as_agent_in_write(
+			fn(): mixed => MenuWriter::set_status( $b, $term, 'draft', $this->read_state( $b ), static fn(): bool => true )
+		);
+		$this->assertTrue( MenuRules::hide_recorded( $b ) );
+
+		// B is hidden and moves to the top: its order changes, so its modified time changes, and the record is refreshed.
+		$result = $this->move_in_write( $menu, $b, 0, 0 );
+		$this->assertSame(
+			array(
+				'id'      => $b,
+				'changed' => true,
+			),
+			$result
+		);
+		$this->assertTrue( MenuRules::hide_recorded( $b ), 'The move keeps the hide record valid.' );
+
+		$shown = $this->act_as_agent_in_write(
+			fn(): mixed => MenuWriter::set_status( $b, $term, 'publish', $this->read_state( $b ), static fn(): bool => true )
+		);
+		$this->assertSame(
+			array(
+				'id'      => $b,
+				'changed' => true,
+			),
+			$shown
+		);
+		$this->assertSame( 'publish', $this->raw_row( $b )->post_status );
+	}
+
+	public function test_a_stale_hide_record_is_not_rearmed_by_a_move(): void {
+		[ $menu, $a, $b ] = $this->menu_with_three();
+		$term             = $this->menu_term( $menu );
+
+		$this->act_as_agent_in_write(
+			fn(): mixed => MenuWriter::set_status( $b, $term, 'draft', $this->read_state( $b ), static fn(): bool => true )
+		);
+
+		// An edit outside Steadhand changes the modified time, so the hide record is stale before the move.
+		wp_update_post(
+			array(
+				'ID'         => $b,
+				'post_title' => 'Edited outside',
+			)
+		);
+		update_post_meta( $b, MenuRules::HIDDEN_MODIFIED_META, '2001-01-01 00:00:00' );
+		$this->assertFalse( MenuRules::hide_recorded( $b ) );
+
+		$this->move_in_write( $menu, $b, 0, 0 );
+
+		$this->assertFalse( MenuRules::hide_recorded( $b ), 'A move must not re-arm a stale record.' );
+	}
 }

@@ -54,7 +54,7 @@ Write:
 * Upload a JPEG or PNG image and set a featured image, with the media capability. Uploads are public at once.
 * Undo its own change to post text, terms or a featured image
 * Move a post or page to the trash and restore one it trashed, with the trash capability. It cannot delete permanently.
-* Add, rename, hide and show items of a classic menu, with the menus and publish capabilities. It cannot delete an item or a menu, or change where a theme shows a menu.
+* Add, rename, move, hide and show items of a classic menu, with the menus and publish capabilities. It cannot delete an item or a menu, or change where a theme shows a menu.
 
 = What an agent can never do while Steadhand is active =
 

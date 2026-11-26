@@ -333,4 +333,366 @@ final class MenuRulesTest extends MenuToolTestCase {
 		$this->assertSame( -1, MenuRules::parse_parent( '12abc' ) );
 		$this->assertSame( -1, MenuRules::parse_parent( array( 1 ) ) );
 	}
+
+	/**
+	 * A row as items_raw() returns it, built from its fields. The pure rules read only the ID, parent, order, status and orphan mark.
+	 *
+	 * @param int    $id       Item ID.
+	 * @param int    $new_parent Parent ID, or 0.
+	 * @param int    $order    menu_order.
+	 * @param string $status   publish or draft.
+	 * @param bool   $orphaned Whether the orphan mark is set.
+	 * @return array{id: int, parent: int, order: int, status: string, orphaned: bool, post: \WP_Post}
+	 */
+	private function row( int $id, int $new_parent, int $order, string $status = 'publish', bool $orphaned = false ): array {
+		return array(
+			'id'       => $id,
+			'parent'   => $new_parent,
+			'order'    => $order,
+			'status'   => $status,
+			'orphaned' => $orphaned,
+			'post'     => new \WP_Post(
+				(object) array(
+					'ID'          => $id,
+					'post_type'   => 'nav_menu_item',
+					'post_status' => $status,
+					'menu_order'  => $order,
+				)
+			),
+		);
+	}
+
+	/**
+	 * The sample menu the pure move tests use, in menu order: A with children A1 and A2; B with child B1, which has child B1a; C with child C1; and a
+	 * hidden top-level item D, last.
+	 *
+	 * @return array<int, array{id: int, parent: int, order: int, status: string, orphaned: bool, post: \WP_Post}>
+	 */
+	private function sample_tree(): array {
+		return array(
+			$this->row( 1, 0, 1 ),
+			$this->row( 2, 1, 2 ),
+			$this->row( 3, 1, 3 ),
+			$this->row( 4, 0, 4 ),
+			$this->row( 5, 4, 5 ),
+			$this->row( 6, 5, 6 ),
+			$this->row( 7, 0, 7 ),
+			$this->row( 8, 7, 8 ),
+			$this->row( 9, 0, 9, 'draft' ),
+		);
+	}
+
+	/**
+	 * The shape of a menu that a move must restore: each item's ID, parent and order, in flat order.
+	 *
+	 * @param array<int, array{id: int, parent: int, order: int, status: string, orphaned: bool, post: \WP_Post}> $rows Rows.
+	 * @return array<int, array{0: int, 1: int, 2: int}>
+	 */
+	private function shape( array $rows ): array {
+		return array_map( static fn( array $row ): array => array( $row['id'], $row['parent'], $row['order'] ), $rows );
+	}
+
+	/**
+	 * The rows after a plan is applied: the target order, the parent of the moved item, and the new order of each changed row.
+	 *
+	 * @param array<int, array{id: int, parent: int, order: int, status: string, orphaned: bool, post: \WP_Post}> $rows    Rows.
+	 * @param int                                                                                                 $item    The moved item.
+	 * @param int                                                                                                 $new_parent  The new parent.
+	 * @param array{refusal: string|null, target: int[], orders: array<int, int>}                                 $plan    A plan without refusal.
+	 * @return array<int, array{id: int, parent: int, order: int, status: string, orphaned: bool, post: \WP_Post}>
+	 */
+	private function applied( array $rows, int $item, int $new_parent, array $plan ): array {
+		$by_id = array();
+		foreach ( $rows as $row ) {
+			$by_id[ $row['id'] ] = $row;
+		}
+
+		$out = array();
+		foreach ( $plan['target'] as $id ) {
+			$row = $by_id[ $id ];
+			if ( $item === $id ) {
+				$row['parent'] = $new_parent;
+			}
+
+			$row['order'] = $plan['orders'][ $id ] ?? $row['order'];
+			$out[]        = $row;
+		}
+
+		return $out;
+	}
+
+	/**
+	 * The predecessor of an item among its siblings in the rows, or 0.
+	 *
+	 * @param array<int, array{id: int, parent: int, order: int, status: string, orphaned: bool, post: \WP_Post}> $rows Rows.
+	 * @param int                                                                                                 $item Item.
+	 */
+	private function predecessor( array $rows, int $item ): int {
+		$parent = 0;
+		foreach ( $rows as $row ) {
+			if ( $row['id'] === $item ) {
+				$parent = $row['parent'];
+			}
+		}
+
+		$previous = 0;
+		foreach ( MenuRules::children( $rows, $parent ) as $sibling ) {
+			if ( $sibling['id'] === $item ) {
+				return $previous;
+			}
+
+			$previous = $sibling['id'];
+		}
+
+		return 0;
+	}
+
+	public function test_subtree_ids_follows_the_parent_links_and_not_the_order(): void {
+		// Item 9 is a child of 1 but sits far from it in the order: the subtree must still hold it.
+		$rows = array(
+			$this->row( 1, 0, 1 ),
+			$this->row( 2, 1, 2 ),
+			$this->row( 3, 0, 3 ),
+			$this->row( 4, 0, 4 ),
+			$this->row( 9, 1, 5 ),
+		);
+
+		$this->assertSame( array( 1, 2, 9 ), MenuRules::subtree_ids( $rows, 1 ) );
+		$this->assertSame( array( 3 ), MenuRules::subtree_ids( $rows, 3 ) );
+		$this->assertSame( array(), MenuRules::subtree_ids( $rows, 77 ), 'An ID that is not in the rows has no subtree.' );
+	}
+
+	public function test_subtree_ids_ends_at_a_loop_and_lists_each_item_once(): void {
+		$rows = array(
+			$this->row( 1, 2, 1 ),
+			$this->row( 2, 1, 2 ),
+		);
+
+		$this->assertSame( array( 1, 2 ), MenuRules::subtree_ids( $rows, 1 ) );
+	}
+
+	public function test_target_order_puts_the_block_after_the_subtree_of_the_predecessor(): void {
+		// A (with A1 and A2) goes to the top level after B, whose subtree is B, B1, B1a.
+		$rows = $this->sample_tree();
+
+		$this->assertSame( array( 4, 5, 6, 1, 2, 3, 7, 8, 9 ), MenuRules::target_order( $rows, 1, 0, 4 ) );
+	}
+
+	public function test_target_order_first_under_a_parent_goes_directly_after_the_parent(): void {
+		// C1 moves under B first: B, then C1, then B's own children.
+		$rows = $this->sample_tree();
+
+		$this->assertSame( array( 1, 2, 3, 4, 8, 5, 6, 7, 9 ), MenuRules::target_order( $rows, 8, 4, 0 ) );
+	}
+
+
+	public function test_target_order_top_level_first_goes_to_the_start_with_the_children(): void {
+		// C (with its child C1) moves to the top level first: C and C1 come before everything else.
+		$rows = $this->sample_tree();
+
+		$this->assertSame( array( 7, 8, 1, 2, 3, 4, 5, 6, 9 ), MenuRules::target_order( $rows, 7, 0, 0 ) );
+	}
+
+
+	public function test_target_order_top_level_last_goes_after_the_last_top_level_subtree(): void {
+		// A (with A1 and A2) moves to the top level after C, whose subtree is C and C1; the hidden D is a sibling too.
+		$rows = $this->sample_tree();
+
+		$this->assertSame( array( 4, 5, 6, 7, 8, 1, 2, 3, 9 ), MenuRules::target_order( $rows, 1, 0, 7 ) );
+	}
+
+
+	public function test_target_order_moves_the_children_with_the_item_across_parents(): void {
+		// Item 1 (with child 2) goes under 3 after 4, which is 3's only child: 1 and 2 come after 4 and carry their own order.
+		$rows = array(
+			$this->row( 1, 0, 1 ),
+			$this->row( 2, 1, 2 ),
+			$this->row( 3, 0, 3 ),
+			$this->row( 4, 3, 4 ),
+			$this->row( 5, 0, 5 ),
+		);
+
+		$this->assertSame( array( 3, 4, 1, 2, 5 ), MenuRules::target_order( $rows, 1, 3, 4 ) );
+	}
+
+
+	public function test_order_changes_rewrites_only_the_span_with_the_values_it_had(): void {
+		$rows   = $this->sample_tree();
+		$target = MenuRules::target_order( $rows, 1, 0, 4 );
+
+		// Positions 0 to 5 change and take the orders 1 to 6 in turn: B's rows get 1 to 3, A's rows get 4 to 6. Item 7 is untouched.
+		$this->assertSame(
+			array(
+				4 => 1,
+				5 => 2,
+				6 => 3,
+				1 => 4,
+				2 => 5,
+				3 => 6,
+			),
+			MenuRules::order_changes( $rows, $target )
+		);
+	}
+
+	public function test_order_changes_is_empty_when_nothing_moves(): void {
+		$rows = $this->sample_tree();
+
+		$this->assertSame( array(), MenuRules::order_changes( $rows, array_column( $rows, 'id' ) ) );
+	}
+
+
+	public function test_order_changes_refuses_a_span_with_repeated_or_non_positive_values_and_a_tie_at_its_edge(): void {
+		$repeated = array(
+			$this->row( 1, 0, 1 ),
+			$this->row( 2, 0, 2 ),
+			$this->row( 3, 0, 2 ),
+			$this->row( 4, 0, 4 ),
+		);
+		$this->assertNull( MenuRules::order_changes( $repeated, array( 1, 3, 2, 4 ) ), 'Rows 2 and 3 share the value 2 inside the span.' );
+
+		$zero = array(
+			$this->row( 1, 0, 0 ),
+			$this->row( 2, 0, 1 ),
+		);
+		$this->assertNull( MenuRules::order_changes( $zero, array( 2, 1 ) ), 'An order of 0 is not a positive integer.' );
+
+		// The span is positions 0 and 1; the row after it has the value 2 as well, so the sort could put it in the wrong place.
+		$tie = array(
+			$this->row( 1, 0, 1 ),
+			$this->row( 2, 0, 2 ),
+			$this->row( 3, 0, 2 ),
+		);
+		$this->assertNull( MenuRules::order_changes( $tie, array( 2, 1, 3 ) ), 'A row just outside the span has the value of the span edge.' );
+	}
+
+	public function test_consistent_with_tree_is_false_for_a_child_before_its_parent_and_for_an_interleaved_subtree(): void {
+		$this->assertTrue( MenuRules::consistent_with_tree( $this->sample_tree() ) );
+
+		$child_first = array(
+			$this->row( 2, 1, 1 ),
+			$this->row( 1, 0, 2 ),
+		);
+		$this->assertFalse( MenuRules::consistent_with_tree( $child_first ) );
+
+		$interleaved = array(
+			$this->row( 1, 0, 1 ),
+			$this->row( 2, 1, 2 ),
+			$this->row( 3, 0, 3 ),
+			$this->row( 4, 2, 4 ),
+		);
+		$this->assertFalse( MenuRules::consistent_with_tree( $interleaved ), 'Item 3 sits inside the subtree of 1.' );
+	}
+
+	public function test_plan_move_refuses_an_after_that_is_not_a_child_of_the_parent_and_a_missing_item(): void {
+		$rows = $this->sample_tree();
+
+		$this->assertSame( MenuRules::MOVE_INVALID, MenuRules::plan_move( $rows, 8, 4, 1 )['refusal'], 'After 1 is not a child of 4.' );
+		$this->assertSame( MenuRules::MOVE_INVALID, MenuRules::plan_move( $rows, 8, 77, 0 )['refusal'], 'A parent that is not in the menu.' );
+		$this->assertSame( MenuRules::MOVE_INVALID, MenuRules::plan_move( $rows, 8, 7, 77 )['refusal'], 'An after that is not in the menu.' );
+		$this->assertSame( MenuRules::MOVE_INVALID, MenuRules::plan_move( $rows, 77, 0, 0 )['refusal'], 'An item that is not in the menu.' );
+	}
+
+	public function test_plan_move_refuses_a_move_under_itself_or_under_its_own_descendants(): void {
+		$rows = $this->sample_tree();
+
+		$this->assertSame( MenuRules::MOVE_INVALID, MenuRules::plan_move( $rows, 4, 4, 0 )['refusal'], 'Under itself.' );
+		$this->assertSame( MenuRules::MOVE_INVALID, MenuRules::plan_move( $rows, 4, 5, 0 )['refusal'], 'Under its child.' );
+		$this->assertSame( MenuRules::MOVE_INVALID, MenuRules::plan_move( $rows, 4, 6, 0 )['refusal'], 'Under its grandchild.' );
+		$this->assertSame( MenuRules::MOVE_INVALID, MenuRules::plan_move( $rows, 4, 0, 4 )['refusal'], 'After itself.' );
+	}
+
+
+	public function test_plan_move_refuses_a_hidden_new_parent_for_a_visible_and_for_a_hidden_item(): void {
+		$rows = array_merge( $this->sample_tree(), array( $this->row( 10, 0, 10, 'draft' ) ) );
+
+		$this->assertSame( MenuRules::MOVE_HIDDEN, MenuRules::plan_move( $rows, 2, 9, 0 )['refusal'], 'A visible item under the hidden item 9.' );
+		$this->assertSame( MenuRules::MOVE_HIDDEN, MenuRules::plan_move( $rows, 9, 10, 0 )['refusal'], 'A hidden item under the hidden item 10.' );
+		$this->assertNull( MenuRules::plan_move( $rows, 9, 7, 0 )['refusal'], 'A hidden item may go under a visible parent.' );
+	}
+
+	public function test_plan_move_refuses_an_orphaned_item_or_parent_and_a_malformed_item(): void {
+		$rows = array(
+			$this->row( 1, 0, 1, 'publish', true ),
+			$this->row( 2, 0, 2 ),
+			$this->row( 3, 99, 3 ),
+		);
+
+		$this->assertSame( MenuRules::MOVE_UNSUPPORTED, MenuRules::plan_move( $rows, 1, 2, 0 )['refusal'], 'The item is orphaned.' );
+		$this->assertSame( MenuRules::MOVE_UNSUPPORTED, MenuRules::plan_move( $rows, 2, 1, 0 )['refusal'], 'The new parent is orphaned.' );
+		$this->assertSame( MenuRules::MOVE_UNSUPPORTED, MenuRules::plan_move( $rows, 3, 2, 0 )['refusal'], 'The item has a parent that is not in the menu.' );
+		$this->assertSame( MenuRules::MOVE_UNSUPPORTED, MenuRules::plan_move( $rows, 2, 3, 0 )['refusal'], 'The new parent is malformed.' );
+	}
+
+
+	public function test_plan_move_refuses_a_result_deeper_than_the_menu_allows_by_the_subtree_height(): void {
+		// Chain 1, 2, 3: item 3 is at depth 3. Item 4 has one child, so its subtree is 2 levels: under 3 it would reach level 5.
+		$rows = array(
+			$this->row( 1, 0, 1 ),
+			$this->row( 2, 1, 2 ),
+			$this->row( 3, 2, 3 ),
+			$this->row( 4, 0, 4 ),
+			$this->row( 5, 4, 5 ),
+		);
+
+		$this->assertSame( 2, MenuRules::subtree_height( $rows, 4 ) );
+		$this->assertSame( MenuRules::MOVE_DEPTH, MenuRules::plan_move( $rows, 4, 3, 0 )['refusal'] );
+		$this->assertNull( MenuRules::plan_move( $rows, 4, 2, 0 )['refusal'], 'Under item 2, the deepest item reaches level 4, which is allowed.' );
+	}
+
+
+	public function test_plan_move_refuses_more_than_the_move_row_limit(): void {
+		$rows = array();
+		for ( $id = 1; $id <= 60; ++$id ) {
+			$rows[] = $this->row( $id, 0, $id );
+		}
+
+		// Item 1 goes to the end: every one of the 60 rows changes place.
+		$this->assertSame( MenuRules::MOVE_TOO_LARGE, MenuRules::plan_move( $rows, 1, 0, 60 )['refusal'] );
+
+		// Item 1 goes to the end of a menu of 50: 50 rows change, which is allowed.
+		$fifty = array_slice( $rows, 0, 50 );
+		$this->assertNull( MenuRules::plan_move( $fifty, 1, 0, 50 )['refusal'], 'Exactly MAX_MOVE_ROWS rows may change.' );
+	}
+
+	public function test_plan_move_refuses_an_inconsistent_order_and_plans_a_move_to_the_same_place_as_no_change(): void {
+		$duplicated = array(
+			$this->row( 1, 0, 1 ),
+			$this->row( 2, 0, 2 ),
+			$this->row( 3, 0, 2 ),
+		);
+		$this->assertSame( MenuRules::MOVE_ORDER, MenuRules::plan_move( $duplicated, 1, 0, 3 )['refusal'] );
+
+		$rows = $this->sample_tree();
+		$same = MenuRules::plan_move( $rows, 2, 1, 0 );
+		$this->assertNull( $same['refusal'] );
+		$this->assertSame( array(), $same['orders'], 'A move to where the item is changes no order.' );
+		$this->assertSame( array_column( $rows, 'id' ), $same['target'] );
+	}
+
+	public function test_every_valid_move_is_undone_by_its_inverse_and_lands_after_the_predecessor(): void {
+		$rows  = $this->sample_tree();
+		$moves = 0;
+
+		foreach ( $rows as $item ) {
+			$candidates = array_merge( array( 0 ), array_column( $rows, 'id' ) );
+			foreach ( $candidates as $parent ) {
+				foreach ( $candidates as $after ) {
+					$plan = MenuRules::plan_move( $rows, $item['id'], $parent, $after );
+					if ( null !== $plan['refusal'] ) {
+						continue;
+					}
+
+					$moved = $this->applied( $rows, $item['id'], $parent, $plan );
+					$this->assertSame( $after, $this->predecessor( $moved, $item['id'] ), 'The item must sit directly after its predecessor.' );
+
+					$back = MenuRules::plan_move( $moved, $item['id'], $item['parent'], $this->predecessor( $rows, $item['id'] ) );
+					$this->assertNull( $back['refusal'], 'The inverse of a valid move is valid.' );
+					$this->assertSame( $this->shape( $rows ), $this->shape( $this->applied( $moved, $item['id'], $item['parent'], $back ) ) );
+					++$moves;
+				}
+			}
+		}
+
+		$this->assertGreaterThan( 30, $moves, 'The sample menu must give many valid moves.' );
+	}
 }
