@@ -50,6 +50,26 @@ final class OptionWriterTest extends OptionTestCase {
 	}
 
 	/**
+	 * The writer refuses a core option the allowlist never lists, with no filter at all, called directly. The refusal is forbidden, and nothing
+	 * is written. (The allowlist decides here; the writer's own hard_blocked() call is the second layer for the same name.)
+	 */
+	public function test_the_writer_refuses_core_options_with_no_filter(): void {
+		$this->option_agent();
+
+		foreach ( array( 'home', 'posts_per_page' ) as $name ) {
+			$before = get_option( $name );
+
+			$result = $this->in_write(
+				fn(): mixed => OptionWriter::set( $name, 'changed', null, static fn(): bool => true ),
+				Capabilities::SETTINGS
+			);
+
+			$this->assert_refused_with( $result, 'steadhand_forbidden', 403 );
+			$this->assertSame( $before, get_option( $name ), $name );
+		}
+	}
+
+	/**
 	 * An expected value that differs from the stored one is refused with 409 and nothing is written; a matching one is written.
 	 */
 	public function test_expected_is_honoured_by_the_writer(): void {

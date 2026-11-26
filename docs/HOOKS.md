@@ -25,19 +25,22 @@ These rules apply to every extension point listed here once it exists:
 
 ### `steadhand_allowed_options`
 
-Chooses which site options `steadhand/update-option` may change. It is applied by `Steadhand\Pipeline\OptionRules::allowed()`, which the ability and the writer call on every use, so nothing is cached.
+Chooses which site options `steadhand/update-option` may change. It is applied by `Steadhand\Pipeline\OptionRules::allowed()`. That function reads the filter on every call of the ability and of the writer, so the allowlist that decides a call is always current, and it fails closed both ways: a result it cannot use gives the built-in list, and a name it does not keep is refused. The tool's input schema lists the allowlist when the tool is registered, so a name added after registration is refused by the schema the tool was registered with, and a name removed after registration is refused by the call.
 
 - **Since:** unreleased (the release after 0.4.0).
 - **Type:** filter.
-- **Parameter:** `$options` (`array<string, array{max_length: int}>`). The default is `array( 'blogname' => array( 'max_length' => 200 ), 'blogdescription' => array( 'max_length' => 500 ) )`. Each name is an option name, and each entry gives the most characters a plain-text value of that option may take.
+- **Parameter:** `$options` (`array<string, array{max_length: int, min_length: int}>`). The default is `array( 'blogname' => array( 'max_length' => 200, 'min_length' => 1 ), 'blogdescription' => array( 'max_length' => 500, 'min_length' => 0 ) )`. Each name is an option name, and each entry gives the most and the fewest characters a value of that option may take.
 - **Return:** the same shape. Whatever the filter returns, Steadhand checks it before use:
   - A value that is not an array falls back to the default list, and so does a filter that throws.
-  - An entry is dropped unless its name is a string of 1 to 64 letters, digits, underscores or hyphens, its definition is an array with an integer `max_length` from 1 to 2000, and its name is not hard-blocked.
+  - An entry is dropped unless its name is a string of 1 to 64 letters, digits, underscores or hyphens. A purely numeric name is an integer key in PHP, so it is dropped.
+  - An entry is dropped when its name is hard-blocked, or when an entry kept before it has the same name in another letter case. So `BlogName` cannot stand beside `blogname`.
+  - An entry's definition must be an array with an integer `max_length` from 1 to 2000. `min_length` is an optional integer from 0 to `max_length`. A built-in name that gives no `min_length` keeps its built-in one, so an owner who redeclares `blogname` cannot allow an empty title by leaving the minimum out. Any other name gets 0.
   - At most 50 entries are kept: the built-in names first, then the others in the order the filter gave them.
   - Nothing is reported and no warning is raised.
-- **Hard-blocked names:** the exact names, prefixes and name patterns listed in SPEC section 5 for `update-option`, among them `siteurl`, `home`, `active_plugins`, `sidebars_widgets`, `widget_block`, `template`, `stylesheet`, `admin_email`, the prefixes `widget_`, `theme_mods_`, `steadhand_`, `_transient_` and `_site_transient_`, and any name ending in `user_roles` or containing `capabilities` or `user_level`. They are compared in lower case. No filter can add one, whatever this filter returns.
+- **Hard-blocked names:** no filter can add one, whatever this filter returns. Steadhand refuses every option WordPress creates on a new site except `blogname` and `blogdescription` (the list is in SPEC section 5), and every name that contains `key`, `token`, `secret`, `pass`, `auth`, `salt`, `nonce`, `license`, `licence`, `credential`, `cookie` or `session`, in any letter case. The prefixes `widget_`, `theme_mods_`, `steadhand_`, `_transient_` and `_site_transient_` are blocked too, and so is any name ending in `user_roles` or containing `capabilities` or `user_level`.
 - **Removing:** the filter can remove a built-in entry. An owner who does not want agents to change the title can remove `blogname`.
-- **What it does not do:** adding an option only makes it eligible. A call still needs `steadhand_settings`, `steadhand_read` and `steadhand_publish`. The option must already exist in the database, because Steadhand never creates an option. It must not hold structured data (a serialized array or object), and no `pre_option_` filter may override it. The value must be plain text on one line that WordPress stores unchanged. The value sent and the previous value are written to the change log, so add only options whose values may appear there.
+- **What it does not do:** adding an option only makes it eligible. A call still needs `steadhand_settings`, `steadhand_read` and `steadhand_publish`. The option must already exist in the database, because Steadhand never creates an option. It must not hold structured data (a serialized array or object), and no read-side callback may be registered on it: a `pre_option_{name}`, the generic `pre_option`, an `option_{name}` or a `default_option_{name}` callback refuses the option. A `sanitize_option_{name}` callback or a `register_setting` callback runs during the permission check, before any write, because the value rule calls `sanitize_option()`. A value is plain text on one line, of the option's length limits, and it must decode back to what was sent (the value is stored HTML-escaped).
+- **What is recorded:** the sent value, after the normal redaction, is in the change-log entry's input, and the previous value is saved in the snapshot table as the raw stored value. Add only options whose values may appear there.
 
 This example allows a second plain-text option:
 
@@ -45,7 +48,10 @@ This example allows a second plain-text option:
 add_filter(
 	'steadhand_allowed_options',
 	static function ( array $options ): array {
-		$options['my_tagline_extra'] = array( 'max_length' => 120 );
+		$options['my_tagline_extra'] = array(
+			'max_length' => 120,
+			'min_length' => 0,
+		);
 
 		return $options;
 	}

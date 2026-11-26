@@ -34,19 +34,39 @@ final class PlainText {
 	);
 
 	/**
+	 * The display form of the same rule, for an option's value (PlainText::valid() with $display true). It is REFUSED without the bare
+	 * ampersand pattern, because an option is stored HTML-escaped and a bare & is ordinary display text (A & B). The caller must check
+	 * that the stored form decodes back to the value, which refuses an entity sent as text (&amp;, &#039;, &lt;).
+	 *
+	 * @var string[]
+	 */
+	private const DISPLAY_REFUSED = array(
+		'/[<>]/',
+		'/&(?:[A-Za-z][A-Za-z0-9]*|#[0-9]+|#[xX][0-9A-Fa-f]+);/',
+		'/[\p{Cc}\p{Cf}\p{Co}\p{Cn}\p{Zl}\p{Zp}\x{034F}\x{115F}\x{1160}\x{3164}\x{FFA0}\x{2800}\x{FE00}-\x{FE0F}\x{E0100}-\x{E01EF}]|(?!\x20)\p{Zs}/u',
+		'/^\s|\s$|\s\s/u',
+		'/%[0-9A-Fa-f]{2}/',
+	);
+
+	/**
 	 * Whether a text is plain text of at most $max_chars characters that WordPress stores unchanged: valid UTF-8, not blank, no
 	 * match for any refused pattern, and unchanged by sanitize_text_field() and by the entity normalisation a save applies. An
 	 * empty text is not checked here, because its meaning depends on the caller.
 	 *
+	 * With $display true (an option's value), the rule is the display form: a bare &, an apostrophe and a double quote are allowed, and
+	 * the entity normalisation is not applied. Markup stays refused, and so does any entity written out as text (a named, decimal or hex
+	 * entity), because the stored form decodes only the HTML-special entities and the caller's round-trip check would not catch the rest.
+	 *
 	 * @param string $text      The text, as sent or as stored.
 	 * @param int    $max_chars The most characters allowed (code points, as mb_strlen counts UTF-8 text).
+	 * @param bool   $display   Whether the text is display text (an option value) rather than a title.
 	 */
-	public static function valid( string $text, int $max_chars ): bool {
+	public static function valid( string $text, int $max_chars, bool $display = false ): bool {
 		if ( 1 !== preg_match( '//u', $text ) || '' === trim( $text ) ) {
 			return false;
 		}
 
-		foreach ( self::REFUSED as $pattern ) {
+		foreach ( $display ? self::DISPLAY_REFUSED : self::REFUSED as $pattern ) {
 			// A match refuses, and so does a preg error (false): the text is not checked any further.
 			if ( 0 !== preg_match( $pattern, $text ) ) {
 				return false;
@@ -56,6 +76,10 @@ final class PlainText {
 		// Matches when the text is at most $max_chars characters. Zero means it is longer; false is a preg error. Both refuse.
 		if ( 1 !== preg_match( '/^.{0,' . $max_chars . '}\z/su', $text ) ) {
 			return false;
+		}
+
+		if ( $display ) {
+			return sanitize_text_field( $text ) === $text;
 		}
 
 		return sanitize_text_field( $text ) === $text && wp_kses_normalize_entities( $text ) === $text;

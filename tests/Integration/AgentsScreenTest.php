@@ -727,6 +727,15 @@ final class AgentsScreenTest extends TestCase {
 		$this->assertStringNotContainsString( $uuid, $url );
 	}
 
+	/**
+	 * A handler whose screen offers every capability except steadhand_settings, so a test can cover a capability the screen does not offer.
+	 */
+	private function handler_without_settings(): AgentsHandler {
+		$offered = array_values( array_diff( Capabilities::all(), array( Capabilities::SETTINGS ) ) );
+
+		return new AgentsHandler( ( new Plugin() )->registry(), null, $offered );
+	}
+
 	public function test_only_offered_capabilities_are_set_and_the_rest_are_ignored(): void {
 		$agent = $this->agent( '', 1 );
 		$this->as_user( $this->admin() );
@@ -804,6 +813,18 @@ final class AgentsScreenTest extends TestCase {
 		$this->assertFalse( $user->caps[ Capabilities::CONNECT ] );
 		$this->assertFalse( Capabilities::user_has( $user, Capabilities::CONNECT ) );
 		$this->assertTrue( Capabilities::user_has( $user, Capabilities::READ ) );
+	}
+
+	public function test_a_capability_that_is_not_offered_keeps_its_stored_value(): void {
+		$this->handler = $this->handler_without_settings();
+
+		$agent = $this->agent( '', 1 );
+		get_userdata( $agent )->add_cap( Capabilities::SETTINGS, true );
+		$this->as_user( $this->admin() );
+
+		$this->handler->set_capabilities( $this->nonce( AgentsHandler::ACTION_CAPABILITIES, $agent ), $agent, array() );
+
+		$this->assertTrue( get_userdata( $agent )->caps[ Capabilities::SETTINGS ] );
 	}
 
 	public function test_set_capabilities_redirects_with_a_code(): void {

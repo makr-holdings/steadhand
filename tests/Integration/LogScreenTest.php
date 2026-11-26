@@ -195,16 +195,24 @@ final class LogScreenTest extends PostWriteTestCase {
 	}
 
 	/**
-	 * An update-option entry is about no post (object type option, object ID 0), so the list and the entry view render it in full
-	 * without error, as any entry about no post is shown.
+	 * An update-option entry is about no post (object type option, object ID 0), so the list and the entry view show it in full. Its message is
+	 * the text a refusal really produces (OptionRules::stored_error(), for an option with no row), and its input names the option.
 	 */
 	public function test_an_update_option_entry_renders_in_the_list_and_the_entry_view(): void {
-		$id = $this->log_row(
+		$message = 'This option does not exist in the database. Steadhand never creates an option, so nothing was changed.';
+		$id      = $this->log_row(
 			array(
 				'ability'     => 'steadhand/update-option',
 				'object_type' => 'option',
 				'object_id'   => 0,
-				'message'     => 'Set the option blogname.',
+				'result'      => Entry::RESULT_ERROR,
+				'message'     => $message,
+				'input'       => wp_json_encode(
+					array(
+						'option' => 'blogname',
+						'value'  => 'Named in the input',
+					)
+				),
 			)
 		);
 
@@ -212,11 +220,13 @@ final class LogScreenTest extends PostWriteTestCase {
 		$this->assertNull( $list['died'] );
 		$this->assertStringContainsString( 'steadhand/update-option', $list['html'] );
 		$this->assertStringContainsString( 'option #0', $list['html'] );
+		$this->assertStringContainsString( $message, $list['html'] );
 
 		$entry = $this->render_as( $this->admin_id(), array( 'entry' => (string) $id ) );
 		$this->assertNull( $entry['died'] );
 		$this->assertStringContainsString( 'option #0', $entry['html'] );
-		$this->assertStringContainsString( 'Set the option blogname.', $entry['html'] );
+		$this->assertStringContainsString( $message, $entry['html'] );
+		$this->assertStringContainsString( 'blogname', $entry['html'] );
 	}
 
 	public function test_a_logged_out_visitor_is_refused_and_sees_no_log_data(): void {
