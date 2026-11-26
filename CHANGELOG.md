@@ -6,6 +6,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). The
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-11-26
+
 ### Fixed
 - `steadhand/update-menu` returns an item's `order` in the same terms as `steadhand/get-menu`: the position at which get-menu lists the item, counting hidden items. Before, it returned the stored `menu_order`, which can repeat or have gaps in a menu that other tools or imports wrote, so the two tools disagreed. `previous.order` follows the same rule. An item that get-menu does not list (its linked object is trashed or missing) has order 0, and the call says so in its warnings.
 
