@@ -106,6 +106,11 @@ final class MenuRules {
 	public const MOVE_TOO_LARGE   = 'steadhand_refused_move_too_large';
 
 	/**
+	 * The refusal for a menu over MAX_ITEMS, which a move checks before any other planning work. The same code and status as the ability's own check.
+	 */
+	public const MOVE_MENU_TOO_LARGE = 'steadhand_refused_menu_too_large';
+
+	/**
 	 * A string of digits: a whole number as WordPress stores it in meta.
 	 */
 	private const DIGITS = '/^\d+\z/';
@@ -297,10 +302,11 @@ final class MenuRules {
 			return null;
 		}
 
-		$height = 0;
-		$count  = 0;
-		$seen   = array();
-		$stack  = array( array( $id, 1 ) );
+		$children = self::child_map( $rows );
+		$height   = 0;
+		$count    = 0;
+		$seen     = array();
+		$stack    = array( array( $id, 1 ) );
 
 		while ( array() !== $stack ) {
 			list( $current, $level ) = array_pop( $stack );
@@ -313,8 +319,8 @@ final class MenuRules {
 			$seen[ $current ] = true;
 			$height           = max( $height, $level );
 
-			foreach ( self::children( $rows, $current ) as $child ) {
-				$stack[] = array( $child['id'], $level + 1 );
+			foreach ( $children[ $current ] ?? array() as $child ) {
+				$stack[] = array( $child, $level + 1 );
 			}
 		}
 
@@ -472,14 +478,15 @@ final class MenuRules {
 			return array();
 		}
 
-		$found = array( $id => true );
-		$queue = array( $id );
+		$children = self::child_map( $rows );
+		$found    = array( $id => true );
+		$queue    = array( $id );
 		while ( array() !== $queue ) {
 			$current = array_shift( $queue );
-			foreach ( self::children( $rows, $current ) as $child ) {
-				if ( ! isset( $found[ $child['id'] ] ) ) {
-					$found[ $child['id'] ] = true;
-					$queue[]               = $child['id'];
+			foreach ( $children[ $current ] ?? array() as $child ) {
+				if ( ! isset( $found[ $child ] ) ) {
+					$found[ $child ] = true;
+					$queue[]         = $child;
 				}
 			}
 		}
@@ -511,18 +518,66 @@ final class MenuRules {
 			if ( 0 !== $row['parent'] && isset( $position[ $row['parent'] ] ) && $position[ $row['parent'] ] > $position[ $row['id'] ] ) {
 				return false;
 			}
+		}
 
-			$indexes = array();
-			foreach ( self::subtree_ids( $rows, $row['id'] ) as $member ) {
-				$indexes[] = $position[ $member ];
-			}
-
-			if ( max( $indexes ) - min( $indexes ) + 1 !== count( $indexes ) ) {
-				return false;
+		// One pass from the roots: every subtree's lowest and highest position and its size are gathered from its children, so a
+		// subtree is contiguous when its span holds exactly its members. A row that no root reaches (a loop) makes the order inconsistent.
+		$children = self::child_map( $rows );
+		$roots    = array();
+		foreach ( $rows as $row ) {
+			if ( 0 === $row['parent'] || ! isset( $position[ $row['parent'] ] ) ) {
+				$roots[] = $row['id'];
 			}
 		}
 
-		return true;
+		$low     = array();
+		$high    = array();
+		$size    = array();
+		$visited = array();
+		$stack   = array();
+		foreach ( array_reverse( $roots ) as $root ) {
+			$stack[] = array( $root, false );
+		}
+
+		while ( array() !== $stack ) {
+			list( $id, $done ) = array_pop( $stack );
+
+			if ( $done ) {
+				$lo = $position[ $id ];
+				$hi = $lo;
+				$n  = 1;
+				foreach ( $children[ $id ] ?? array() as $child ) {
+					$lo = min( $lo, $low[ $child ] );
+					$hi = max( $hi, $high[ $child ] );
+					$n += $size[ $child ];
+				}
+
+				if ( $hi - $lo + 1 !== $n ) {
+					return false;
+				}
+
+				$low[ $id ]  = $lo;
+				$high[ $id ] = $hi;
+				$size[ $id ] = $n;
+				continue;
+			}
+
+			if ( isset( $visited[ $id ] ) ) {
+				return false;
+			}
+
+			$visited[ $id ] = true;
+			$stack[]        = array( $id, true );
+			foreach ( $children[ $id ] ?? array() as $child ) {
+				if ( isset( $visited[ $child ] ) ) {
+					return false;
+				}
+
+				$stack[] = array( $child, false );
+			}
+		}
+
+		return count( $visited ) === count( $rows );
 	}
 
 	/**
@@ -541,9 +596,11 @@ final class MenuRules {
 	 */
 	public static function target_order( array $rows, int $item_id, int $parent_id, int $after_id ): array {
 		$in_block = array_flip( self::subtree_ids( $rows, $item_id ) );
+		$parents  = array();
 		$block    = array();
 		$rest     = array();
 		foreach ( $rows as $row ) {
+			$parents[ $row['id'] ] = $row['parent'];
 			if ( isset( $in_block[ $row['id'] ] ) ) {
 				$block[] = $row['id'];
 			} else {
@@ -562,6 +619,15 @@ final class MenuRules {
 		} elseif ( 0 !== $parent_id ) {
 			$index  = array_search( $parent_id, $rest, true );
 			$insert = false === $index ? 0 : $index + 1;
+		} else {
+			// First at the top level: directly before the first top-level item, so an item that dangles (its parent is not in the menu)
+			// stays where it was. With no top-level item left, the block goes to the start.
+			foreach ( $rest as $index => $id ) {
+				if ( 0 === $parents[ $id ] ) {
+					$insert = $index;
+					break;
+				}
+			}
 		}
 
 		return array_merge( array_slice( $rest, 0, $insert ), $block, array_slice( $rest, $insert ) );
@@ -632,11 +698,17 @@ final class MenuRules {
 	 * @return array{refusal: string|null, target: int[], orders: array<int, int>}
 	 */
 	public static function plan_move( array $rows, int $item_id, int $parent_id, int $after_id ): array {
-		$by_id = self::index( $rows );
-		$none  = array(
+		$none = array(
 			'target' => array(),
 			'orders' => array(),
 		);
+
+		// Before any other planning work: a menu over the limit is refused as too large, whatever the move.
+		if ( count( $rows ) > self::MAX_ITEMS ) {
+			return array( 'refusal' => self::MOVE_MENU_TOO_LARGE ) + $none;
+		}
+
+		$by_id = self::index( $rows );
 
 		if ( ! isset( $by_id[ $item_id ] )
 			|| $item_id === $parent_id
@@ -655,7 +727,10 @@ final class MenuRules {
 			}
 		}
 
-		if ( 0 !== $parent_id && 'publish' !== $by_id[ $parent_id ]['status'] ) {
+		// A hidden new parent is refused only when the moved subtree holds a published item: a subtree that is all hidden may go under a
+		// hidden parent, which is how its own inverse call puts it back.
+		$block = self::subtree_ids( $rows, $item_id );
+		if ( 0 !== $parent_id && 'publish' !== $by_id[ $parent_id ]['status'] && self::has_published( $by_id, $block ) ) {
 			return array( 'refusal' => self::MOVE_HIDDEN ) + $none;
 		}
 
@@ -675,7 +750,7 @@ final class MenuRules {
 
 		$target  = self::target_order( $rows, $item_id, $parent_id, $after_id );
 		$changes = self::order_changes( $rows, $target );
-		if ( null === $changes ) {
+		if ( null === $changes || ! self::inverse_restores( $rows, $item_id, $parent_id, $target, $changes ) ) {
 			return array( 'refusal' => self::MOVE_ORDER ) + $none;
 		}
 
@@ -688,6 +763,111 @@ final class MenuRules {
 			'target'  => $target,
 			'orders'  => $changes,
 		);
+	}
+
+	/**
+	 * The children of every ID, in row order, built once from the rows. The key 0 holds the top level; a parent that is not in the rows
+	 * has its own key too.
+	 *
+	 * @param array<int, array{id: int, parent: int, order: int, status: string, orphaned: bool, post: \WP_Post}> $rows Rows from items_raw().
+	 * @return array<int, int[]>
+	 */
+	public static function child_map( array $rows ): array {
+		$children = array();
+		foreach ( $rows as $row ) {
+			$children[ $row['parent'] ][] = $row['id'];
+		}
+
+		return $children;
+	}
+
+	/**
+	 * The ID that comes before an item among its siblings in the rows, or 0 when it is first among them.
+	 *
+	 * @param array<int, array{id: int, parent: int, order: int, status: string, orphaned: bool, post: \WP_Post}> $rows    Rows from items_raw().
+	 * @param int                                                                                                 $item_id The item.
+	 */
+	public static function predecessor( array $rows, int $item_id ): int {
+		$row = self::index( $rows )[ $item_id ] ?? null;
+		if ( null === $row ) {
+			return 0;
+		}
+
+		$previous = 0;
+		foreach ( self::children( $rows, $row['parent'] ) as $sibling ) {
+			if ( $sibling['id'] === $item_id ) {
+				return $previous;
+			}
+
+			$previous = $sibling['id'];
+		}
+
+		return 0;
+	}
+
+	/**
+	 * Whether any of the given IDs is a published row.
+	 *
+	 * @param array<int, array{id: int, parent: int, order: int, status: string, orphaned: bool, post: \WP_Post}> $by_id Rows keyed by ID.
+	 * @param int[]                                                                                               $ids   IDs.
+	 */
+	private static function has_published( array $by_id, array $ids ): bool {
+		foreach ( $ids as $id ) {
+			if ( isset( $by_id[ $id ] ) && 'publish' === $by_id[ $id ]['status'] ) {
+				return true;
+			}
+		}
+
+		return false;
+	}
+
+	/**
+	 * Whether the inverse of a move gives back the original menu exactly: the item under its old parent after its old predecessor, with
+	 * every row's order as it was. The check is made on the rows as the move leaves them. A move that could not be undone this way (for
+	 * example one that puts the item on the other side of a dangling row) is refused, rather than accepted without an exact inverse.
+	 *
+	 * @param array<int, array{id: int, parent: int, order: int, status: string, orphaned: bool, post: \WP_Post}> $rows      Rows before the move.
+	 * @param int                                                                                                 $item_id   The item.
+	 * @param int                                                                                                 $parent_id The new parent.
+	 * @param int[]                                                                                               $target    The target flat order.
+	 * @param array<int, int>                                                                                     $changes   The new orders.
+	 */
+	private static function inverse_restores( array $rows, int $item_id, int $parent_id, array $target, array $changes ): bool {
+		$by_id      = self::index( $rows );
+		$old_parent = $by_id[ $item_id ]['parent'];
+		$old_after  = self::predecessor( $rows, $item_id );
+
+		$moved = array();
+		foreach ( $target as $id ) {
+			$row = $by_id[ $id ];
+			if ( $id === $item_id ) {
+				$row['parent'] = $parent_id;
+			}
+
+			$row['order'] = $changes[ $id ] ?? $row['order'];
+			$moved[]      = $row;
+		}
+
+		$back_target  = self::target_order( $moved, $item_id, $old_parent, $old_after );
+		$back_changes = self::order_changes( $moved, $back_target );
+		if ( null === $back_changes ) {
+			return false;
+		}
+
+		$moved_by_id = self::index( $moved );
+		$original    = array_column( $rows, 'id' );
+		if ( $back_target !== $original ) {
+			return false;
+		}
+
+		foreach ( $rows as $row ) {
+			$order = $back_changes[ $row['id'] ] ?? $moved_by_id[ $row['id'] ]['order'];
+			if ( $order !== $row['order'] ) {
+				return false;
+			}
+		}
+
+		return true;
 	}
 
 	/**

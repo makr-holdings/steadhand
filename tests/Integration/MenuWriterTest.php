@@ -10,8 +10,10 @@ declare( strict_types=1 );
 
 namespace Steadhand\Tests\Integration;
 
+use Steadhand\Capabilities;
 use Steadhand\Pipeline\MenuRules;
 use Steadhand\Pipeline\MenuWriter;
+use Steadhand\Pipeline\Pipeline;
 
 /**
  * Negative tests come first: a call outside a write, a change made between the read and the write, a listener that changes the row,
@@ -514,9 +516,42 @@ final class MenuWriterTest extends MenuWriteTestCase {
 	private function move_in_write( int $menu, int $item, int $new_parent, int $after, ?array $expected = null ): mixed {
 		$expected ??= $this->plan_for( $menu, $item, $new_parent, $after );
 
-		return $this->act_as_agent_in_write(
+		return $this->in_update_menu_write(
 			fn(): mixed => MenuWriter::move( $this->menu_term( $menu ), $item, $new_parent, $after, $expected, static fn(): bool => true )
 		);
+	}
+
+	/**
+	 * Runs a writer call inside a write named steadhand/update-menu, as the agent, so the menu item mapping applies (the native checks of a move).
+	 *
+	 * @param callable $work The writer call.
+	 * @return mixed
+	 */
+	private function in_update_menu_write( callable $work ): mixed {
+		$this->act_as_agent(
+			array(
+				Capabilities::MENUS   => true,
+				Capabilities::PUBLISH => true,
+			)
+		);
+
+		$result = ( new Pipeline( new SpyLogger() ) )->run(
+			new ProbeAbility(
+				Capabilities::MENUS,
+				static fn(): array => array( 'answer' => $work() ),
+				array(
+					'readonly'    => false,
+					'destructive' => false,
+					'idempotent'  => false,
+				),
+				'steadhand/update-menu'
+			),
+			array()
+		);
+
+		$this->assertIsArray( $result, 'The probe call must be allowed to run.' );
+
+		return $result['answer'];
 	}
 
 	/**
@@ -750,5 +785,75 @@ final class MenuWriterTest extends MenuWriteTestCase {
 		$this->move_in_write( $menu, $b, 0, 0 );
 
 		$this->assertFalse( MenuRules::hide_recorded( $b ), 'A move must not re-arm a stale record.' );
+	}
+
+	/**
+	 * A put-back to an old parent that is hidden too leaves the item visible under a hidden parent, so Steadhand hides the moved item
+	 * instead, as one correction, and reports partial.
+	 */
+	public function test_a_put_back_to_a_hidden_old_parent_hides_the_moved_item_instead(): void {
+		[ $menu, $a, $b, $c ] = $this->menu_with_three();
+		$q                    = $this->custom_item( $menu, 'Q', 'https://example.com/q', 0, 4 );
+		$child                = $this->custom_item( $menu, 'X', 'https://example.com/x', $q, 5 );
+
+		// In the gap between the parent write and the check, the new parent B and the old parent Q are both hidden.
+		$this->on(
+			'updated_post_meta',
+			static function ( mixed $meta_id, mixed $object_id, mixed $meta_key ) use ( $b, $q, $child ): void {
+				unset( $meta_id );
+				if ( MenuRules::PARENT_META === $meta_key && (int) $object_id === $child ) {
+					wp_update_post(
+						array(
+							'ID'          => $b,
+							'post_status' => 'draft',
+						)
+					);
+					wp_update_post(
+						array(
+							'ID'          => $q,
+							'post_status' => 'draft',
+						)
+					);
+				}
+			},
+			10,
+			3
+		);
+
+		$result = $this->move_in_write( $menu, $child, $b, 0 );
+
+		$this->assert_refused( $result, 'steadhand_update_partial' );
+		$this->assertStringContainsString( 'hid the moved item', $result->get_error_message() );
+		$this->assertSame( 'draft', $this->raw_row( $child )->post_status, 'The moved item is hidden.' );
+		$this->assertTrue( MenuRules::hide_recorded( $child ), 'The hide is a Steadhand hide, with its record.' );
+	}
+
+	/**
+	 * An exception after the first write is a partial failure that names the item, and the menu-changed action fires once.
+	 */
+	public function test_an_exception_after_a_write_is_partial_and_names_the_item(): void {
+		[ $menu, $a, $b, $c ] = $this->menu_with_three();
+		$this->count_announcements();
+
+		// C goes first, so C is written, then A, then B; B's save throws.
+		$this->on(
+			'wp_insert_post_data',
+			static function ( array $data, array $postarr ) use ( $b ): array {
+				if ( (int) ( $postarr['ID'] ?? 0 ) === $b && isset( $postarr['menu_order'] ) ) {
+					throw new \RuntimeException( 'A listener failed.' );
+				}
+
+				return $data;
+			},
+			10,
+			2
+		);
+
+		$result = $this->move_in_write( $menu, $c, 0, 0 );
+
+		$this->assert_refused( $result, 'steadhand_update_partial' );
+		$this->assertStringContainsString( (string) $c, $result->get_error_message() );
+		$this->assertSame( 1, $this->announced, 'The menu-changed action fires once, because writes were made.' );
+		$this->assertCount( 3, MenuRules::items_raw( $this->menu_term( $menu ) ), 'No item is lost.' );
 	}
 }

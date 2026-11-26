@@ -602,12 +602,16 @@ final class MenuRulesTest extends MenuToolTestCase {
 	}
 
 
-	public function test_plan_move_refuses_a_hidden_new_parent_for_a_visible_and_for_a_hidden_item(): void {
+
+	public function test_plan_move_refuses_a_hidden_new_parent_only_when_the_moved_subtree_has_a_published_item(): void {
 		$rows = array_merge( $this->sample_tree(), array( $this->row( 10, 0, 10, 'draft' ) ) );
 
 		$this->assertSame( MenuRules::MOVE_HIDDEN, MenuRules::plan_move( $rows, 2, 9, 0 )['refusal'], 'A visible item under the hidden item 9.' );
-		$this->assertSame( MenuRules::MOVE_HIDDEN, MenuRules::plan_move( $rows, 9, 10, 0 )['refusal'], 'A hidden item under the hidden item 10.' );
+		$this->assertNull( MenuRules::plan_move( $rows, 9, 10, 0 )['refusal'], 'A hidden item with nothing published under it may go under a hidden parent.' );
 		$this->assertNull( MenuRules::plan_move( $rows, 9, 7, 0 )['refusal'], 'A hidden item may go under a visible parent.' );
+
+		$with_child = array_merge( $rows, array( $this->row( 11, 9, 11 ) ) );
+		$this->assertSame( MenuRules::MOVE_HIDDEN, MenuRules::plan_move( $with_child, 9, 10, 0 )['refusal'], 'A subtree with a published item may not go under a hidden parent.' );
 	}
 
 	public function test_plan_move_refuses_an_orphaned_item_or_parent_and_a_malformed_item(): void {
@@ -694,5 +698,59 @@ final class MenuRulesTest extends MenuToolTestCase {
 		}
 
 		$this->assertGreaterThan( 30, $moves, 'The sample menu must give many valid moves.' );
+	}
+
+	public function test_first_at_the_top_level_goes_before_the_first_top_level_item_not_before_a_dangling_row(): void {
+		// X is a dangling row (its parent 99 is not in the menu) and comes first. A is already the first top-level item.
+		$rows = array( $this->row( 1, 99, 1 ), $this->row( 2, 0, 2 ), $this->row( 3, 0, 3 ) );
+
+		$this->assertSame( array( 1, 2, 3 ), MenuRules::target_order( $rows, 2, 0, 0 ) );
+	}
+
+	public function test_the_reviewers_dangling_case_moves_and_its_inverse_restores_every_order_and_parent(): void {
+		// X dangles first; A and B are top-level. Move A after B, then move A back to the top level after its old predecessor.
+		$rows = array( $this->row( 1, -1, 1 ), $this->row( 2, 0, 2 ), $this->row( 3, 0, 3 ) );
+
+		$plan = MenuRules::plan_move( $rows, 2, 0, 3 );
+		$this->assertNull( $plan['refusal'] );
+		$moved = $this->applied( $rows, 2, 0, $plan );
+
+		$back = MenuRules::plan_move( $moved, 2, 0, MenuRules::predecessor( $rows, 2 ) );
+		$this->assertNull( $back['refusal'] );
+		$this->assertSame( $this->shape( $rows ), $this->shape( $this->applied( $moved, 2, 0, $back ) ) );
+	}
+
+	public function test_a_move_across_a_dangling_row_that_cannot_be_undone_exactly_is_refused_as_menu_order(): void {
+		// A is first, X dangles between A and B. Moving A after B puts it on the far side of X, and the inverse (first at the top level,
+		// before the first top-level item) cannot put it back in front of X.
+		$rows = array( $this->row( 1, 0, 1 ), $this->row( 2, 99, 2 ), $this->row( 3, 0, 3 ) );
+
+		$this->assertSame( MenuRules::MOVE_ORDER, MenuRules::plan_move( $rows, 1, 0, 3 )['refusal'] );
+	}
+
+	public function test_a_menu_over_the_item_limit_is_refused_before_any_planning(): void {
+		$rows = array();
+		for ( $id = 1; $id <= 501; ++$id ) {
+			$rows[] = $this->row( $id, 0, $id );
+		}
+
+		// Item 9999 is not in the menu: were the planning reached, the refusal would be steadhand_invalid_input.
+		$this->assertSame( MenuRules::MOVE_MENU_TOO_LARGE, MenuRules::plan_move( $rows, 9999, 0, 0 )['refusal'] );
+	}
+
+	public function test_planning_a_500_item_chain_is_quick_and_the_tree_check_holds(): void {
+		$rows = array();
+		for ( $id = 1; $id <= 500; ++$id ) {
+			$rows[] = $this->row( $id, 1 === $id ? 0 : $id - 1, $id );
+		}
+
+		$start      = microtime( true );
+		$consistent = MenuRules::consistent_with_tree( $rows );
+		$plan       = MenuRules::plan_move( $rows, 500, 1, 0 );
+		$elapsed    = microtime( true ) - $start;
+
+		$this->assertTrue( $consistent );
+		$this->assertSame( MenuRules::MOVE_TOO_LARGE, $plan['refusal'], 'The leaf moves under item 1, so 499 rows change: refused by the row limit, after planning.' );
+		$this->assertLessThan( 1.0, $elapsed, 'The pure planning of a 500-item chain must take well under a second.' );
 	}
 }

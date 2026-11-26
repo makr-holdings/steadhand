@@ -355,10 +355,11 @@ final class UpdateMenuMoveTest extends MenuWriteTestCase {
 	/**
 	 * A hidden new parent refuses the move of a visible item and of a hidden one.
 	 */
-	public function test_a_hidden_new_parent_is_refused_for_a_visible_and_for_a_hidden_item(): void {
-		$fixture = $this->three();
-		$hidden  = $this->draft_custom_item( $fixture['menu'], 'Hidden parent', 'https://example.com/hp', 0, 4 );
-		$gone    = $this->draft_custom_item( $fixture['menu'], 'Hidden child', 'https://example.com/hc', 0, 5 );
+	public function test_a_hidden_new_parent_is_refused_for_a_visible_item_and_for_a_subtree_with_a_published_item(): void {
+		$fixture           = $this->three();
+		$hidden            = $this->draft_custom_item( $fixture['menu'], 'Hidden parent', 'https://example.com/hp', 0, 4 );
+		$hidden_with_child = $this->draft_custom_item( $fixture['menu'], 'Hidden with child', 'https://example.com/hwc', 0, 5 );
+		$this->custom_item( $fixture['menu'], 'Visible child', 'https://example.com/vc', $hidden_with_child, 6 );
 		$this->menu_agent();
 
 		$this->assert_refused(
@@ -366,9 +367,27 @@ final class UpdateMenuMoveTest extends MenuWriteTestCase {
 			'steadhand_refused_hidden_parent'
 		);
 		$this->assert_refused(
-			$this->execute_ability( self::ABILITY, $this->move_args( $fixture['menu'], $gone, $hidden, 0 ) ),
+			$this->execute_ability( self::ABILITY, $this->move_args( $fixture['menu'], $hidden_with_child, $hidden, 0 ) ),
 			'steadhand_refused_hidden_parent'
 		);
+	}
+
+	public function test_a_hidden_subtree_moves_under_a_hidden_parent_and_its_inverse_restores_the_menu(): void {
+		$fixture = $this->three();
+		$hidden  = $this->draft_custom_item( $fixture['menu'], 'Hidden parent', 'https://example.com/hp', 0, 4 );
+		$gone    = $this->draft_custom_item( $fixture['menu'], 'Hidden item', 'https://example.com/hi', 0, 5 );
+		$this->menu_agent();
+		$before = $this->shape( $fixture['menu'] );
+
+		$moved = $this->execute_ability( self::ABILITY, $this->move_args( $fixture['menu'], $gone, $hidden, 0 ) );
+		$this->assertTrue( $moved['changed'], 'Nothing visible ends under a hidden parent, so the move is allowed.' );
+
+		$back = $this->execute_ability(
+			self::ABILITY,
+			$this->move_args( $fixture['menu'], $gone, $moved['previous']['parent'], $moved['previous']['after'] )
+		);
+		$this->assertTrue( $back['changed'] );
+		$this->assertSame( $before, $this->shape( $fixture['menu'] ), 'The inverse restores every order and parent.' );
 	}
 
 	/**
@@ -390,6 +409,10 @@ final class UpdateMenuMoveTest extends MenuWriteTestCase {
 		);
 		$this->assert_refused(
 			$this->execute_ability( self::ABILITY, $this->move_args( $fixture['menu'], $orphan, 0, 0 ) ),
+			'steadhand_refused_unsupported_item'
+		);
+		$this->assert_refused(
+			$this->execute_ability( self::ABILITY, $this->move_args( $fixture['menu'], $fixture['c'], 0, $orphan ) ),
 			'steadhand_refused_unsupported_item'
 		);
 		$this->assert_refused(
@@ -635,36 +658,207 @@ final class UpdateMenuMoveTest extends MenuWriteTestCase {
 	 * A move changes only the menu_order of the rows it reorders and the parent of the moved item. Titles, content, excerpts, statuses and the
 	 * other item meta stay as they were.
 	 */
-	public function test_a_move_changes_only_the_order_and_the_parent(): void {
-		$fixture = $this->three();
+	public function test_a_move_changes_only_the_order_and_the_parent_of_every_item_of_both_menus(): void {
+		$fixture = $this->nested();
+		$second  = $this->three();
 		$this->menu_agent();
-		$before = array();
-		foreach ( array( $fixture['a'], $fixture['b'], $fixture['c'] ) as $id ) {
-			$post          = $this->raw_row( $id );
-			$before[ $id ] = array(
-				$post->post_title,
-				$post->post_content,
-				$post->post_excerpt,
-				$post->post_status,
-				(string) get_post_meta( $id, '_menu_item_type', true ),
-				(string) get_post_meta( $id, '_menu_item_url', true ),
-			);
-		}
+		$ids    = array_merge( MenuRules::items_raw( $this->menu_term( $fixture['menu'] ) ), MenuRules::items_raw( $this->menu_term( $second['menu'] ) ) );
+		$ids    = array_map( static fn( array $row ): int => $row['id'], $ids );
+		$before = $this->post_and_meta_of( $ids );
 
+		// C goes to the top level first: every row of the first menu shifts, and the second menu is not touched.
 		$this->execute_ability( self::ABILITY, $this->move_args( $fixture['menu'], $fixture['c'], 0, 0 ) );
 
-		foreach ( array( $fixture['a'], $fixture['b'], $fixture['c'] ) as $id ) {
-			$post  = $this->raw_row( $id );
-			$after = array(
-				$post->post_title,
-				$post->post_content,
-				$post->post_excerpt,
-				$post->post_status,
-				(string) get_post_meta( $id, '_menu_item_type', true ),
-				(string) get_post_meta( $id, '_menu_item_url', true ),
-			);
-			$this->assertSame( $before[ $id ], $after, "Item $id keeps its text, status and meta." );
+		$this->assertSame(
+			array( $fixture['c'], $fixture['a'], $fixture['a1'], $fixture['b'], $fixture['b1'] ),
+			$this->printed( $fixture['menu'] )
+		);
+		$after = $this->post_and_meta_of( $ids );
+		foreach ( $ids as $id ) {
+			$this->assertSame( $before[ $id ], $after[ $id ], "Item $id changed in a field or meta key other than its order or parent." );
 		}
+		$this->assertSame( '0', (string) get_post_meta( $fixture['c'], MenuRules::PARENT_META, true ), 'C stays at the top level.' );
+	}
+
+	/**
+	 * Every post field, and every meta key, of the given items, except the fields a move is meant to change: the order and the modified times,
+	 * and the parent meta.
+	 *
+	 * @param int[] $ids The items.
+	 * @return array<int, array{post: array<string, mixed>, meta: array<string, mixed>}>
+	 */
+	private function post_and_meta_of( array $ids ): array {
+		$out = array();
+		foreach ( $ids as $id ) {
+			clean_post_cache( $id );
+			$post = (array) get_post( $id, ARRAY_A );
+			unset( $post['menu_order'], $post['post_modified'], $post['post_modified_gmt'] );
+
+			wp_cache_delete( $id, 'post_meta' );
+			$meta = get_post_meta( $id );
+			unset( $meta[ MenuRules::PARENT_META ] );
+
+			$out[ $id ] = array(
+				'post' => $post,
+				'meta' => $meta,
+			);
+		}
+
+		return $out;
+	}
+
+	/**
+	 * The menu as a browser shows it: the list items of wp_nav_menu(), in document order, each with the ID of its nearest list item ancestor
+	 * (0 at the top level). Parsed from the real HTML, not from the rows.
+	 *
+	 * @param int $menu The menu.
+	 * @return array<int, array{0: int, 1: int}>
+	 */
+	private function html_tree( int $menu ): array {
+		$html = wp_nav_menu(
+			array(
+				'menu'        => $menu,
+				'echo'        => false,
+				'container'   => false,
+				'fallback_cb' => false,
+			)
+		);
+		$this->assertIsString( $html, 'wp_nav_menu must return the markup.' );
+
+		$dom = new \DOMDocument();
+		libxml_use_internal_errors( true );
+		$dom->loadHTML( '<?xml encoding="utf-8" ?><div>' . $html . '</div>' );
+		libxml_clear_errors();
+
+		$xpath = new \DOMXPath( $dom );
+		$out   = array();
+		foreach ( $dom->getElementsByTagName( 'li' ) as $li ) {
+			if ( ! preg_match( '/^menu-item-(\d+)$/', (string) $li->getAttribute( 'id' ), $own ) ) {
+				continue;
+			}
+
+			// The nearest list item above this one, which is the last of its ancestors in document order.
+			$ancestors = $xpath->query( 'ancestor::li[starts-with(@id, "menu-item-")]', $li );
+			$parent    = 0;
+			if ( false !== $ancestors && $ancestors->length > 0 ) {
+				$nearest = $ancestors->item( $ancestors->length - 1 );
+				if ( $nearest instanceof \DOMElement && preg_match( '/^menu-item-(\d+)$/', $nearest->getAttribute( 'id' ), $up ) ) {
+					$parent = (int) $up[1];
+				}
+			}
+
+			$out[] = array( (int) $own[1], $parent );
+		}
+
+		return $out;
+	}
+
+	/**
+	 * After a move with children, the markup wp_nav_menu() prints is the intended tree, in the intended order.
+	 */
+	public function test_the_markup_wp_nav_menu_prints_after_a_move_is_the_intended_tree(): void {
+		$fixture = $this->nested();
+		$this->menu_agent();
+
+		// A, with its child A1, goes to the top level after C.
+		$this->execute_ability( self::ABILITY, $this->move_args( $fixture['menu'], $fixture['a'], 0, $fixture['c'] ) );
+
+		$rows   = MenuRules::items_raw( $this->menu_term( $fixture['menu'] ) );
+		$parent = array();
+		foreach ( $rows as $row ) {
+			$parent[ $row['id'] ] = $row['parent'];
+		}
+		$intended = array();
+		foreach ( $this->printed( $fixture['menu'] ) as $id ) {
+			$intended[] = array( $id, $parent[ $id ] );
+		}
+
+		$this->assertSame(
+			array( array( $fixture['b'], 0 ), array( $fixture['b1'], $fixture['b'] ), array( $fixture['c'], 0 ), array( $fixture['a'], 0 ), array( $fixture['a1'], $fixture['a'] ) ),
+			$intended
+		);
+		$this->assertSame( $intended, $this->html_tree( $fixture['menu'] ), 'The markup must list the same items in the same nesting.' );
+	}
+
+	/**
+	 * A move that changes exactly 50 rows is allowed through the ability.
+	 */
+	public function test_exactly_fifty_changed_rows_are_allowed_through_the_ability(): void {
+		$menu  = $this->classic_menu( 'Fifty ' . wp_generate_password( 6, false ) );
+		$items = array();
+		for ( $position = 1; $position <= 51; ++$position ) {
+			$items[] = $this->custom_item( $menu, 'Item ' . $position, 'https://example.com/f' . $position, 0, $position );
+		}
+		$this->menu_agent();
+
+		// The first item goes after the fiftieth: 50 rows change place, and the fifty-first stays.
+		$result = $this->execute_ability( self::ABILITY, $this->move_args( $menu, $items[0], 0, $items[49] ) );
+
+		$this->assertTrue( $result['changed'] );
+	}
+
+	/**
+	 * A menu of 501 items is refused by the planning bound, before the snapshot is planned: the snapshot is 0 and the refusal names the menu.
+	 */
+	public function test_a_menu_of_501_items_is_refused_as_too_large_and_saves_no_snapshot(): void {
+		$menu  = $this->classic_menu( 'Huge ' . wp_generate_password( 6, false ) );
+		$items = array();
+		for ( $position = 1; $position <= 501; ++$position ) {
+			$items[] = $this->custom_item( $menu, 'Item ' . $position, 'https://example.com/h' . $position, 0, $position );
+		}
+		$agent = $this->menu_agent();
+
+		$result = $this->execute_ability( self::ABILITY, $this->move_args( $menu, $items[0], 0, $items[500] ) );
+
+		$this->assert_refused( $result, 'steadhand_refused_menu_too_large' );
+		$this->assertSame( 0, (int) $this->latest_row( $agent )['snapshot_id'], 'No snapshot is planned or saved for a menu over the limit.' );
+	}
+
+	/**
+	 * A permission the caller lacks on one row that would shift refuses the whole move, with the generic text, and nothing is written.
+	 */
+	public function test_a_row_that_shifts_and_the_caller_may_not_edit_refuses_the_move(): void {
+		$fixture = $this->three();
+		$this->menu_agent();
+		$before  = $this->shape( $fixture['menu'] );
+		$blocked = $fixture['a'];
+
+		$this->on(
+			'map_meta_cap',
+			static function ( array $caps, string $cap, int $user_id, array $args ) use ( $blocked ): array {
+				unset( $user_id );
+				if ( 'edit_post' === $cap && (int) ( $args[0] ?? 0 ) === $blocked ) {
+					$caps[] = 'do_not_allow';
+				}
+
+				return $caps;
+			},
+			99,
+			4
+		);
+
+		// C goes first, so A shifts too.
+		$result = $this->execute_ability( self::ABILITY, $this->move_args( $fixture['menu'], $fixture['c'], 0, 0 ) );
+
+		$this->assert_refused( $result, 'steadhand_forbidden', 'Not found, or this agent may not access it.' );
+		$this->assertSame( $before, $this->shape( $fixture['menu'] ), 'Nothing is written.' );
+	}
+
+	/**
+	 * A row that shifts and is also in another menu refuses the move: its place cannot change in a second menu.
+	 */
+	public function test_a_row_that_shifts_and_is_in_two_menus_refuses_the_move(): void {
+		$fixture = $this->three();
+		$other   = $this->classic_menu( 'Other ' . wp_generate_password( 6, false ) );
+		wp_set_object_terms( $fixture['a'], array( $other ), 'nav_menu', true );
+		$this->menu_agent();
+		$before = $this->shape( $fixture['menu'] );
+
+		$result = $this->execute_ability( self::ABILITY, $this->move_args( $fixture['menu'], $fixture['c'], 0, 0 ) );
+
+		$this->assert_refused( $result, 'steadhand_refused_unsupported_item' );
+		$this->assertStringContainsString( 'also in another menu', $result->get_error_message() );
+		$this->assertSame( $before, $this->shape( $fixture['menu'] ), 'Nothing is written.' );
 	}
 
 	/**
