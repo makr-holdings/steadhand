@@ -85,7 +85,7 @@ final class GetMenuTest extends MenuToolTestCase {
 
 		$this->assertFalse( $result['isError'] );
 		$this->assertSame(
-			array( 'kind', 'id', 'name', 'slug', 'locations', 'items', 'content', 'blocks', 'truncated' ),
+			array( 'kind', 'id', 'name', 'slug', 'locations', 'items', 'movable', 'content', 'blocks', 'truncated' ),
 			array_keys( $output )
 		);
 		$this->assertSame( 'classic', $output['kind'] );

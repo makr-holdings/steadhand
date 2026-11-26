@@ -101,8 +101,27 @@ final class MenuReader {
 	 * @return array{items: \WP_Post[], truncated: bool}
 	 */
 	public static function page( \WP_Term $menu ): array {
+		$loaded = self::load( $menu );
+
+		return array(
+			'items'     => $loaded['items'],
+			'truncated' => $loaded['truncated'],
+		);
+	}
+
+	/**
+	 * The same list as page(), and also movable: whether update-menu can move an item in this menu for the stored order (MenuRules::movable()).
+	 * movable is computed from every stored row the list reads, including the rows the list leaves out, so get-menu does not read the menu a
+	 * second time. page() returns only the list, so its other callers see no change.
+	 *
+	 * @param \WP_Term $menu Classic menu.
+	 * @return array{items: \WP_Post[], truncated: bool, movable: bool}
+	 */
+	public static function load( \WP_Term $menu ): array {
+		$rows = MenuRules::items_raw( $menu );
+
 		$kept = array();
-		foreach ( MenuRules::items_raw( $menu ) as $row ) {
+		foreach ( $rows as $row ) {
 			if ( 'draft' === $row['status'] && $row['orphaned'] ) {
 				continue;
 			}
@@ -137,6 +156,7 @@ final class MenuReader {
 			return array(
 				'items'     => array(),
 				'truncated' => $truncated,
+				'movable'   => MenuRules::movable( $rows ),
 			);
 		}
 
@@ -163,7 +183,27 @@ final class MenuReader {
 		return array(
 			'items'     => $items,
 			'truncated' => $truncated,
+			'movable'   => MenuRules::movable( $rows ),
 		);
+	}
+
+	/**
+	 * One item as get-menu lists it, found in page()'s list of its menu, or null when get-menu does not list the item (its linked object is
+	 * trashed or missing, it is an orphaned draft, or a filter left it out). The order is the item's position among the listed items,
+	 * which is what get-menu returns. update-menu uses this for the item it returns and for previous.order, so both match get-menu.
+	 *
+	 * @param \WP_Term $menu    Classic menu.
+	 * @param int      $item_id Item post ID.
+	 * @return array<string, mixed>|null The get-menu item shape (see item()), or null.
+	 */
+	public static function listed_item( \WP_Term $menu, int $item_id ): ?array {
+		foreach ( self::page( $menu )['items'] as $item ) {
+			if ( (int) $item->ID === $item_id ) {
+				return self::item( $item );
+			}
+		}
+
+		return null;
 	}
 
 	/**
