@@ -141,16 +141,6 @@ final class Engine {
 	}
 
 	/**
-	 * The IDs of the third-party rules that were accepted, in the order they were added. A listener that throws keeps the rules added
-	 * before it. The rules are not evaluated.
-	 *
-	 * @return string[]
-	 */
-	public function third_party_ids(): array {
-		return array_map( fn( Rule $rule ): string => $this->id_of( $rule ), $this->third_party() );
-	}
-
-	/**
 	 * Collects the third-party rules, once. A listener that throws keeps the rules added before it.
 	 *
 	 * @return Rule[]

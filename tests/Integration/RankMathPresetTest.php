@@ -167,8 +167,10 @@ final class RankMathPresetTest extends OptionTestCase {
 		$this->preset( true );
 
 		$this->assertFalse( OptionRules::preset_blocked( 'my-rank-math' ) );
-		$this->assertFalse( OptionRules::preset_blocked( 'rankmath-options' ) );
+		$this->assertFalse( OptionRules::preset_blocked( 'my_rankmath' ) );
 		$this->assertFalse( OptionRules::preset_blocked( 'rank math' ) );
+		$this->assertTrue( OptionRules::preset_blocked( 'rankmath-options' ), 'The rankmath prefix is refused too.' );
+		$this->assertTrue( OptionRules::preset_blocked( 'RankMath_x' ), 'The rankmath prefix is refused in any letter case.' );
 	}
 
 	/**
@@ -199,6 +201,8 @@ final class RankMathPresetTest extends OptionTestCase {
 			'rank_math prefix'     => array( 'rank_math_foo' ),
 			'mixed-case rank-math' => array( 'Rank-Math-x' ),
 			'upper-case rank_math' => array( 'RANK_MATH_BAR' ),
+			'rankmath prefix'      => array( 'rankmath-options-x' ),
+			'rankmath underscore'  => array( 'rankmath_foo' ),
 		);
 	}
 }

@@ -241,28 +241,138 @@ final class PresetsTest extends OptionTestCase {
 		$this->assertArrayNotHasKey( Presets::OPTION, OptionRules::allowed(), 'The allowlist must drop the presets option.' );
 	}
 
+	/**
+	 * Plain-string rows, one of them the presets option itself, are added through the allowlist filter. The prefix rule still refuses
+	 * both: they are off the allowlist, hard-blocked, refused by the ability, and their rows are byte-identical afterwards.
+	 */
 	public function test_an_agent_cannot_write_the_presets_option_through_update_option_even_via_the_filter(): void {
-		Presets::save( array( Presets::RANK_MATH => true ) );
-		$before = get_option( Presets::OPTION );
+		$plain = 'steadhand_example_plain';
+		add_option( $plain, 'plain value', '', 'no' );
+		update_option( Presets::OPTION, 'plain value' );
+		wp_cache_flush();
 
 		$this->on(
 			'steadhand_allowed_options',
-			static function ( array $options ): array {
-				$options[ Presets::OPTION ] = array( 'max_length' => 2000 );
+			static function ( array $options ) use ( $plain ): array {
+				$options[ $plain ]          = array( 'max_length' => 100 );
+				$options[ Presets::OPTION ] = array( 'max_length' => 100 );
 
 				return $options;
 			}
 		);
 		$this->option_agent( array( Capabilities::SETTINGS => true ) );
 
-		$result = $this->execute_ability(
-			self::ABILITY,
-			$this->args( Presets::OPTION, array( Presets::RANK_MATH => false ) )
+		$names = array( $plain, Presets::OPTION );
+		$rows  = array();
+		foreach ( $names as $name ) {
+			$rows[ $name ] = OptionRules::stored_raw( $name );
+			$this->assertIsString( $rows[ $name ], "The row $name must exist as a plain string." );
+		}
+
+		$allowed = OptionRules::allowed();
+		foreach ( $names as $name ) {
+			$this->assertArrayNotHasKey( $name, $allowed, "The allowlist must drop $name." );
+			$this->assertTrue( OptionRules::hard_blocked( $name ), "$name must be hard-blocked." );
+
+			$result = $this->execute_ability( self::ABILITY, $this->args( $name, 'changed' ) );
+			$this->assertWPError( $result, "The tool must refuse $name." );
+			$this->assertSame( $rows[ $name ], OptionRules::stored_raw( $name ), "The row $name must be byte-identical." );
+		}
+	}
+
+	/**
+	 * A read of the presets option that throws gives the defaults, so the Rank Math preset stays on (fail closed) and nothing else breaks.
+	 *
+	 * @dataProvider throwing_reads
+	 *
+	 * @param string $hook The option filter that throws.
+	 */
+	public function test_a_throwing_presets_read_gives_the_defaults_and_rank_math_stays_on( string $hook ): void {
+		update_option( Presets::OPTION, array( Presets::RANK_MATH => false ) );
+		wp_cache_flush();
+		$this->on(
+			$hook,
+			static function (): never {
+				throw new \RuntimeException( 'read failed' );
+			}
 		);
 
-		$this->assertWPError( $result, 'An agent must not reach the presets option through update-option.' );
-		wp_cache_flush();
-		$this->assertSame( $before, get_option( Presets::OPTION ), 'The stored presets must be unchanged.' );
+		$this->assertSame( array( Presets::RANK_MATH => true ), Presets::states() );
 		$this->assertTrue( Presets::enabled( Presets::RANK_MATH ) );
+		$this->assertTrue( OptionRules::preset_blocked( 'rank-math-options-general' ) );
+	}
+
+	/**
+	 * An agent's call still goes through while the presets read throws: a plain option is written, and a Rank Math name is refused.
+	 *
+	 * @dataProvider throwing_reads
+	 *
+	 * @param string $hook The option filter that throws.
+	 */
+	public function test_an_agent_call_still_works_while_the_presets_read_throws( string $hook ): void {
+		$this->on(
+			$hook,
+			static function (): never {
+				throw new \RuntimeException( 'read failed' );
+			}
+		);
+		$this->on(
+			'steadhand_allowed_options',
+			static function ( array $options ): array {
+				$options['rank-math-options-general'] = array( 'max_length' => 100 );
+
+				return $options;
+			}
+		);
+		$this->option_agent();
+		wp_cache_flush();
+
+		$written = $this->execute_ability( self::ABILITY, $this->args( 'blogname', 'Title while the read fails' ) );
+		$this->assertIsArray( $written, 'A plain option must still be written.' );
+		$this->assertSame( 'Title while the read fails', OptionRules::stored_raw( 'blogname' ) );
+
+		$this->seed_plain( 'rank-math-options-general', 'plain value' );
+		$refused = $this->execute_ability( self::ABILITY, $this->args( 'rank-math-options-general', 'changed' ) );
+		$this->assertWPError( $refused, 'A Rank Math name must stay refused while the presets read fails.' );
+		$this->assertSame( 'plain value', OptionRules::stored_raw( 'rank-math-options-general' ) );
+	}
+
+	/**
+	 * The option filters that throw on a read of the presets option.
+	 *
+	 * @return array<string, array{0: string}>
+	 */
+	public static function throwing_reads(): array {
+		return array(
+			'pre_option' => array( 'pre_option_' . Presets::OPTION ),
+			'option'     => array( 'option_' . Presets::OPTION ),
+		);
+	}
+
+	/**
+	 * Adds a plain-string row, if it is missing.
+	 *
+	 * @param string $name  The option name.
+	 * @param string $value The value.
+	 */
+	private function seed_plain( string $name, string $value ): void {
+		if ( null === OptionRules::stored_raw( $name ) ) {
+			add_option( $name, $value, '', 'no' );
+			wp_cache_flush();
+		}
+	}
+
+	/**
+	 * Uninstall deletes the presets option, from uninstall.php inside its autoloader guard. No test runs uninstall.php itself (it removes the agent
+	 * role and the log table), so this checks the file: the call is present, and it sits in the block the other removals are in.
+	 */
+	public function test_uninstall_php_calls_presets_uninstall_inside_the_autoloader_guard(): void {
+		$source = (string) file_get_contents( dirname( __DIR__, 2 ) . '/uninstall.php' ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_get_contents_file_get_contents -- A local file of this checkout.
+
+		$this->assertMatchesRegularExpression(
+			'#is_readable\(.*?autoload\.php.*?\{.*?Presets::uninstall\(\);#s',
+			$source,
+			'uninstall.php must call Presets::uninstall() inside the autoloader block.'
+		);
 	}
 }

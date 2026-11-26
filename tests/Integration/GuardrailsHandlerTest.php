@@ -385,4 +385,36 @@ final class GuardrailsHandlerTest extends TestCase {
 		$this->assertSame( 'steadhand_save_presets', GuardrailsHandler::NONCE_ACTION );
 		$this->assertSame( array( 'saved', 'forbidden', 'failed' ), GuardrailsHandler::CODES );
 	}
+
+	/**
+	 * A presets field that is not a list is a malformed request. It saves nothing, so a string in place of the list cannot turn a
+	 * preset off.
+	 */
+	public function test_a_presets_field_that_is_not_a_list_saves_nothing_and_turns_nothing_off(): void {
+		wp_set_current_user( $this->admin() );
+		Presets::save( array( Presets::RANK_MATH => true ) );
+		$before = get_option( Presets::OPTION );
+
+		$url = $this->post(
+			array(
+				GuardrailsHandler::MARKER => '1',
+				GuardrailsHandler::FIELD  => Presets::RANK_MATH,
+			)
+		);
+
+		$this->assertSame( 'failed', $this->code_of( $url ) );
+		$this->assertTrue( Presets::enabled( Presets::RANK_MATH ), 'A malformed request must not turn the preset off.' );
+		$this->assertSame( $before, get_option( Presets::OPTION ) );
+	}
+
+	/**
+	 * A wrong nonce from a user without manage_options dies at the nonce check, so it is never answered with a redirect to forbidden.
+	 * That shows the order: the nonce is checked before the capability.
+	 */
+	public function test_a_wrong_nonce_from_a_user_without_manage_options_dies_at_the_nonce_check(): void {
+		wp_set_current_user( self::factory()->user->create( array( 'role' => 'subscriber' ) ) );
+
+		$this->assertSame( 'died', $this->post( $this->form( array() ), 'not-a-nonce' ) );
+		$this->assertFalse( get_option( Presets::OPTION ) );
+	}
 }

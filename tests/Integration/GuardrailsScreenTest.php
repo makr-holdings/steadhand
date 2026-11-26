@@ -222,37 +222,6 @@ final class GuardrailsScreenTest extends TestCase {
 	}
 
 	/**
-	 * The rate limit shown is the one the filter gives, read from the rule itself.
-	 */
-	public function test_the_rate_limit_shows_the_value_the_filter_gives(): void {
-		$this->on( 'steadhand_rate_limit_per_minute', static fn(): int => 7, 10, 2 );
-
-		$html = $this->render_as( $this->admin() )['html'];
-
-		$this->assertStringContainsString( '7 writes per minute for each agent', $html );
-		$this->assertStringNotContainsString( '30 writes per minute', $html );
-	}
-
-	/**
-	 * A rate-limit filter that throws, or that gives a value out of range, shows the documented default.
-	 */
-	public function test_a_rate_limit_filter_that_throws_or_gives_an_invalid_value_shows_the_default(): void {
-		$this->on(
-			'steadhand_rate_limit_per_minute',
-			static function (): never {
-				throw new \RuntimeException( 'filter failed' );
-			},
-			10,
-			2
-		);
-		$this->assertStringContainsString( '30 writes per minute for each agent', $this->render_as( $this->admin() )['html'] );
-
-		remove_all_filters( 'steadhand_rate_limit_per_minute' );
-		$this->on( 'steadhand_rate_limit_per_minute', static fn(): int => 100000, 10, 2 );
-		$this->assertStringContainsString( '30 writes per minute for each agent', $this->render_as( $this->admin() )['html'] );
-	}
-
-	/**
 	 * The edit-lock window shown is the one WordPress's filter gives.
 	 */
 	public function test_the_edit_lock_window_shows_the_value_wordpress_filter_gives(): void {
@@ -278,49 +247,7 @@ final class GuardrailsScreenTest extends TestCase {
 	public function test_the_protected_options_row_lists_the_allowlist(): void {
 		$html = $this->render_as( $this->admin() )['html'];
 
-		$this->assertStringContainsString( 'Options that may be changed: blogname, blogdescription.', $html );
-	}
-
-	/**
-	 * A rule ID registered by another plugin is listed, escaped, and not evaluated. An ID that the registry refuses is not listed.
-	 */
-	public function test_a_third_party_rule_id_is_listed_and_a_malformed_one_is_not(): void {
-		$this->on(
-			'steadhand_register_guardrails',
-			static function ( GuardrailsRegistry $registry ): void {
-				$registry->add( new FakeRule( 'acme/safe-rule', static fn(): Result => Result::allow() ) );
-				$registry->add( new FakeRule( '<script>alert(1)</script>', static fn(): Result => Result::allow() ) );
-			}
-		);
-
-		$html = $this->render_as( $this->admin() )['html'];
-
-		$this->assertStringContainsString( '<code>acme/safe-rule</code>', $html );
-		$this->assertStringNotContainsString( '<script>', $html );
-	}
-
-	public function test_with_no_third_party_rules_the_section_says_none(): void {
-		$html = $this->render_as( $this->admin() )['html'];
-
-		$this->assertStringContainsString( '<p>None</p>', $html );
-	}
-
-	/**
-	 * A registration callback that throws does not break the screen. The rules added before it, if any, still show.
-	 */
-	public function test_a_registration_that_throws_does_not_break_the_screen(): void {
-		$this->on(
-			'steadhand_register_guardrails',
-			static function (): void {
-				throw new \RuntimeException( 'listener failed' );
-			}
-		);
-
-		$result = $this->render_as( $this->admin() );
-
-		$this->assertNull( $result['died'] );
-		$this->assertStringContainsString( 'Steadhand guardrails', $result['html'] );
-		$this->assertStringContainsString( '<p>None</p>', $result['html'] );
+		$this->assertStringContainsString( 'Options that may be changed, as the allowlist stands for this request: blogname, blogdescription.', $html );
 	}
 
 	/**
@@ -469,6 +396,144 @@ final class GuardrailsScreenTest extends TestCase {
 			array_search( AgentsScreen::SLUG, $order, true ),
 			array_search( GuardrailsScreen::SLUG, $order, true ),
 			'Guardrails must come after Agents under Steadhand.'
+		);
+	}
+
+	/**
+	 * The rate-limit row shows the default and the range from the rule's constants, and the screen does not run the filter for it.
+	 */
+	public function test_the_rate_limit_row_shows_the_default_and_the_range_and_does_not_run_the_filter(): void {
+		$calls = 0;
+		$this->on(
+			'steadhand_rate_limit_per_minute',
+			static function ( int $limit ) use ( &$calls ): int {
+				++$calls;
+
+				return $limit;
+			},
+			10,
+			2
+		);
+
+		$html = $this->render_as( $this->admin() )['html'];
+
+		$this->assertStringContainsString( 'Default 30 writes per minute for each agent, from 1 to 600.', $html );
+		$this->assertSame( 0, $calls, 'The screen must not run steadhand_rate_limit_per_minute.' );
+	}
+
+	/**
+	 * Rendering the screen runs neither the registration action nor the rate-limit filter: a listener on either is never called.
+	 */
+	public function test_rendering_runs_neither_the_guardrail_registration_action_nor_the_rate_limit_filter(): void {
+		$registrations = 0;
+		$rate_limits   = 0;
+		$this->on(
+			'steadhand_register_guardrails',
+			static function () use ( &$registrations ): void {
+				++$registrations;
+			}
+		);
+		$this->on(
+			'steadhand_rate_limit_per_minute',
+			static function ( int $limit ) use ( &$rate_limits ): int {
+				++$rate_limits;
+
+				return $limit;
+			},
+			10,
+			2
+		);
+
+		$this->render_as( $this->admin() );
+
+		$this->assertSame( 0, $registrations, 'Rendering must not register guardrail rules.' );
+		$this->assertSame( 0, $rate_limits, 'Rendering must not run the rate-limit filter.' );
+	}
+
+	/**
+	 * The section on rules other plugins add is static text: it prints no rule ID, whatever is registered.
+	 */
+	public function test_the_other_plugins_section_is_static_text_and_prints_no_rule_id(): void {
+		$this->on(
+			'steadhand_register_guardrails',
+			static function ( GuardrailsRegistry $registry ): void {
+				$registry->add( new FakeRule( 'acme/safe-rule', static fn(): Result => Result::allow() ) );
+			}
+		);
+
+		$html = $this->render_as( $this->admin() )['html'];
+
+		$this->assertStringContainsString( 'are not listed here', $html );
+		$this->assertStringNotContainsString( 'acme/safe-rule', $html );
+	}
+
+	/**
+	 * A slot listener that prints and then throws leaves none of its output on the page.
+	 */
+	public function test_a_slot_listener_that_echoes_then_throws_leaves_none_of_its_output(): void {
+		$this->on(
+			'steadhand_admin_guardrails',
+			static function (): void {
+				echo '<p>LEAKED-SLOT-OUTPUT</p>';
+				throw new \RuntimeException( 'listener failed' );
+			},
+			10,
+			0
+		);
+
+		$result = $this->render_as( $this->admin() );
+
+		$this->assertNull( $result['died'] );
+		$this->assertStringNotContainsString( 'LEAKED-SLOT-OUTPUT', $result['html'] );
+		$this->assertStringContainsString( 'Save presets', $result['html'] );
+	}
+
+	/**
+	 * A slot listener that returns normally has its output printed, in place.
+	 */
+	public function test_a_slot_listener_that_returns_has_its_output_printed(): void {
+		$this->on(
+			'steadhand_admin_guardrails',
+			static function (): void {
+				echo '<p>SHOWN-SLOT-OUTPUT</p>';
+			},
+			10,
+			0
+		);
+
+		$this->assertStringContainsString( 'SHOWN-SLOT-OUTPUT', $this->render_as( $this->admin() )['html'] );
+	}
+
+	/**
+	 * A throwing option read on the presets option does not break the screen: the page still renders with the defaults.
+	 *
+	 * @dataProvider throwing_option_filters
+	 *
+	 * @param string $hook The option filter that throws.
+	 */
+	public function test_a_throwing_presets_option_read_does_not_break_the_screen( string $hook ): void {
+		$this->on(
+			$hook,
+			static function (): never {
+				throw new \RuntimeException( 'read failed' );
+			}
+		);
+
+		$result = $this->render_as( $this->admin() );
+
+		$this->assertNull( $result['died'] );
+		$this->assertStringContainsString( 'Rank Math options', $result['html'] );
+	}
+
+	/**
+	 * The option filters that throw on a read of the presets option.
+	 *
+	 * @return array<string, array{0: string}>
+	 */
+	public static function throwing_option_filters(): array {
+		return array(
+			'pre_option'    => array( 'pre_option_' . Presets::OPTION ),
+			'option_filter' => array( 'option_' . Presets::OPTION ),
 		);
 	}
 }

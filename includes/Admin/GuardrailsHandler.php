@@ -89,8 +89,13 @@ final class GuardrailsHandler {
 			return $this->redirect_to( 'failed' );
 		}
 
+		// A presets field that is not a list is a malformed request. Reading it as empty would turn every preset off, so nothing is saved.
+		if ( isset( $post[ self::FIELD ] ) && ! is_array( $post[ self::FIELD ] ) ) {
+			return $this->redirect_to( 'failed' );
+		}
+
 		$checked = array();
-		$posted  = isset( $post[ self::FIELD ] ) && is_array( $post[ self::FIELD ] ) ? $post[ self::FIELD ] : array();
+		$posted  = isset( $post[ self::FIELD ] ) ? $post[ self::FIELD ] : array();
 		foreach ( $posted as $value ) {
 			if ( is_string( $value ) ) {
 				$checked[] = $value;

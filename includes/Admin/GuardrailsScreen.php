@@ -179,9 +179,10 @@ final class GuardrailsScreen {
 	private function limit_text( Rule $rule ): string {
 		if ( $rule instanceof RateLimit ) {
 			return sprintf(
-				/* translators: %d: writes per minute allowed for each agent. */
-				__( '%d writes per minute for each agent. This is the value the steadhand_rate_limit_per_minute filter gives for this administrator\'s user ID; a filter that varies by agent may give other values.', 'steadhand' ),
-				$rule->limit( get_current_user_id() )
+				/* translators: 1: default writes per minute for each agent, 2: highest value the filter may set. */
+				__( 'Default %1$d writes per minute for each agent, from 1 to %2$d. A site can change it with the steadhand_rate_limit_per_minute filter, which receives the agent\'s user ID. This screen does not run that filter, so the value shown is the default.', 'steadhand' ),
+				RateLimit::DEFAULT_LIMIT,
+				RateLimit::MAX_LIMIT
 			);
 		}
 
@@ -219,7 +220,7 @@ final class GuardrailsScreen {
 
 			return sprintf(
 				/* translators: %s: comma-separated option names. */
-				__( 'Options that may be changed: %s.', 'steadhand' ),
+				__( 'Options that may be changed, as the allowlist stands for this request: %s.', 'steadhand' ),
 				implode( ', ', $names )
 			);
 		}
@@ -259,24 +260,17 @@ final class GuardrailsScreen {
 	}
 
 	/**
-	 * The rules that other plugins added through steadhand_register_guardrails, by ID, or "None".
+	 * Says that rules other plugins add are not listed here. They are registered only when an agent's write reaches the guardrail step,
+	 * so this page does not run them. The screen calls no third-party code for this section.
 	 *
 	 * @return void
 	 */
 	private function other_plugins_section(): void {
 		echo '<h2>' . esc_html__( 'Rules added by other plugins', 'steadhand' ) . '</h2>';
-
-		$ids = $this->engine->third_party_ids();
-		if ( array() === $ids ) {
-			printf( '<p>%s</p>', esc_html__( 'None', 'steadhand' ) );
-			return;
-		}
-
-		echo '<ul>';
-		foreach ( $ids as $id ) {
-			printf( '<li><code>%s</code></li>', esc_html( $id ) );
-		}
-		echo '</ul>';
+		printf(
+			'<p>%s</p>',
+			esc_html__( 'Rules that other plugins add through the steadhand_register_guardrails action are not listed here. They are registered only when an agent\'s write reaches the guardrail step, so this page does not run them. A rule that blocks, fixes or warns a call adds a note, which the change log stores with that call\'s entry. The change-log screen shows the notes to a viewer who may edit the post.', 'steadhand' )
+		);
 	}
 
 	/**
@@ -285,10 +279,22 @@ final class GuardrailsScreen {
 	 * @return void
 	 */
 	private function announce(): void {
+		$level = ob_get_level();
+		ob_start();
+
 		try {
 			do_action( 'steadhand_admin_guardrails' );
 		} catch ( \Throwable ) {
+			// Discards this listener's output, and any buffer it opened, so the page is never left half-printed.
+			while ( ob_get_level() > $level ) {
+				ob_end_clean();
+			}
 			return;
+		}
+
+		// Prints the output once the listener returned normally, from the innermost buffer outwards.
+		while ( ob_get_level() > $level ) {
+			ob_end_flush();
 		}
 	}
 

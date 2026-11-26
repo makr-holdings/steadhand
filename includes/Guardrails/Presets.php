@@ -88,7 +88,12 @@ final class Presets {
 	 * @return array<string, bool>
 	 */
 	public static function states(): array {
-		$stored = get_option( self::OPTION, null );
+		try {
+			$stored = get_option( self::OPTION, null );
+		} catch ( \Throwable ) {
+			// A callback on the option read that throws gives the defaults. The Rank Math preset is on by default, so this fails closed.
+			$stored = null;
+		}
 		$stored = is_array( $stored ) ? $stored : array();
 
 		$states = array();
@@ -113,10 +118,14 @@ final class Presets {
 			$clean[ $id ] = true === ( $state[ $id ] ?? false );
 		}
 
-		// update_option() returns false when the value is unchanged, so the stored value is read back instead.
-		update_option( self::OPTION, $clean, true );
-
-		$stored = get_option( self::OPTION, null );
+		// update_option() returns false when the value is unchanged, so the stored value is read back instead. A callback that throws
+		// on the write or the read makes the save fail, and nothing is reported as saved.
+		try {
+			update_option( self::OPTION, $clean, true );
+			$stored = get_option( self::OPTION, null );
+		} catch ( \Throwable ) {
+			return false;
+		}
 
 		return is_array( $stored ) && $stored === $clean;
 	}
@@ -139,7 +148,7 @@ final class Presets {
 		return array(
 			self::RANK_MATH => array(
 				'label'       => __( 'Rank Math options', 'steadhand' ),
-				'description' => __( 'Refuses an update-option call for any option whose name starts with rank-math or rank_math, in any letter case, so an agent cannot change the Rank Math settings. The built-in allowlist has no such option, so this matters only when another plugin adds option names to the allowlist with the steadhand_allowed_options filter. Routing SEO data through post meta is not part of this preset, because no tool writes post meta.', 'steadhand' ),
+				'description' => __( 'Refuses an update-option call for an option whose name starts with rank-math, rankmath or rank_math, in any letter case, while it is on. The main Rank Math settings are stored as structured data, which Steadhand already refuses whatever this preset says. This preset refuses Rank Math\'s plain-text options when other code adds them to the allowlist with the steadhand_allowed_options filter. The built-in allowlist has none of them. Routing SEO data through post meta is not part of this preset, because no tool writes post meta.', 'steadhand' ),
 			),
 		);
 	}

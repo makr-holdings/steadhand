@@ -313,8 +313,8 @@ final class OptionRules {
 	}
 
 	/**
-	 * Whether the Rank Math preset refuses an option name. While the preset is on, a name that starts with rank-math or rank_math, in any
-	 * letter case, is not allowed, whatever the allowlist says (SPEC §6.2, D27). It is kept apart from hard_blocked(), which no setting
+	 * Whether the Rank Math preset refuses an option name. While the preset is on, a name that starts with rank-math, rankmath or rank_math,
+	 * in any letter case, is not allowed, whatever the allowlist says (SPEC §6.2, D27). It is kept apart from hard_blocked(), which no setting
 	 * can change: an administrator can turn this preset off. With the preset off, such a name is treated like any other.
 	 *
 	 * @param string $name The option name.
@@ -326,7 +326,7 @@ final class OptionRules {
 
 		$lower = strtolower( $name );
 
-		return str_starts_with( $lower, 'rank-math' ) || str_starts_with( $lower, 'rank_math' );
+		return str_starts_with( $lower, 'rank-math' ) || str_starts_with( $lower, 'rankmath' ) || str_starts_with( $lower, 'rank_math' );
 	}
 
 	/**

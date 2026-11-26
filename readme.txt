@@ -30,7 +30,7 @@ Built-in checks refuse a write before it runs, with a message the agent can act 
 
 Block comments are checked for structure only. No check rewrites content.
 
-The Guardrails screen under Steadhand lists these built-in rules with their current limits, and the rules other plugins added. It also has presets, optional guardrails an administrator can turn on or off. The first preset, on by default, refuses option names that start with rank-math or rank_math, which matters only when another plugin adds option names to the allowlist. The built-in rules cannot be turned off or changed from the screen.
+The Guardrails screen under Steadhand lists these built-in rules with their current limits. It does not list rules that other plugins add: those run only when an agent's write reaches the guardrail step. It also has presets, optional guardrails an administrator can turn on or off. The first preset, on by default, refuses option names that start with rank-math, rankmath or rank_math. Rank Math's main settings are structured data that Steadhand already refuses, so the preset matters for Rank Math's plain-text options, and only when another plugin adds them to the allowlist.
 
 = A change log with undo =
 
