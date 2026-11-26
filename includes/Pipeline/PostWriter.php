@@ -1596,18 +1596,23 @@ final class PostWriter {
 	 * for a post it changes, so the status change does not alter the text. Only the first save of this post in the call is changed,
 	 * as in save(). The filter is removed in finally.
 	 *
-	 * @param \WP_Post $post The post as stored, read raw.
-	 * @param callable $step The core call.
+	 * Public for MenuWriter, which saves classic menu items the same way. The default keeps all four fields, as the trash does; a caller
+	 * that changes the title passes the fields it keeps.
+	 *
+	 * @param \WP_Post $post   The post as stored, read raw.
+	 * @param callable $step   The core call.
+	 * @param string[] $fields The post fields to put back after the save filters. Any of the four text fields, and no other.
 	 * @return mixed What the call returned.
 	 */
-	private static function keep_text_for( \WP_Post $post, callable $step ): mixed {
+	public static function keep_text_for( \WP_Post $post, callable $step, array $fields = array( 'post_title', 'post_content', 'post_excerpt', 'post_content_filtered' ) ): mixed {
 		$target_id = (int) $post->ID;
-		$keep      = array(
+		$stored    = array(
 			'post_title'            => (string) $post->post_title,
 			'post_content'          => (string) $post->post_content,
 			'post_excerpt'          => (string) $post->post_excerpt,
 			'post_content_filtered' => (string) $post->post_content_filtered,
 		);
+		$keep      = array_intersect_key( $stored, array_flip( $fields ) );
 
 		$armed   = true;
 		$restore = static function ( array $data, array $postarr, array $unsanitized_postarr, bool $update ) use ( &$armed, $target_id, $keep ): array {

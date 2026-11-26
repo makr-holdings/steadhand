@@ -157,6 +157,22 @@ abstract class Ability {
 	}
 
 	/**
+	 * Names the object a call is about when execute() returned an error, for the change log. Only an ability whose error can come after
+	 * it has already created an object needs this: an add whose new item exists when a later step fails names that item, not 0.
+	 *
+	 * Called by the pipeline only when execute() returned a WP_Error. Returning null (the default) keeps the object the call named before it
+	 * ran, so every ability that does not override this logs exactly as before. A throw keeps that object too.
+	 *
+	 * @param array<string, mixed> $input Validated, sanitized input, as execute() received it.
+	 * @param \WP_Error            $error The error execute() returned.
+	 * @return array{type: string, id: int}|null The object to log, or null for the object named before the call.
+	 */
+	public function logged_object_on_error( array $input, \WP_Error $error ): ?array {
+		unset( $input, $error );
+		return null;
+	}
+
+	/**
 	 * The copy of the input kept in the change log. The default is the input itself. A write ability that stores a large
 	 * field (post content, for one) returns a short summary of it instead, so that the log is not a second copy of the
 	 * content. The revisions hold the content. Called with prepared input, or, when prepare() refused the call, with the

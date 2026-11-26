@@ -1,7 +1,7 @@
 <?php
 /**
  * Read-only rules about classic menu items: the menu an item belongs to, its parent, depth and subtree, and whether Steadhand hid it.
- * Reads only. The update-menu writer, which will ask these questions too, comes in the next step and is not in this file.
+ * Reads only. The update-menu writer (MenuWriter) asks the same questions, through fresh_state() and items_raw(); it makes every change.
  *
  * @package Steadhand
  */
@@ -13,8 +13,8 @@ namespace Steadhand\Pipeline;
 defined( 'ABSPATH' ) || exit;
 
 /**
- * The shared menu rules: which items a classic menu has, and how they nest. MenuReader uses them now; the update-menu writer
- * is the next step. Reads go through core's caches. items_raw() primes the post meta and the linked objects of a whole menu in one
+ * The shared menu rules: which items a classic menu has, and how they nest. MenuReader and the update-menu ability and writer use
+ * them. Reads go through core's caches, except fresh_state() and hide_recorded(), which read without the cache. items_raw() primes the post meta and the linked objects of a whole menu in one
  * go, and the rules that take a row read nothing from the database. hidden_by_steadhand() is the one exception: it reads the
  * marker through TrashRules::value(), which bypasses the cache, so a marker written earlier in the same request is seen.
  *
@@ -54,6 +54,29 @@ final class MenuRules {
 	 * The post meta key that marks a classic menu item Steadhand hid. Its value is the ID of the agent user that hid it.
 	 */
 	public const HIDDEN_META = '_steadhand_menu_hidden';
+
+	/**
+	 * The post meta key that holds the ID of the item a hide left hidden. show checks that it is the item's own ID.
+	 */
+	public const HIDDEN_ITEM_META = '_steadhand_menu_hidden_item';
+
+	/**
+	 * The post meta key that holds the item's post_modified_gmt as the hide left it. show checks that the item still has that
+	 * time, so an edit after the hide (by anyone other than a Steadhand rename, which refreshes it) is not undone by show.
+	 */
+	public const HIDDEN_MODIFIED_META = '_steadhand_menu_hidden_modified';
+
+	/**
+	 * Every post meta key Steadhand stores on a classic menu item. They are removed when the item is published by any route,
+	 * at the start of every hide, and at uninstall.
+	 *
+	 * @var string[]
+	 */
+	public const HIDDEN_KEYS = array(
+		self::HIDDEN_META,
+		self::HIDDEN_ITEM_META,
+		self::HIDDEN_MODIFIED_META,
+	);
 
 	/**
 	 * The post meta key core sets on an item saved with menu ID 0, that is, a draft menu item not yet saved to a menu. Core's
@@ -340,6 +363,75 @@ final class MenuRules {
 		$value = TrashRules::value( $item_id, self::HIDDEN_META );
 
 		return null !== $value && 1 === preg_match( self::USER_ID, $value );
+	}
+
+	/**
+	 * Whether the three keys a hide stores are all there, each with exactly one row, and say what the hide left: the hidden-by
+	 * key is a user ID, the item-ID key is this item's own ID, and the modified key is the item's current post_modified_gmt.
+	 * Every read is uncached. show needs this as well as the draft status. A direct database write clears no key, and it changes the
+	 * modified time only when the writer sets it, so the modified key catches an edit made through WordPress's save functions, not
+	 * every direct write.
+	 *
+	 * @param int $item_id Item post ID.
+	 */
+	public static function hide_recorded( int $item_id ): bool {
+		if ( $item_id < 1 ) {
+			return false;
+		}
+
+		$user     = TrashRules::value( $item_id, self::HIDDEN_META );
+		$owner    = TrashRules::value( $item_id, self::HIDDEN_ITEM_META );
+		$modified = TrashRules::value( $item_id, self::HIDDEN_MODIFIED_META );
+
+		if ( null === $user || null === $owner || null === $modified ) {
+			return false;
+		}
+
+		if ( 1 !== preg_match( self::USER_ID, $user ) || $owner !== (string) $item_id || '' === $modified ) {
+			return false;
+		}
+
+		return TrashRules::current_modified_gmt( $item_id ) === $modified;
+	}
+
+	/**
+	 * One item read with no cache in the way: the post, its menu, its parent and its order, and whether it carries the orphan
+	 * mark. Used by the writer to check the state it is about to change, and by the ability for the state it reports.
+	 *
+	 * The keys: id, menu (the classic menu's term ID, or 0 when the item belongs to no menu or to more than one), status, title (the
+	 * stored title, raw), parent (parse_parent() of the stored value), order (menu_order), orphaned (bool), post (the WP_Post).
+	 * Null when the ID is not a nav_menu_item.
+	 *
+	 * @param int $item_id Item post ID.
+	 * @return array{id: int, menu: int, status: string, title: string, parent: int, order: int, orphaned: bool, post: \WP_Post}|null
+	 */
+	public static function fresh_state( int $item_id ): ?array {
+		if ( $item_id < 1 ) {
+			return null;
+		}
+
+		clean_post_cache( $item_id );
+		clean_object_term_cache( array( $item_id ), 'nav_menu_item' );
+		wp_cache_delete( $item_id, 'post_meta' );
+
+		$item = get_post( $item_id );
+		if ( ! $item instanceof \WP_Post || 'nav_menu_item' !== $item->post_type ) {
+			return null;
+		}
+
+		$menu = self::menu_of( $item );
+		wp_cache_delete( $item_id, 'post_meta' );
+
+		return array(
+			'id'       => $item_id,
+			'menu'     => null === $menu ? 0 : (int) $menu->term_id,
+			'status'   => (string) $item->post_status,
+			'title'    => (string) $item->post_title,
+			'parent'   => self::parent_of( $item_id ),
+			'order'    => (int) $item->menu_order,
+			'orphaned' => self::is_orphaned( $item_id ),
+			'post'     => $item,
+		);
 	}
 
 	/**

@@ -741,9 +741,12 @@ final class Pipeline {
 					: $this->log_incomplete();
 			}
 
-			// (5) Complete the row with the outcome.
+			// (5) Complete the row with the outcome. An error may name an object the call created before it failed (see
+			// object_on_error()); otherwise the row names the object the call named before it ran.
 			if ( is_wp_error( $output ) ) {
-				return $this->complete_write( $id, $ability, Entry::RESULT_ERROR, $output, $logged, $target, $notes, $snapshot['id'], false )
+				$failed_object = $this->object_on_error( $ability, $final_input, $output, $target );
+
+				return $this->complete_write( $id, $ability, Entry::RESULT_ERROR, $output, $logged, $failed_object, $notes, $snapshot['id'], false )
 					? $output
 					: $this->log_incomplete();
 			}
@@ -1017,6 +1020,26 @@ final class Pipeline {
 		} catch ( \Throwable ) {
 			return $before;
 		}
+	}
+
+	/**
+	 * The object a write that returned an error names in the change log: the ability's logged_object_on_error() when it returns an
+	 * object, otherwise the object the call named before it ran. A throw keeps that object too.
+	 *
+	 * @param Ability                      $ability Ability being called.
+	 * @param array<string, mixed>         $input   Final input.
+	 * @param \WP_Error                    $error   The error execute() returned.
+	 * @param array{type: string, id: int} $before  The object before execute().
+	 * @return array{type: string, id: int}
+	 */
+	private function object_on_error( Ability $ability, array $input, \WP_Error $error, array $before ): array {
+		try {
+			$named = $ability->logged_object_on_error( $input, $error );
+		} catch ( \Throwable ) {
+			return $before;
+		}
+
+		return null === $named ? $before : $this->coerce_object( $named );
 	}
 
 	/**
