@@ -132,6 +132,15 @@ final class Engine {
 	}
 
 	/**
+	 * The built-in rules, in the order they run. For the Guardrails screen, which reads their IDs and limits and evaluates nothing.
+	 *
+	 * @return Rule[]
+	 */
+	public function built_in_rules(): array {
+		return array_merge( $this->first, $this->last );
+	}
+
+	/**
 	 * Collects the third-party rules, once. A listener that throws keeps the rules added before it.
 	 *
 	 * @return Rule[]

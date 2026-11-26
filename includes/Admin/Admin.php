@@ -12,7 +12,7 @@ namespace Steadhand\Admin;
 defined( 'ABSPATH' ) || exit;
 
 /**
- * Registers the Steadhand menu: the change log, and the Agents screen beneath it. The menu needs manage_options, and each screen
+ * Registers the Steadhand menu: the change log, then the Agents and Guardrails screens beneath it. The menu needs manage_options, and each screen
  * checks it again when it renders.
  */
 final class Admin {
@@ -27,12 +27,21 @@ final class Admin {
 	/**
 	 * Constructor.
 	 *
-	 * @param LogScreen         $log_screen   The change-log screen.
-	 * @param UndoHandler|null  $undo_handler The handler of the screen's Undo button. Null leaves the button's action unregistered;
-	 *                                        Plugin always passes one.
-	 * @param AgentsScreen|null $agents_screen The Agents screen. Null leaves the screen out of the menu; Plugin always passes one.
+	 * @param LogScreen              $log_screen        The change-log screen.
+	 * @param UndoHandler|null       $undo_handler      The handler of the screen's Undo button. Null leaves the button's action unregistered;
+	 *                                                  Plugin always passes one.
+	 * @param AgentsScreen|null      $agents_screen     The Agents screen. Null leaves the screen out of the menu; Plugin always passes one.
+	 * @param GuardrailsScreen|null  $guardrails_screen The Guardrails screen. Null leaves it out of the menu; Plugin always passes one.
+	 * @param GuardrailsHandler|null $guardrails_handler The handler of the Guardrails screen's Save button. Null leaves its action
+	 *                                                  unregistered; Plugin always passes one.
 	 */
-	public function __construct( private LogScreen $log_screen, private ?UndoHandler $undo_handler = null, private ?AgentsScreen $agents_screen = null ) {}
+	public function __construct(
+		private LogScreen $log_screen,
+		private ?UndoHandler $undo_handler = null,
+		private ?AgentsScreen $agents_screen = null,
+		private ?GuardrailsScreen $guardrails_screen = null,
+		private ?GuardrailsHandler $guardrails_handler = null
+	) {}
 
 	/**
 	 * Hooks the menu and the styles into WordPress.
@@ -46,6 +55,11 @@ final class Admin {
 		// Logged-in only: there is no nopriv variant, so a visitor cannot reach the undo.
 		if ( null !== $this->undo_handler ) {
 			add_action( 'admin_post_' . UndoHandler::ACTION, array( $this->undo_handler, 'handle' ) );
+		}
+
+		// Logged-in only, as the undo is. The handler checks the nonce, the capability and the agent role itself.
+		if ( null !== $this->guardrails_handler ) {
+			add_action( 'admin_post_' . GuardrailsHandler::ACTION, array( $this->guardrails_handler, 'handle' ) );
 		}
 	}
 
@@ -78,22 +92,31 @@ final class Admin {
 
 		$this->log_hook_suffixes[] = is_string( $log_suffix ) ? $log_suffix : '';
 
-		if ( null === $this->agents_screen ) {
-			return;
+		if ( null !== $this->agents_screen ) {
+			$agents_suffix = add_submenu_page(
+				LogScreen::SLUG,
+				__( 'Agents', 'steadhand' ),
+				__( 'Agents', 'steadhand' ),
+				'manage_options',
+				AgentsScreen::SLUG,
+				array( $this->agents_screen, 'render' )
+			);
+
+			if ( is_string( $agents_suffix ) && '' !== $agents_suffix ) {
+				// Runs before the page renders. A POST is handled here, so a new password can be shown in its own response.
+				add_action( 'load-' . $agents_suffix, array( $this->agents_screen, 'load' ) );
+			}
 		}
 
-		$agents_suffix = add_submenu_page(
-			LogScreen::SLUG,
-			__( 'Agents', 'steadhand' ),
-			__( 'Agents', 'steadhand' ),
-			'manage_options',
-			AgentsScreen::SLUG,
-			array( $this->agents_screen, 'render' )
-		);
-
-		if ( is_string( $agents_suffix ) && '' !== $agents_suffix ) {
-			// Runs before the page renders. A POST is handled here, so a new password can be shown in its own response.
-			add_action( 'load-' . $agents_suffix, array( $this->agents_screen, 'load' ) );
+		if ( null !== $this->guardrails_screen ) {
+			add_submenu_page(
+				LogScreen::SLUG,
+				__( 'Guardrails', 'steadhand' ),
+				__( 'Guardrails', 'steadhand' ),
+				'manage_options',
+				GuardrailsScreen::SLUG,
+				array( $this->guardrails_screen, 'render' )
+			);
 		}
 	}
 

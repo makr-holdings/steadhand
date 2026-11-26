@@ -30,6 +30,8 @@ Built-in checks refuse a write before it runs, with a message the agent can act 
 
 Block comments are checked for structure only. No check rewrites content.
 
+The Guardrails screen under Steadhand lists these built-in rules with their current limits. It does not list rules that other plugins add: those run only when an agent's write reaches the guardrail step. It also has presets, optional guardrails an administrator can turn on or off. The first preset, on by default, refuses option names that start with rank-math, rankmath or rank_math. Rank Math's main settings are structured data that Steadhand already refuses, so the preset matters for Rank Math's plain-text options, and only when another plugin adds them to the allowlist.
+
 = A change log with undo =
 
 Every write, and every refused or failed call that reaches Steadhand's checks, is logged with the time, the connection name, the tool, the post ID, the result and the input. Secrets are masked where possible. A call that WordPress rejects as malformed before Steadhand's checks run is not logged. An administrator with no agent role can undo a change from its log entry. An agent can undo its own change to post text, terms or a featured image with steadhand-undo-change. An undo is refused if the content has changed since. Undoing a text change needs the site to keep WordPress revisions, and works only for the newest change to that post.

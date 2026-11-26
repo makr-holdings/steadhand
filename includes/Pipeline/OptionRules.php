@@ -10,6 +10,7 @@ declare( strict_types=1 );
 
 namespace Steadhand\Pipeline;
 
+use Steadhand\Guardrails\Presets;
 use Steadhand\Redactor;
 
 defined( 'ABSPATH' ) || exit;
@@ -240,7 +241,8 @@ final class OptionRules {
 	 * - its definition is an array with an integer max_length from 1 to MAX_LENGTH, and an optional integer min_length from 0 to max_length
 	 *   (default: the built-in min_length for a built-in name, 0 for any other);
 	 * - the built-in names come first, then the others in the order the filter gave them, and at most MAX_ENTRIES are kept;
-	 * - the filter cannot add a hard-blocked name; it can remove a built-in one.
+	 * - the filter cannot add a hard-blocked name; it can remove a built-in one;
+	 * - a name the Rank Math preset refuses (preset_blocked()) is dropped while that preset is on.
 	 * A filter that throws, or returns something that is not an array, leaves the built-in list. The list is read on every call and nothing
 	 * is cached, so a filter added later is seen; the input schema's enum is built at registration.
 	 *
@@ -276,7 +278,7 @@ final class OptionRules {
 				break;
 			}
 
-			if ( ! is_string( $name ) || 1 !== preg_match( self::NAME_PATTERN, $name ) || self::hard_blocked( $name ) ) {
+			if ( ! is_string( $name ) || 1 !== preg_match( self::NAME_PATTERN, $name ) || self::hard_blocked( $name ) || self::preset_blocked( $name ) ) {
 				continue;
 			}
 
@@ -308,6 +310,23 @@ final class OptionRules {
 		}
 
 		return $allowed;
+	}
+
+	/**
+	 * Whether the Rank Math preset refuses an option name. While the preset is on, a name that starts with rank-math, rankmath or rank_math,
+	 * in any letter case, is not allowed, whatever the allowlist says (SPEC §6.2, D27). It is kept apart from hard_blocked(), which no setting
+	 * can change: an administrator can turn this preset off. With the preset off, such a name is treated like any other.
+	 *
+	 * @param string $name The option name.
+	 */
+	public static function preset_blocked( string $name ): bool {
+		if ( ! Presets::enabled( Presets::RANK_MATH ) ) {
+			return false;
+		}
+
+		$lower = strtolower( $name );
+
+		return str_starts_with( $lower, 'rank-math' ) || str_starts_with( $lower, 'rankmath' ) || str_starts_with( $lower, 'rank_math' );
 	}
 
 	/**
