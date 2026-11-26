@@ -101,8 +101,27 @@ final class MenuReader {
 	 * @return array{items: \WP_Post[], truncated: bool}
 	 */
 	public static function page( \WP_Term $menu ): array {
+		$loaded = self::load( $menu );
+
+		return array(
+			'items'     => $loaded['items'],
+			'truncated' => $loaded['truncated'],
+		);
+	}
+
+	/**
+	 * The same list as page(), and also movable: whether update-menu can move an item in this menu for the stored order (MenuRules::movable()).
+	 * movable is computed from every stored row the list reads, including the rows the list leaves out, so get-menu does not read the menu a
+	 * second time. page() returns only the list, so its other callers see no change.
+	 *
+	 * @param \WP_Term $menu Classic menu.
+	 * @return array{items: \WP_Post[], truncated: bool, movable: bool}
+	 */
+	public static function load( \WP_Term $menu ): array {
+		$rows = MenuRules::items_raw( $menu );
+
 		$kept = array();
-		foreach ( MenuRules::items_raw( $menu ) as $row ) {
+		foreach ( $rows as $row ) {
 			if ( 'draft' === $row['status'] && $row['orphaned'] ) {
 				continue;
 			}
@@ -137,6 +156,7 @@ final class MenuReader {
 			return array(
 				'items'     => array(),
 				'truncated' => $truncated,
+				'movable'   => MenuRules::movable( $rows ),
 			);
 		}
 
@@ -163,6 +183,7 @@ final class MenuReader {
 		return array(
 			'items'     => $items,
 			'truncated' => $truncated,
+			'movable'   => MenuRules::movable( $rows ),
 		);
 	}
 

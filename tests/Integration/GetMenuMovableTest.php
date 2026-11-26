@@ -264,6 +264,36 @@ final class GetMenuMovableTest extends MenuWriteTestCase {
 	}
 
 	/**
+	 * One get-menu call reads the menu's rows once. movable comes from the rows the list is built from, so the menu query runs once.
+	 */
+	public function test_one_get_menu_call_reads_the_menu_rows_once(): void {
+		$fixture = $this->nested_menu();
+		$this->menu_agent();
+		$reads = 0;
+		// pre_get_posts runs for each WP_Query before any cache is consulted, so it counts the menu-row queries even when a cache answers them.
+		$this->on(
+			'pre_get_posts',
+			static function ( \WP_Query $query ) use ( &$reads ): void {
+				if ( 'nav_menu_item' === $query->get( 'post_type' ) ) {
+					++$reads;
+				}
+			}
+		);
+
+		$output = $this->execute_ability(
+			self::READ,
+			array(
+				'kind' => 'classic',
+				'id'   => $fixture['menu'],
+			)
+		);
+
+		$this->assertCount( 4, $output['items'] );
+		$this->assertTrue( $output['movable'] );
+		$this->assertSame( 1, $reads, 'The menu rows are read once for the list and movable together.' );
+	}
+
+	/**
 	 * A block navigation post is never movable, because update-menu does nothing to it.
 	 */
 	public function test_a_block_navigation_menu_is_not_movable(): void {

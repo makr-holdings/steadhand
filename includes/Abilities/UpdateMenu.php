@@ -15,6 +15,7 @@ use Steadhand\Guardrails\Engine;
 use Steadhand\Log\SnapshotStore;
 use Steadhand\Pipeline\MenuRules;
 use Steadhand\Pipeline\MenuWriter;
+use Steadhand\Pipeline\Pipeline;
 use Steadhand\Pipeline\PlainText;
 
 defined( 'ABSPATH' ) || exit;
@@ -41,6 +42,14 @@ final class UpdateMenu extends Ability {
 	 * The most bytes a menu item title may take in the output, as MenuReader clamps it.
 	 */
 	private const MAX_TITLE_BYTES = 1000;
+
+	/**
+	 * Whether this call could not give an item's get-menu position: get-menu does not list the item, or its read threw. Set by
+	 * listed_item_for(), reset by execute(), and read by result(), which then warns that the position is given as 0.
+	 *
+	 * @var bool
+	 */
+	private bool $position_unlisted = false;
 
 	/**
 	 * Whether the snapshot of the item before this call could not be saved, so the call cannot be undone and says so (set by snapshot()).
@@ -518,6 +527,8 @@ final class UpdateMenu extends Ability {
 	 * @return array<string, mixed>|\WP_Error
 	 */
 	public function execute( array $input ): array|\WP_Error {
+		$this->position_unlisted = false;
+
 		if ( ! $this->authorize_object( $input ) ) {
 			return PostReader::not_found();
 		}
@@ -654,7 +665,7 @@ final class UpdateMenu extends Ability {
 			return $state;
 		}
 
-		$previous = $this->previous_of( $state, self::listed_order( $menu, $item_id ) );
+		$previous = $this->previous_of( $state, $this->listed_order( $menu, $item_id ) );
 		$title    = (string) $input['title'];
 		$type     = self::item_type( $item_id );
 
@@ -708,7 +719,7 @@ final class UpdateMenu extends Ability {
 			return $state;
 		}
 
-		$previous = $this->previous_of( $state, self::listed_order( $menu, $item_id ) );
+		$previous = $this->previous_of( $state, $this->listed_order( $menu, $item_id ) );
 		if ( 'draft' === $state['status'] ) {
 			return $this->result( $input, $menu, $this->item_after( $item_id ), $previous, false );
 		}
@@ -755,7 +766,7 @@ final class UpdateMenu extends Ability {
 			return $state;
 		}
 
-		$previous = $this->previous_of( $state, self::listed_order( $menu, $item_id ) );
+		$previous = $this->previous_of( $state, $this->listed_order( $menu, $item_id ) );
 		if ( 'publish' === $state['status'] ) {
 			return $this->result( $input, $menu, $this->item_after( $item_id ), $previous, false );
 		}
@@ -909,11 +920,11 @@ final class UpdateMenu extends Ability {
 
 		// The item as get-menu lists it, so its order is get-menu's position. An item get-menu does not list has no position: its order
 		// is 0, and the call says so.
-		$listed   = MenuReader::listed_item( $menu, (int) $after['item']->ID );
+		$listed   = $this->listed_item_for( $menu, (int) $after['item']->ID );
 		$item     = $listed ?? array_merge( MenuReader::item( $after['item'] ), array( 'order' => 0 ) );
 		$warnings = $this->warnings( (string) $input['op'], (int) $menu->term_id, $changed );
-		if ( null === $listed ) {
-			$warnings[] = __( 'get-menu does not list this item, because its linked item is trashed or missing. It has no position in the menu, so its order is 0.', 'steadhand' );
+		if ( $this->position_unlisted ) {
+			$warnings[] = __( 'get-menu does not list this item (for example its linked object is trashed or missing, or other code on the site leaves it out), so its position is given as 0.', 'steadhand' );
 		}
 
 		return array(
@@ -975,13 +986,36 @@ final class UpdateMenu extends Ability {
 	}
 
 	/**
-	 * The item's position in get-menu's list of its menu, read before a change. 0 when get-menu does not list the item.
+	 * The item's get-menu entry, read through the read bracket (Pipeline::as_read()), so that the filters get-menu runs see no write grant.
+	 * A throw from a filter is caught: the list is then treated as not listing the item, and the call says so. A null result sets
+	 * the flag the warnings read.
+	 *
+	 * @param \WP_Term $menu    The menu.
+	 * @param int      $item_id The item.
+	 * @return array<string, mixed>|null The get-menu item, or null when get-menu does not list it or the read failed.
+	 */
+	private function listed_item_for( \WP_Term $menu, int $item_id ): ?array {
+		try {
+			$listed = Pipeline::as_read( static fn(): ?array => MenuReader::listed_item( $menu, $item_id ) );
+		} catch ( \Throwable ) {
+			$listed = null;
+		}
+
+		if ( null === $listed ) {
+			$this->position_unlisted = true;
+		}
+
+		return $listed;
+	}
+
+	/**
+	 * The item's position in get-menu's list of its menu, read before a change. 0 when get-menu does not list the item or the read failed.
 	 *
 	 * @param \WP_Term $menu    The menu.
 	 * @param int      $item_id The item.
 	 */
-	private static function listed_order( \WP_Term $menu, int $item_id ): int {
-		$listed = MenuReader::listed_item( $menu, $item_id );
+	private function listed_order( \WP_Term $menu, int $item_id ): int {
+		$listed = $this->listed_item_for( $menu, $item_id );
 
 		return null === $listed ? 0 : (int) $listed['order'];
 	}
@@ -1030,7 +1064,7 @@ final class UpdateMenu extends Ability {
 			return $state;
 		}
 
-		$previous = $this->previous_of( $state, self::listed_order( $menu, $item_id ), MenuRules::predecessor( $rows, $item_id ) );
+		$previous = $this->previous_of( $state, $this->listed_order( $menu, $item_id ), MenuRules::predecessor( $rows, $item_id ) );
 
 		$plan = MenuRules::plan_move( $rows, $item_id, $parent_id, $after_id );
 		if ( null !== $plan['refusal'] ) {

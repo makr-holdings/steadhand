@@ -181,6 +181,40 @@ final class Pipeline {
 	}
 
 	/**
+	 * Runs $work as a read call, for code that must see the site as a read sees it while a write call is running. update-menu uses it to
+	 * build get-menu's list of a menu: the list runs third-party filters (wp_get_nav_menu_items, wp_setup_nav_menu_item), and those must
+	 * not see the write grant (MetaCaps maps edit_post, assign_term and the menu item branches only for a write call).
+	 *
+	 * While $work runs, the innermost call is a read (is_write_call() is false), no write is running (is_writing() is false, so the writers
+	 * refuse with their LogicException), and no change-log row is current. Every other part of the state is kept, so the call stays
+	 * in the same run, and the previous state is put back in a finally, also when $work throws. Nested calls restore what they saw.
+	 *
+	 * It can only narrow what $work may do, never widen it. Outside any Steadhand call it changes nothing and only runs $work, because
+	 * nothing is granted there in the first place.
+	 *
+	 * @param callable $work The work to run.
+	 * @return mixed What $work returns.
+	 */
+	public static function as_read( callable $work ): mixed {
+		if ( ! self::is_running() ) {
+			return $work();
+		}
+
+		$saved = array( self::$calls, self::$names, self::$writing, self::$log_ids );
+
+		self::$calls[] = false;
+		self::$names[] = (string) end( self::$names );
+		self::$writing = 0;
+		self::$log_ids = array();
+
+		try {
+			return $work();
+		} finally {
+			list( self::$calls, self::$names, self::$writing, self::$log_ids ) = $saved;
+		}
+	}
+
+	/**
 	 * Whether a call to this ability only reads. Both must hold: the ability's readonly annotation is true, and it needs
 	 * the steadhand_read capability. An annotation alone does not make a call a read, so a write-capability call is never
 	 * treated as one.
