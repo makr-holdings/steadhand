@@ -44,12 +44,20 @@ final class UpdateMenu extends Ability {
 	private const MAX_TITLE_BYTES = 1000;
 
 	/**
-	 * Whether this call could not give an item's get-menu position: get-menu does not list the item, or its read threw. Set by
-	 * listed_item_for(), reset by execute(), and read by result(), which then warns that the position is given as 0.
+	 * Whether get-menu's read before the change did not give the item (it does not list it, or the read threw). previous.order is then 0,
+	 * and result() warns about that. Set by listed_order(), reset by execute().
 	 *
 	 * @var bool
 	 */
-	private bool $position_unlisted = false;
+	private bool $previous_unlisted = false;
+
+	/**
+	 * Whether get-menu's read after the change did not give the item. item.order is then 0, and result() warns about that. Set by
+	 * result(), reset by execute().
+	 *
+	 * @var bool
+	 */
+	private bool $item_unlisted = false;
 
 	/**
 	 * Whether the snapshot of the item before this call could not be saved, so the call cannot be undone and says so (set by snapshot()).
@@ -527,7 +535,8 @@ final class UpdateMenu extends Ability {
 	 * @return array<string, mixed>|\WP_Error
 	 */
 	public function execute( array $input ): array|\WP_Error {
-		$this->position_unlisted = false;
+		$this->previous_unlisted = false;
+		$this->item_unlisted     = false;
 
 		if ( ! $this->authorize_object( $input ) ) {
 			return PostReader::not_found();
@@ -885,7 +894,9 @@ final class UpdateMenu extends Ability {
 
 		// An item whose linked post is trashed or missing is still read back. Core marks it _invalid, but its title and state are the
 		// stored ones, so a change to it is reported as made.
-		$setup = wp_setup_nav_menu_item( clone $post );
+		// Core runs the_title, nav_menu_attr_title, nav_menu_description and the setup filters here. They see a read, not the write grant.
+		// The cache clear and the get_post() above still run first, so the item is read fresh.
+		$setup = Pipeline::as_read( static fn(): mixed => wp_setup_nav_menu_item( clone $post ) );
 		if ( ! $setup instanceof \WP_Post ) {
 			return self::partial();
 		}
@@ -920,10 +931,14 @@ final class UpdateMenu extends Ability {
 
 		// The item as get-menu lists it, so its order is get-menu's position. An item get-menu does not list has no position: its order
 		// is 0, and the call says so.
-		$listed   = $this->listed_item_for( $menu, (int) $after['item']->ID );
+		$listed   = $this->listed_item_for( $menu, (int) $after['item']->ID, false );
 		$item     = $listed ?? array_merge( MenuReader::item( $after['item'] ), array( 'order' => 0 ) );
 		$warnings = $this->warnings( (string) $input['op'], (int) $menu->term_id, $changed );
-		if ( $this->position_unlisted ) {
+		if ( $this->previous_unlisted ) {
+			$warnings[] = __( 'get-menu did not list this item before the change (for example its linked object is trashed or missing, or other code on the site leaves it out), so its previous position is given as 0.', 'steadhand' );
+		}
+
+		if ( $this->item_unlisted ) {
 			$warnings[] = __( 'get-menu does not list this item (for example its linked object is trashed or missing, or other code on the site leaves it out), so its position is given as 0.', 'steadhand' );
 		}
 
@@ -992,9 +1007,10 @@ final class UpdateMenu extends Ability {
 	 *
 	 * @param \WP_Term $menu    The menu.
 	 * @param int      $item_id The item.
+	 * @param bool     $before  True for the read before the change (sets previous_unlisted), false for the read after it (item_unlisted).
 	 * @return array<string, mixed>|null The get-menu item, or null when get-menu does not list it or the read failed.
 	 */
-	private function listed_item_for( \WP_Term $menu, int $item_id ): ?array {
+	private function listed_item_for( \WP_Term $menu, int $item_id, bool $before ): ?array {
 		try {
 			$listed = Pipeline::as_read( static fn(): ?array => MenuReader::listed_item( $menu, $item_id ) );
 		} catch ( \Throwable ) {
@@ -1002,7 +1018,11 @@ final class UpdateMenu extends Ability {
 		}
 
 		if ( null === $listed ) {
-			$this->position_unlisted = true;
+			if ( $before ) {
+				$this->previous_unlisted = true;
+			} else {
+				$this->item_unlisted = true;
+			}
 		}
 
 		return $listed;
@@ -1015,7 +1035,7 @@ final class UpdateMenu extends Ability {
 	 * @param int      $item_id The item.
 	 */
 	private function listed_order( \WP_Term $menu, int $item_id ): int {
-		$listed = $this->listed_item_for( $menu, $item_id );
+		$listed = $this->listed_item_for( $menu, $item_id, true );
 
 		return null === $listed ? 0 : (int) $listed['order'];
 	}

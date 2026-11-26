@@ -189,14 +189,16 @@ final class Pipeline {
 	 * refuse with their LogicException), and no change-log row is current. Every other part of the state is kept, so the call stays
 	 * in the same run, and the previous state is put back in a finally, also when $work throws. Nested calls restore what they saw.
 	 *
-	 * It can only narrow what $work may do, never widen it. Outside any Steadhand call it changes nothing and only runs $work, because
-	 * nothing is granted there in the first place.
+	 * It can only narrow what $work may do, never widen it. It is a plain pass-through unless the innermost call is a write call that
+	 * is running: outside any Steadhand call, and inside a read call, there is nothing to narrow.
+	 *
+	 * @internal Steadhand's own use (update-menu). Not an extension point; it is not in docs/HOOKS.md and may change without notice.
 	 *
 	 * @param callable $work The work to run.
 	 * @return mixed What $work returns.
 	 */
 	public static function as_read( callable $work ): mixed {
-		if ( ! self::is_running() ) {
+		if ( ! self::is_write_call() ) {
 			return $work();
 		}
 
