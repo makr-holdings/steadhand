@@ -129,6 +129,9 @@ No. Steadhand never calls an AI provider and stores no AI keys. Content leaves t
 
 == Changelog ==
 
+= Unreleased =
+* An administrator can limit an agent to a list of IP addresses and ranges on the Agents screen. While the list has entries, the agent's Application Passwords work only from an address on it. Off by default. Behind a reverse proxy, read the notes in the README before you rely on the list.
+
 = 0.4.0 =
 * New tools: steadhand-trash-post moves a post or page to the trash, and steadhand-restore-post restores one that the same agent trashed. Both need the trash capability, which is off by default. Neither deletes permanently.
 * The Agents screen offers the trash capability.

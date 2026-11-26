@@ -22,4 +22,7 @@ if ( is_readable( __DIR__ . '/vendor/autoload.php' ) ) {
 
 	// The keys a menu hide stores on a classic menu item (MenuRules::HIDDEN_KEYS), removed the same way.
 	array_map( 'delete_post_meta_by_key', \Steadhand\Pipeline\MenuRules::HIDDEN_KEYS );
+
+	// The IP allowlist of every agent (SPEC §4.1).
+	\Steadhand\IpAllowlist::uninstall();
 }

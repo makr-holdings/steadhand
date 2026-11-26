@@ -12,12 +12,13 @@ namespace Steadhand\Admin;
 use Steadhand\Abilities\Registry;
 use Steadhand\Agents;
 use Steadhand\Capabilities;
+use Steadhand\IpAllowlist;
 use Steadhand\Roles;
 
 defined( 'ABSPATH' ) || exit;
 
 /**
- * Runs the eight actions of the Agents screen. Every action checks, in this order: the nonce, that the site is not a multisite network,
+ * Runs the nine actions of the Agents screen. Every action checks, in this order: the nonce, that the site is not a multisite network,
  * manage_options, that the caller holds no agent role, list_users, and the native WordPress capability for the act (create_users, or
  * edit_user for the target, and delete_user too for a delete). A target must then be a dedicated agent (Agents::is_agent()). Nothing is
  * changed before every check passes.
@@ -44,9 +45,13 @@ final class AgentsHandler {
 	public const ACTION_DISABLE      = 'disable';
 	public const ACTION_ENABLE       = 'enable';
 	public const ACTION_DELETE       = 'delete';
+	public const ACTION_IPS          = 'set_ips';
 
 	/** The most Application Passwords one agent may hold. */
 	public const MAX_PASSWORDS = 10;
+
+	/** The longest allowed-addresses text that is read, in bytes, before it is parsed. A longer one is refused and nothing is saved. */
+	public const IPS_MAX_BYTES = 2000;
 
 	/** The longest label (an Application Password name), in characters (code points, counted with mb_strlen()). */
 	public const LABEL_MAX = 60;
@@ -68,6 +73,7 @@ final class AgentsHandler {
 		'agent_enabled',
 		'agent_enabled_with_connections',
 		'agent_deleted',
+		'ips_saved',
 	);
 
 	/**
@@ -111,6 +117,9 @@ final class AgentsHandler {
 		'not_agent_revoked',
 		'agent_disabled_no_password',
 		'agent_enabled_with_connections',
+		'ips_saved',
+		'ips_invalid',
+		'ips_failed',
 	);
 
 	/**
@@ -140,6 +149,9 @@ final class AgentsHandler {
 		'delete_has_content_revoked',
 		'not_agent_revoked',
 		'agent_enabled_with_connections',
+		'ips_saved',
+		'ips_invalid',
+		'ips_failed',
 	);
 
 	/** How a rollback ended: the user was deleted. */
@@ -616,6 +628,73 @@ final class AgentsHandler {
 		}
 
 		return $this->result( 'capabilities_saved', $user_id );
+	}
+
+	/**
+	 * Saves an agent's allowed IP addresses (SPEC §4.1, D28). The text has one entry per line and is read as a whole: when any line is
+	 * refused, or there are more entries than a list may hold, nothing is saved. Empty text deletes the list, which turns the check off.
+	 * The steadhand_agent_ips_changed action fires only when the stored list changed.
+	 *
+	 * @param string $nonce   The nonce from the form.
+	 * @param int    $user_id The agent.
+	 * @param string $raw     The ips field as it was sent, before wp_unslash(). It is unslashed here, once.
+	 * @return array{code: string, ok: bool, user_id: int, secret: null}
+	 */
+	public function set_ips( string $nonce, int $user_id, string $raw ): array {
+		$refused = $this->guard( $nonce, self::nonce_action( self::ACTION_IPS, $user_id ), 'edit_user', $user_id );
+		if ( null !== $refused ) {
+			return $refused;
+		}
+
+		if ( null === $this->agent( $user_id ) ) {
+			return $this->result( 'not_agent' );
+		}
+
+		if ( strlen( $raw ) > self::IPS_MAX_BYTES ) {
+			return $this->result( 'ips_invalid', $user_id );
+		}
+
+		$parsed = IpAllowlist::parse( wp_unslash( $raw ) );
+		if ( array() !== $parsed['errors'] ) {
+			return $this->result( 'ips_invalid', $user_id );
+		}
+
+		$entries = $parsed['entries'];
+		// Null when the stored value is corrupt. Replacing a corrupt value always counts as a change.
+		$before = IpAllowlist::for_user( $user_id );
+
+		try {
+			delete_user_meta( $user_id, IpAllowlist::META_KEY );
+			if ( array() !== $entries ) {
+				add_user_meta( $user_id, IpAllowlist::META_KEY, $entries, true );
+			}
+
+			$stored = IpAllowlist::for_user( $user_id );
+		} catch ( \Throwable ) {
+			// A listener threw during the write. What was stored is not known, so nothing is claimed.
+			return $this->result( 'ips_failed', $user_id );
+		}
+
+		if ( $stored !== $entries ) {
+			return $this->result( 'ips_failed', $user_id );
+		}
+
+		if ( null === $before || $before !== $entries ) {
+			try {
+				/**
+				 * Fires after an agent's allowed IP addresses were saved and the stored list changed.
+				 *
+				 * @param int      $user_id  The agent.
+				 * @param string[] $entries The saved entries, in canonical form. Empty when the list was turned off.
+				 * @param string[] $previous The entries before the save. Empty when there was no list, or it was corrupt.
+				 */
+				do_action( 'steadhand_agent_ips_changed', $user_id, $entries, $before ?? array() );
+			} catch ( \Throwable ) { // phpcs:ignore Generic.CodeAnalysis.EmptyStatement.DetectedCatch -- The save stands whatever a listener does.
+				// A listener must not break the action. The list is saved either way.
+			}
+		}
+
+		return $this->result( 'ips_saved', $user_id );
 	}
 
 	/**

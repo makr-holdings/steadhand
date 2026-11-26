@@ -28,6 +28,13 @@ defined( 'ABSPATH' ) || exit;
  * | c. restrict_agent_routes (rest_pre_dispatch, PHP_INT_MIN)    | only the Steadhand route; everything else 403 | every route but the Steadhand route 403, while the request carries an application password (the transport gate then refuses the Steadhand route) |
  * | c2. restrict_agent_callbacks (rest_request_before_callbacks, PHP_INT_MAX) | same as c; runs after every rest_pre_dispatch filter, so a later filter cannot lift it | same as c |
  * | d. block_agents_in_admin (admin_init, 1)                     | wp-admin, admin-ajax and admin-post refused  | not affected                                                  |
+ * | e. refuse_agent_from_unlisted_address (wp_authenticate_application_password_errors, PHP_INT_MAX) | application password refused from an address not on the agent's IP allowlist (SPEC §4.1) | not affected |
+ * | e2. refuse_non_application_password_identity (rule b, second layer) | the same check again, on the identity the request already has | not affected |
+ *
+ * The IP allowlist (rule e) is off for an agent with no list, and refuses every address for an agent whose stored list is corrupt.
+ * When it refuses, the agent's identity is dropped and every REST route answers the same generic refusal as rule c, including the
+ * Steadhand endpoint. The refusal is reported once per request with the steadhand_agent_ip_refused action, which fires only after
+ * the password matched. Nothing is written to the database for it.
  *
  * "Application password" means the request was authenticated by an application password of that same account
  * (rest_get_authenticated_app_password() is set). "Steadhand route" means the request is a REST request whose
@@ -38,6 +45,14 @@ defined( 'ABSPATH' ) || exit;
  * check, so they apply even when the MCP Adapter or the Abilities API is missing. No filter, option or setting widens them.
  */
 final class Lockdown {
+
+	/**
+	 * Whether this request was refused because an agent's password came from an address that is not on its IP allowlist. Set by
+	 * refuse_for_address(), and cleared at shutdown (see forget_refused_request()).
+	 *
+	 * @var bool
+	 */
+	private static bool $address_refused = false;
 
 	/**
 	 * Attaches the Lockdown rules to WordPress. Called by Plugin::boot() before its requirements check, because the
@@ -51,6 +66,18 @@ final class Lockdown {
 		// Second check, last: a later rest_pre_dispatch filter can cancel the first one but not this one.
 		add_filter( 'rest_request_before_callbacks', array( $this, 'restrict_agent_callbacks' ), PHP_INT_MAX, 3 );
 		add_action( 'admin_init', array( $this, 'block_agents_in_admin' ), 1 );
+		// Core calls this after an application password matched and before its last-used record is written, so a refusal here
+		// leaves last_used and last_ip untouched. PHP_INT_MAX: nothing runs after it.
+		add_action( 'wp_authenticate_application_password_errors', array( $this, 'refuse_agent_from_unlisted_address' ), PHP_INT_MAX, 2 );
+		// The refusal flag belongs to one request. PHP-FPM workers keep static state between requests, so it is cleared here.
+		add_action( 'shutdown', array( self::class, 'forget_refused_request' ) );
+	}
+
+	/**
+	 * Clears the per-request state of the IP allowlist refusal. Called at shutdown, and by the tests between requests.
+	 */
+	public static function forget_refused_request(): void {
+		self::$address_refused = false;
 	}
 
 	/**
@@ -77,13 +104,36 @@ final class Lockdown {
 
 		$is_agent = Agents::is_agent( $user );
 		if ( $is_agent || ( Agents::holds_agent_role( $user ) && self::authenticated_with_own_application_password( $user->ID ) ) ) {
-			return new \WP_Error(
-				'steadhand_agent_login_blocked',
-				__( 'This account cannot sign in here.', 'steadhand' )
-			);
+			return self::login_refusal();
 		}
 
 		return $user;
+	}
+
+	/**
+	 * Refuses an application password of a dedicated agent that comes from an address its IP allowlist does not list (rule e).
+	 *
+	 * Core calls wp_authenticate_application_password_errors only after the password matched, and before it records the password's
+	 * last-used time and address. A WP_Error added here stops that record, and the user is not authenticated. The error carries the
+	 * same generic text and code as refuse_agent_login(), so it does not reveal the rule. Only a dedicated agent is checked, and an
+	 * agent with no list is not affected.
+	 *
+	 * @param mixed $error The WP_Error core is collecting for this password.
+	 * @param mixed $user  The user the password belongs to.
+	 */
+	public function refuse_agent_from_unlisted_address( $error, $user = null ): void {
+		if ( ! $error instanceof \WP_Error || ! $user instanceof \WP_User || ! Agents::is_agent( $user ) ) {
+			return;
+		}
+
+		$decision = IpAllowlist::evaluate( $user->ID );
+		if ( $decision['allowed'] ) {
+			return;
+		}
+
+		$refusal = self::login_refusal();
+		$error->add( $refusal->get_error_code(), $refusal->get_error_message() );
+		self::refuse_for_address( $user->ID, $decision['ip'] );
 	}
 
 	/**
@@ -110,7 +160,18 @@ final class Lockdown {
 		}
 
 		if ( Agents::is_agent( $user ) ) {
-			return self::authenticated_with_own_application_password( $user->ID ) && self::is_steadhand_rest_request() ? $user_id : 0;
+			if ( ! self::authenticated_with_own_application_password( $user->ID ) || ! self::is_steadhand_rest_request() ) {
+				return 0;
+			}
+
+			// Second layer of rule e: the identity came from another path, so the address is checked again here.
+			$decision = IpAllowlist::evaluate( $user->ID );
+			if ( ! $decision['allowed'] ) {
+				self::refuse_for_address( $user->ID, $decision['ip'] );
+				return 0;
+			}
+
+			return $user_id;
 		}
 
 		if ( Agents::holds_agent_role( $user ) && self::authenticated_with_own_application_password( $user->ID ) ) {
@@ -134,6 +195,10 @@ final class Lockdown {
 	 * @return mixed $result for an allowed request, otherwise a steadhand_agent_endpoint_only WP_Error.
 	 */
 	public function restrict_agent_routes( $result, $server = null, $request = null ) {
+		if ( self::$address_refused ) {
+			return self::refusal();
+		}
+
 		if ( ! self::blocks_current_user() ) {
 			return $result;
 		}
@@ -160,6 +225,10 @@ final class Lockdown {
 	 */
 	public function restrict_agent_callbacks( $response, $handler = null, $request = null ) {
 		unset( $handler );
+
+		if ( self::$address_refused ) {
+			return self::refusal();
+		}
 
 		if ( ! self::blocks_current_user() ) {
 			return $response;
@@ -240,6 +309,47 @@ final class Lockdown {
 		}
 
 		return Agents::holds_agent_role( $user ) && null !== rest_get_authenticated_app_password();
+	}
+
+	/**
+	 * Records that this request's agent was refused for its address, and reports it once. The flag makes every REST route answer the
+	 * generic refusal, the Steadhand endpoint included. The action fires only after a password matched (rule e), so only a holder of a
+	 * valid credential can trigger it. A listener that throws does not change the refusal.
+	 *
+	 * @param int    $user_id The agent.
+	 * @param string $ip      The address seen, or '' when none could be determined.
+	 */
+	private static function refuse_for_address( int $user_id, string $ip ): void {
+		if ( self::$address_refused ) {
+			return;
+		}
+
+		self::$address_refused = true;
+
+		try {
+			/**
+			 * Fires when an agent's application password is refused because the request came from an address that is not on the
+			 * agent's IP allowlist. Fires at most once per request, after the password matched.
+			 *
+			 * @param int    $user_id The agent.
+			 * @param string $ip      The address seen, or '' when none could be determined.
+			 */
+			do_action( 'steadhand_agent_ip_refused', $user_id, $ip );
+		} catch ( \Throwable ) { // phpcs:ignore Generic.CodeAnalysis.EmptyStatement.DetectedCatch -- The refusal stands whatever a listener does.
+			// A listener must not change the refusal.
+		}
+	}
+
+	/**
+	 * The generic refusal for a sign-in that is not allowed. The same text is used by every rule that refuses a password sign-in.
+	 *
+	 * @return \WP_Error
+	 */
+	private static function login_refusal(): \WP_Error {
+		return new \WP_Error(
+			'steadhand_agent_login_blocked',
+			__( 'This account cannot sign in here.', 'steadhand' )
+		);
 	}
 
 	/**
