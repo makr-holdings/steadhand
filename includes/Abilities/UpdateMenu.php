@@ -51,7 +51,7 @@ final class UpdateMenu extends Ability {
 		'/[<>]/',
 		'/&(?!amp;)/',
 		'/[\p{Cc}\p{Cf}\p{Co}\p{Cn}\p{Zl}\p{Zp}\x{034F}\x{115F}\x{1160}\x{3164}\x{FFA0}\x{2800}\x{FE00}-\x{FE0F}\x{E0100}-\x{E01EF}]|(?!\x20)\p{Zs}/u',
-		'/^\s|\s$|\s\s/',
+		'/^\s|\s$|\s\s/u',
 		'/%[0-9A-Fa-f]{2}/',
 	);
 
