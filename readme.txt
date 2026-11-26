@@ -4,7 +4,7 @@ Tags: mcp, ai, security, agents, audit-log
 Requires at least: 6.9
 Tested up to: 7.1
 Requires PHP: 8.1
-Stable tag: 0.5.0
+Stable tag: 0.5.1
 License: GPL-2.0-or-later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -129,7 +129,7 @@ No. Steadhand never calls an AI provider and stores no AI keys. Content leaves t
 
 == Changelog ==
 
-= Unreleased =
+= 0.5.1 =
 * steadhand-update-menu reports an item's order as steadhand-get-menu does: the position the item is listed at, not the stored menu order.
 * steadhand-get-menu has a new field, movable. It is false when a classic menu's stored order means a move may be refused, until an administrator saves the menu in Appearance > Menus. It is always false for block navigation. Reconnect your MCP client after this update.
 
@@ -182,6 +182,9 @@ No. Steadhand never calls an AI provider and stores no AI keys. Content leaves t
 The full changelog is in CHANGELOG.md in the plugin folder.
 
 == Upgrade Notice ==
+
+= 0.5.1 =
+Fixes the order that the menu tool reports, and adds a movable field to steadhand-get-menu. Reconnect your MCP client after updating.
 
 = 0.5.0 =
 Adds menu and site title tools, a Guardrails screen and an IP allowlist for agents, all off by default. Reconnect your MCP client after updating.
