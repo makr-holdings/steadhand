@@ -100,28 +100,63 @@ final class OptionWriter {
 		}
 
 		$after = OptionRules::stored_raw( $name );
+		switch ( self::read_back_outcome( $after, $stored, $raw_before ) ) {
+			case 'stored':
+				return array(
+					'option'   => $name,
+					'value'    => OptionRules::display( (string) $after ),
+					'previous' => $previous,
+					'changed'  => true,
+				);
+
+			case 'different_form':
+				return new \WP_Error(
+					'steadhand_update_partial',
+					__( 'WordPress stored the value in a different form from the one Steadhand expected, a serialized form. Its stored value is not shown. An administrator should check the option.', 'steadhand' ),
+					array( 'status' => 500 )
+				);
+
+			case 'not_changed':
+				return new \WP_Error(
+					'steadhand_update_failed',
+					__( 'WordPress did not change the option, so nothing was changed.', 'steadhand' ),
+					array( 'status' => 500 )
+				);
+
+			default:
+				return new \WP_Error(
+					'steadhand_update_partial',
+					__( 'The option now holds a value that is neither the value sent nor the value before the call. Something other than Steadhand changed it during the save. Its stored value is not shown. An administrator should check the option.', 'steadhand' ),
+					array( 'status' => 500 )
+				);
+		}
+	}
+
+	/**
+	 * Decides what a write did, from the row read back. 'stored': the row holds the stored form. 'different_form': the row holds the
+	 * serialized form of the stored form, which update_option() makes of a value that looks serialized (maybe_serialize()); the value rule
+	 * refuses such a value, so this is defensive, and it is not reported as another writer's change. 'not_changed': the row is what it was.
+	 * 'other': anything else.
+	 *
+	 * @param string|null $after  The row read back, or null.
+	 * @param string      $stored The stored form of the value sent.
+	 * @param string      $before The raw row before the write.
+	 * @return string One of 'stored', 'different_form', 'not_changed' or 'other'.
+	 */
+	public static function read_back_outcome( ?string $after, string $stored, string $before ): string {
 		if ( $after === $stored ) {
-			return array(
-				'option'   => $name,
-				'value'    => OptionRules::display( $after ),
-				'previous' => $previous,
-				'changed'  => true,
-			);
+			return 'stored';
 		}
 
-		if ( $after === $raw_before ) {
-			return new \WP_Error(
-				'steadhand_update_failed',
-				__( 'WordPress did not change the option, so nothing was changed.', 'steadhand' ),
-				array( 'status' => 500 )
-			);
+		if ( null !== $after && maybe_serialize( $stored ) === $after ) {
+			return 'different_form';
 		}
 
-		return new \WP_Error(
-			'steadhand_update_partial',
-			__( 'The option now holds a value that is neither the value sent nor the value before the call. Something other than Steadhand changed it during the save. Its stored value is not shown. An administrator should check the option.', 'steadhand' ),
-			array( 'status' => 500 )
-		);
+		if ( $after === $before ) {
+			return 'not_changed';
+		}
+
+		return 'other';
 	}
 
 	/**

@@ -69,12 +69,53 @@ final class OptionRulesTest extends OptionTestCase {
 			'a licence'                 => array( 'licence_x', true ),
 			'a cookie name'             => array( 'cookie_name', true ),
 			'a session timeout'         => array( 'session_timeout', true ),
+			'a core option, notes'      => array( 'wp_notes_notify', true ),
+			'a core option, gzip'       => array( 'gzipcompression', true ),
+			'a core option, embed'      => array( 'embed_size_w', true ),
+			'a core option, rss'        => array( 'rss_language', true ),
+			'a core option, comments'   => array( 'comment_whitelist', true ),
+			'an author word'            => array( 'myplugin_author_name', true ),
+			'a keyword word'            => array( 'focus_keyword', true ),
+			'a pwd word'                => array( 'pwd_x', true ),
+			'a private word'            => array( 'private_note', true ),
+			'a webhook word'            => array( 'webhook_url', true ),
+			'a dsn word'                => array( 'dsn_x', true ),
+			'an smtp word'              => array( 'smtp_host', true ),
+			'a jwt word'                => array( 'jwt_x', true ),
+			'an otp word'               => array( 'otp_x', true ),
+			'a cert word'               => array( 'cert_x', true ),
+			'a hash word'               => array( 'my_hash', true ),
+			'a signature word'          => array( 'x_signature', true ),
+			'a bearer word'             => array( 'bearer_x', true ),
 			'a password word'           => array( 'mypassword', true ),
 			'a secret'                  => array( 'secret_x', true ),
 			'a nonce'                   => array( 'nonce_x', true ),
 			'a salt'                    => array( 'salt_x', true ),
 			'a credential'              => array( 'credential_x', true ),
 		);
+	}
+
+	/**
+	 * Every key word the redactor uses is a hard-block word here too, so the two rules cannot drift apart. The two built-in options are
+	 * never blocked.
+	 */
+	public function test_every_redactor_key_word_is_a_hard_block_word(): void {
+		foreach ( \Steadhand\Redactor::key_words() as $word ) {
+			$this->assertTrue( OptionRules::hard_blocked( 'x_' . $word . '_y' ), $word );
+		}
+		$this->assertFalse( OptionRules::hard_blocked( 'blogname' ) );
+		$this->assertFalse( OptionRules::hard_blocked( 'blogdescription' ) );
+	}
+
+	/**
+	 * A value that is not valid UTF-8 gets its own message, not the length message.
+	 */
+	public function test_invalid_utf8_has_its_own_message(): void {
+		$refused = OptionRules::value_error( 'blogname', "bad\xC3(" );
+
+		$this->assertInstanceOf( \WP_Error::class, $refused );
+		$this->assertStringContainsString( 'UTF-8', $refused->get_error_message() );
+		$this->assertStringNotContainsString( 'characters long', $refused->get_error_message() );
 	}
 
 	/**
@@ -375,12 +416,15 @@ final class OptionRulesTest extends OptionTestCase {
 	 */
 	public static function serialized_values(): array {
 		return array(
-			'null'           => array( 'N;' ),
-			'false'          => array( 'b:0;' ),
-			'an integer'     => array( 'i:1;' ),
-			'an empty array' => array( 'a:0:{}' ),
-			'a float'        => array( 'd:1.5;' ),
-			'a string'       => array( 's:1:"a";' ),
+			'null'                 => array( 'N;' ),
+			'false'                => array( 'b:0;' ),
+			'an integer'           => array( 'i:1;' ),
+			'an empty array'       => array( 'a:0:{}' ),
+			'a float'              => array( 'd:1.5;' ),
+			'a string'             => array( 's:1:"a";' ),
+			'an integer with text' => array( 'i:5; the top five' ),
+			'a boolean with text'  => array( 'b:1;more' ),
+			'an array with a name' => array( "a:3: Joe's" ),
 		);
 	}
 
@@ -480,6 +524,7 @@ final class OptionRulesTest extends OptionTestCase {
 			$this->assertFalse( has_filter( 'default_option_' . $name ), "default_option_$name" );
 		}
 		$this->assertFalse( has_filter( 'pre_option' ), 'pre_option' );
+		$this->assertFalse( has_filter( 'alloptions' ), 'alloptions' );
 	}
 
 	/**
@@ -515,6 +560,7 @@ final class OptionRulesTest extends OptionTestCase {
 			'pre_option (generic)'    => array( 'pre_option' ),
 			'option_blogname'         => array( 'option_blogname' ),
 			'default_option_blogname' => array( 'default_option_blogname' ),
+			'alloptions'              => array( 'alloptions' ),
 		);
 	}
 

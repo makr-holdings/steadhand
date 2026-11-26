@@ -625,13 +625,50 @@ final class UpdateOptionTest extends OptionTestCase {
 	 */
 	public static function serialized_examples(): array {
 		return array(
-			'null'           => array( 'N;' ),
-			'false'          => array( 'b:0;' ),
-			'an integer'     => array( 'i:1;' ),
-			'an empty array' => array( 'a:0:{}' ),
-			'a float'        => array( 'd:1.5;' ),
-			'a string'       => array( 's:1:"a";' ),
+			'null'                 => array( 'N;' ),
+			'false'                => array( 'b:0;' ),
+			'an integer'           => array( 'i:1;' ),
+			'an empty array'       => array( 'a:0:{}' ),
+			'a float'              => array( 'd:1.5;' ),
+			'a string'             => array( 's:1:"a";' ),
+			'an integer with text' => array( 'i:5; the top five' ),
+			'a boolean with text'  => array( 'b:1;more' ),
+			'an array with a name' => array( "a:3: Joe's" ),
 		);
+	}
+
+	/**
+	 * The description states the value rule the way value_error() applies it, and does not keep the phrases that the rule replaced.
+	 */
+	public function test_the_description_states_the_value_rule_and_drops_the_stale_phrases(): void {
+		$description = ( new UpdateOption() )->description();
+
+		foreach ( array( 'no entity other than &amp;', 'no bare &,', 'with a pre_option filter' ) as $stale ) {
+			$this->assertStringNotContainsString( $stale, $description, "The stale phrase '$stale' must be gone." );
+		}
+		foreach ( array( 'a bare &, an apostrophe and a double quote are allowed', 'any HTML entity written as text', 'alloptions' ) as $current ) {
+			$this->assertStringContainsString( $current, $description, "The description must say '$current'." );
+		}
+	}
+
+	/**
+	 * A row that is not in WordPress's escaped form (written by another route) is rewritten by a call with the same display text: the call
+	 * reports changed true, and the value equals the previous value. This is the documented limit.
+	 */
+	public function test_a_row_not_in_the_escaped_form_is_rewritten_by_the_same_display_text(): void {
+		global $wpdb;
+		$agent = $this->option_agent();
+		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching -- Test writes a raw row, as another route would.
+		$wpdb->update( $wpdb->options, array( 'option_value' => "Joe's Pizza" ), array( 'option_name' => 'blogname' ) );
+		wp_cache_flush();
+
+		$result = $this->execute_ability( self::ABILITY, $this->args( 'blogname', "Joe's Pizza" ) );
+
+		$this->assertIsArray( $result );
+		$this->assertTrue( $result['changed'] );
+		$this->assertSame( $result['previous'], $result['value'] );
+		$this->assertSame( 'Joe&#039;s Pizza', $this->stored_value( 'blogname' ) );
+		$this->assertSame( Entry::RESULT_OK, $this->latest_row( $agent )['result'] );
 	}
 
 	/**

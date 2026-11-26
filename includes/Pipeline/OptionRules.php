@@ -10,6 +10,8 @@ declare( strict_types=1 );
 
 namespace Steadhand\Pipeline;
 
+use Steadhand\Redactor;
+
 defined( 'ABSPATH' ) || exit;
 
 /**
@@ -163,7 +165,21 @@ final class OptionRules {
 		'widget_text',
 		'wp_attachment_pages_enabled',
 		'wp_force_deactivated_plugins',
+		'wp_notes_notify',
 		'wp_page_for_privacy_policy',
+		'wp_calendar_block_has_published_posts',
+		'theme_switched',
+		'theme_switched_via_customizer',
+		'recovery_mode_email_last_sent',
+		'finished_updating_comment_type',
+		'comment_whitelist',
+		'blacklist_keys',
+		'embed_autourls',
+		'embed_size_w',
+		'embed_size_h',
+		'rss_language',
+		'gzipcompression',
+		'can_compress_scripts',
 		'active_sitewide_plugins',
 		'cron',
 		'current_theme',
@@ -207,12 +223,14 @@ final class OptionRules {
 	private const HARD_BLOCKED_PARTS = array( 'capabilities', 'user_level' );
 
 	/**
-	 * Words that mark an option as holding a credential, a key or a session. Any name that contains one (in lower case) is hard-blocked,
-	 * because a value sent through update-option goes to the change log and the previous value to the snapshot table.
+	 * Words that mark an option as holding a credential, a key or a session. Any name that contains one, in lower case, is hard-blocked: a
+	 * substring match on purpose, so it also refuses harmless names such as myplugin_author_name (auth) and focus_keyword (key). The value sent
+	 * goes to the change log and the previous value to the snapshot table, so the list is the union of the redactor's key words
+	 * (Redactor::key_words(), which read the same names as secret) and the words below. The union is computed by hard_blocked().
 	 *
 	 * @var string[]
 	 */
-	private const HARD_BLOCKED_WORDS = array( 'key', 'token', 'secret', 'pass', 'auth', 'salt', 'nonce', 'license', 'licence', 'credential', 'cookie', 'session' );
+	private const EXTRA_HARD_BLOCKED_WORDS = array( 'key', 'token', 'secret', 'pass', 'pwd', 'pswd', 'auth', 'salt', 'nonce', 'license', 'licence', 'credential', 'cookie', 'session', 'private', 'bearer', 'signature', 'hash', 'webhook', 'dsn', 'smtp', 'jwt', 'otp', 'cert' );
 
 	/**
 	 * The options Steadhand may change, with the most characters each may take and the fewest. Each name is a key, and each entry is
@@ -317,7 +335,7 @@ final class OptionRules {
 			}
 		}
 
-		foreach ( array_merge( self::HARD_BLOCKED_PARTS, self::HARD_BLOCKED_WORDS ) as $part ) {
+		foreach ( array_merge( self::HARD_BLOCKED_PARTS, self::EXTRA_HARD_BLOCKED_WORDS, Redactor::key_words() ) as $part ) {
 			if ( str_contains( $lower, $part ) ) {
 				return true;
 			}
@@ -338,11 +356,14 @@ final class OptionRules {
 	/**
 	 * The value rule. Reads no site data: the allowlist and WordPress's own sanitizer only. In order:
 	 * 1. a string of at least the option's min_length characters (an empty site title is refused by a min of 1);
-	 * 2. when not empty, display text on one line of at most max_length characters (PlainText::valid() with $display): markup is refused,
+	 * 2. valid UTF-8 (refused with its own message);
+	 * 3. when not empty, display text on one line of at most max_length characters (PlainText::valid() with $display): markup is refused,
 	 *    and a bare &, an apostrophe and a double quote are allowed;
-	 * 3. the value is not a serialized value (is_serialized(), also after trimming), because update_option() would serialize it;
-	 * 4. its stored form, sanitize_option(), is a string, and decoding it gives back exactly the value sent (so an entity sent as text, such
-	 *    as &amp;, &#039; or &lt;, is refused, because it would not read back as sent).
+	 * 4. the stored form, sanitize_option(), is a string, and decoding it gives back exactly the value sent (so an entity sent as text, such
+	 *    as &amp;, &#039; or &lt;, is refused, because it would not read back as sent);
+	 * 5. neither the value, nor its trimmed form, nor its stored form, nor the trimmed stored form looks serialized, by either WordPress test:
+	 *    is_serialized( $x, false ), the test maybe_serialize() applies when it stores a value, and the strict is_serialized( $x ). A
+	 *    serialized value would be stored as a serialized string, which is not what the agent sent.
 	 * A throw from the sanitizer refuses the value.
 	 *
 	 * @param string $name  The option name.
@@ -359,9 +380,13 @@ final class OptionRules {
 			return self::invalid( __( 'The value must be a string of plain text. Send it again.', 'steadhand' ) );
 		}
 
+		if ( 1 !== preg_match( '//u', $value ) ) {
+			return self::invalid( __( 'The value is not valid UTF-8 text, so it was refused. Send the value again as UTF-8. Nothing was changed.', 'steadhand' ) );
+		}
+
 		$max = $allowed[ $name ]['max_length'];
 		$min = $allowed[ $name ]['min_length'];
-		if ( 1 !== preg_match( '//u', $value ) || mb_strlen( $value, 'UTF-8' ) < $min ) {
+		if ( mb_strlen( $value, 'UTF-8' ) < $min ) {
 			return self::invalid(
 				/* translators: %d: the fewest characters the option may take. */
 				sprintf( __( 'The value must be at least %d characters long. Send the value again. Nothing was changed.', 'steadhand' ), $min )
@@ -375,16 +400,28 @@ final class OptionRules {
 			);
 		}
 
-		if ( is_serialized( $value ) || is_serialized( trim( $value ) ) ) {
-			return self::invalid( __( 'The value looks like serialized data, which WordPress would store as a serialized string. Send plain text. Nothing was changed.', 'steadhand' ) );
-		}
-
 		$stored = self::stored_form( $name, $value );
 		if ( null === $stored || self::display( $stored ) !== $value ) {
 			return self::invalid( __( 'WordPress would store this value differently from the value sent, so it was refused. Send plain text that WordPress stores unchanged. Nothing was changed.', 'steadhand' ) );
 		}
 
+		foreach ( array( $value, trim( $value ), $stored, trim( $stored ) ) as $form ) {
+			if ( self::looks_serialized( $form ) ) {
+				return self::invalid( __( 'The value looks like serialized data, which WordPress would store as a serialized string. Send plain text. Nothing was changed.', 'steadhand' ) );
+			}
+		}
+
 		return null;
+	}
+
+	/**
+	 * Whether a string looks serialized by either test WordPress uses: the non-strict is_serialized() (the one maybe_serialize() applies
+	 * before it stores a value) and the strict one.
+	 *
+	 * @param string $text The text to test.
+	 */
+	public static function looks_serialized( string $text ): bool {
+		return is_serialized( $text, false ) || is_serialized( $text );
 	}
 
 	/**
@@ -445,7 +482,7 @@ final class OptionRules {
 	 * The stored-value rule, read uncached (stored_raw()). Steadhand never creates an option, so a missing row is refused. An option that
 	 * holds structured data (a serialized array or object, or a value that get_option() reads as something other than a string) is refused,
 	 * because a plain value would corrupt it. An option that any filter reads on the way out or in is refused, because a write would not take
-	 * effect or would be changed on the way out: a pre_option_{name}, the generic pre_option, option_{name} or default_option_{name} callback.
+	 * effect or would be changed on the way out: a pre_option_{name}, the generic pre_option, option_{name}, default_option_{name} or alloptions callback (core applies alloptions when it loads the cache that get_option() reads).
 	 *
 	 * @param string $name The option name.
 	 * @return \WP_Error|null A refusal with its own code, or null when the option may be written.
@@ -464,7 +501,7 @@ final class OptionRules {
 			return self::structured();
 		}
 
-		foreach ( array( 'pre_option', 'pre_option_' . $name, 'option_' . $name, 'default_option_' . $name ) as $hook ) {
+		foreach ( array( 'pre_option', 'pre_option_' . $name, 'option_' . $name, 'default_option_' . $name, 'alloptions' ) as $hook ) {
 			if ( has_filter( $hook ) ) {
 				return new \WP_Error(
 					'steadhand_refused_option_filtered',

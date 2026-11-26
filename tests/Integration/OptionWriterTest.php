@@ -70,6 +70,37 @@ final class OptionWriterTest extends OptionTestCase {
 	}
 
 	/**
+	 * The read-back decision: the stored form is success; the serialized form of the stored form is reported as a different form, not as
+	 * another writer's change (without that case, the row would be called "something other than Steadhand changed it"); the row unchanged is
+	 * "not changed"; anything else is other.
+	 *
+	 * @dataProvider read_back_cases
+	 *
+	 * @param string|null $after  The row read back.
+	 * @param string      $stored The stored form of the value sent.
+	 * @param string      $before The raw row before the write.
+	 * @param string      $want   The outcome expected.
+	 */
+	public function test_the_read_back_decision( ?string $after, string $stored, string $before, string $want ): void {
+		$this->assertSame( $want, OptionWriter::read_back_outcome( $after, $stored, $before ) );
+	}
+
+	/**
+	 * Read-back cases.
+	 *
+	 * @return array<string, array{0: string|null, 1: string, 2: string, 3: string}>
+	 */
+	public static function read_back_cases(): array {
+		return array(
+			'the stored form'            => array( 'Joe&#039;s', 'Joe&#039;s', 'old', 'stored' ),
+			'the serialized stored form' => array( 's:6:"i:5; x";', 'i:5; x', 'old', 'different_form' ),
+			'the row unchanged'          => array( 'old', 'new', 'old', 'not_changed' ),
+			'some other value'           => array( 'other', 'new', 'old', 'other' ),
+			'no row'                     => array( null, 'new', 'old', 'other' ),
+		);
+	}
+
+	/**
 	 * An expected value that differs from the stored one is refused with 409 and nothing is written; a matching one is written.
 	 */
 	public function test_expected_is_honoured_by_the_writer(): void {
