@@ -23,6 +23,11 @@ final class UpdateMenuTitleTest extends MenuWriteTestCase {
 	protected const ABILITY = 'steadhand/update-menu';
 
 	/**
+	 * A custom post type that is registered but not allowed by Steadhand.
+	 */
+	private const TYPE_NOT_ALLOWED = 'sh_menu_title_nope';
+
+	/**
 	 * How many times wp_delete_post() ran.
 	 *
 	 * @var int
@@ -48,6 +53,9 @@ final class UpdateMenuTitleTest extends MenuWriteTestCase {
 	 * Checks that no permanent delete happened.
 	 */
 	protected function tearDown(): void {
+		if ( post_type_exists( self::TYPE_NOT_ALLOWED ) ) {
+			unregister_post_type( self::TYPE_NOT_ALLOWED );
+		}
 		$this->assertSame( 0, $this->deletes, 'update-menu must never call wp_delete_post().' );
 		parent::tearDown();
 	}
@@ -321,6 +329,156 @@ final class UpdateMenuTitleTest extends MenuWriteTestCase {
 		$this->assert_refused( $this->execute_ability( self::ABILITY, $this->custom_add( $menu, str_repeat( 'a', 201 ) ) ), 'steadhand_invalid_input' );
 
 		$this->assertSame( 1, $this->count_items( $menu ), 'No refused title may create an item.' );
+	}
+
+	/**
+	 * An empty title is allowed only for a published post the agent can read and that is of an allowed type. For a link to a post that is
+	 * private, draft, pending, future or trashed, to a post of a type that is not allowed, and to a taxonomy, the update is refused with
+	 * steadhand_refused_link_target, nothing changes, and the menu's output does not show the private post's title.
+	 */
+	public function test_an_empty_title_is_refused_for_a_link_that_does_not_qualify(): void {
+		wp_set_current_user( $this->admin_id() );
+		$menu  = $this->classic_menu( 'Qualify ' . wp_generate_password( 6, false ) );
+		$later = gmdate( 'Y-m-d H:i:s', time() + DAY_IN_SECONDS );
+
+		$links = array();
+		foreach ( array( 'private', 'draft', 'pending', 'future' ) as $status ) {
+			// Made published, then moved to the status under test, which is how each state is reached without a create refusal.
+			$post  = $this->admin_post( array( 'post_title' => "Secret $status plan" ) );
+			$moved = wp_update_post(
+				array(
+					'ID'            => $post,
+					'post_status'   => $status,
+					'post_date'     => $later,
+					'post_date_gmt' => $later,
+				),
+				true
+			);
+			$this->assertIsInt( $moved, "The post must move to $status." );
+			$links[ $status ] = $this->post_link( $menu, $post, 'Own title' );
+		}
+
+		$trashed        = $this->admin_post( array( 'post_title' => 'Secret trashed plan' ) );
+		$links['trash'] = $this->post_link( $menu, $trashed, 'Own title' );
+		wp_trash_post( $trashed );
+
+		register_post_type(
+			self::TYPE_NOT_ALLOWED,
+			array(
+				'public'       => true,
+				'map_meta_cap' => true,
+				'supports'     => array( 'title', 'editor' ),
+			)
+		);
+		$other         = self::factory()->post->create(
+			array(
+				'post_type'   => self::TYPE_NOT_ALLOWED,
+				'post_status' => 'publish',
+				'post_title'  => 'Secret disallowed plan',
+				'post_author' => $this->admin_id(),
+			)
+		);
+		$links['type'] = $this->post_link( $menu, $other, 'Own title' );
+
+		$term = wp_insert_term( 'Qualify ' . wp_generate_password( 6, false ), 'category' );
+		$this->assertIsArray( $term );
+		$links['taxonomy'] = (int) wp_update_nav_menu_item(
+			$menu,
+			0,
+			array(
+				'menu-item-type'      => 'taxonomy',
+				'menu-item-object'    => 'category',
+				'menu-item-object-id' => (int) $term['term_id'],
+				'menu-item-title'     => 'Own title',
+				'menu-item-status'    => 'publish',
+			)
+		);
+
+		$this->menu_agent();
+		foreach ( $links as $label => $item ) {
+			$result = $this->execute_ability( self::ABILITY, $this->rename_args( $menu, $item, '' ) );
+
+			$this->assert_refused( $result, 'steadhand_refused_link_target' );
+			$this->assertSame( 'Own title', $this->raw_row( $item )->post_title, "An empty title on the $label link must change nothing." );
+		}
+
+		$items = wp_get_nav_menu_items( $menu );
+		$shown = array_map( static fn( object $row ): string => (string) $row->title, is_array( $items ) ? $items : array() );
+		$this->assertNotEmpty( $shown );
+		foreach ( $shown as $title ) {
+			$this->assertStringNotContainsString( 'Secret', $title, 'The menu must not show a private post\'s title.' );
+		}
+	}
+
+	/**
+	 * A stored empty title that the agent could not put back, because the linked post is private, makes a rename refused, and nothing
+	 * changes. The published case is the one that restores: that is the property test above.
+	 */
+	public function test_a_rename_of_an_empty_title_whose_post_is_private_is_refused(): void {
+		wp_set_current_user( $this->admin_id() );
+		$menu = $this->classic_menu( 'Private empty ' . wp_generate_password( 6, false ) );
+		$post = $this->admin_post( array( 'post_title' => 'Later private' ) );
+		$item = $this->post_link( $menu, $post, '' );
+		wp_update_post(
+			array(
+				'ID'          => $post,
+				'post_status' => 'private',
+			)
+		);
+		$this->menu_agent();
+
+		$result = $this->execute_ability( self::ABILITY, $this->rename_args( $menu, $item, 'Renamed' ) );
+
+		$this->assert_refused( $result, 'steadhand_refused_title_not_plain' );
+		$this->assertSame( '', $this->raw_row( $item )->post_title, 'The empty title must stay, since it could not be put back.' );
+	}
+
+	/**
+	 * Non-standard spaces, invisible, format, private-use, unassigned and separator characters, and variation selectors are refused,
+	 * as invalid input, and nothing is created. The message names the non-standard spaces.
+	 */
+	public function test_non_standard_spaces_and_invisible_characters_are_refused(): void {
+		$menu = $this->classic_menu( 'Chars ' . wp_generate_password( 6, false ) );
+		$this->custom_item( $menu, 'Existing', 'https://example.com/existing' );
+		$this->menu_agent();
+
+		$refused = array(
+			'Hangul filler alone'           => "\u{3164}",
+			'ideographic space alone'       => "\u{3000}",
+			'no-break space alone'          => "\u{00A0}",
+			'line separator'                => "A\u{2028}B",
+			'paragraph separator'           => "A\u{2029}B",
+			'variation selector'            => "A\u{FE0F}",
+			'variation selector supplement' => "A\u{E0100}",
+			'private use'                   => "A\u{E000}B",
+			'unassigned'                    => "A\u{0378}B",
+			'combining grapheme joiner'     => "A\u{034F}B",
+			'braille blank'                 => "A\u{2800}B",
+			'em space'                      => "A\u{2003}B",
+		);
+
+		foreach ( $refused as $label => $title ) {
+			$result = $this->execute_ability( self::ABILITY, $this->custom_add( $menu, $title ) );
+
+			$this->assert_refused( $result, 'steadhand_invalid_input' );
+			$this->assertStringContainsString( 'non-standard spaces', $result->get_error_message(), "The message must name non-standard spaces ($label)." );
+		}
+
+		$this->assertSame( 1, $this->count_items( $menu ), 'No refused title may create an item.' );
+	}
+
+	/**
+	 * Ordinary text still passes: plain ASCII, accented Latin, CJK, Arabic without joiners, and an emoji without a variation selector.
+	 */
+	public function test_ordinary_text_still_passes_the_character_rules(): void {
+		$menu = $this->classic_menu( 'Ordinary ' . wp_generate_password( 6, false ) );
+		$this->menu_agent();
+
+		foreach ( array( 'Plain Title', 'Café à la carte', '日本語のメニュー', 'قائمة الطعام', "\u{1F355} Pizza" ) as $title ) {
+			$result = $this->execute_ability( self::ABILITY, $this->custom_add( $menu, $title ) );
+
+			$this->assertIsArray( $result, "The title \"$title\" must be accepted." );
+		}
 	}
 
 	/**

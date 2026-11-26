@@ -175,11 +175,12 @@ final class UpdateMenuAddFailureTest extends MenuWriteTestCase {
 		$item = (int) ( $result->get_error_data()['item'] ?? 0 );
 		$this->assertGreaterThan( 0, $item, 'The error data must name the created item.' );
 		$this->assertStringContainsString( (string) $item, $result->get_error_message(), 'The message must name the created item.' );
-		$this->assertStringContainsString( 'WordPress will remove', $result->get_error_message() );
+		$this->assertStringContainsString( 'not on the public site', $result->get_error_message() );
+		$this->assertStringNotContainsString( 'WordPress will remove', $result->get_error_message(), 'Steadhand must not describe any removal.' );
 
+		// The row is still there, and Steadhand wrote no orphan mark: nothing may cause a row to be deleted.
 		$this->assertSame( 'draft', $this->raw_row( $item )->post_status );
-		$this->assertNull( MenuRules::menu_of( $this->raw_row( $item ) ), 'The item must be in no menu.' );
-		$this->assertNotSame( '', (string) get_post_meta( $item, MenuRules::ORPHANED_META, true ), 'The unfinished item must carry core\'s orphan mark.' );
+		$this->assertSame( '', (string) get_post_meta( $item, MenuRules::ORPHANED_META, true ), 'Steadhand must not write core\'s orphan mark.' );
 		$this->assertNotContains( $item, $this->public_ids( $menu ), 'The unfinished item must not be public.' );
 
 		$row = $this->latest_row( $agent );
@@ -396,6 +397,101 @@ final class UpdateMenuAddFailureTest extends MenuWriteTestCase {
 		$this->assertSame( 'publish', $this->raw_row( $parent )->post_status, 'The hide must be undone.' );
 		$this->assertSame( 0, $this->rows_of( $parent, MenuRules::HIDDEN_META ), 'An undone hide leaves no hidden key.' );
 		$this->assert_no_public_item_under_a_hidden_parent( $menu );
+	}
+
+	/**
+	 * An exception thrown by the publish step, after the row exists, is not a crash: the call returns the named partial failure, and the
+	 * change log names the item, not 0.
+	 */
+	public function test_a_throw_during_the_publish_step_is_a_partial_naming_the_item(): void {
+		$menu = $this->classic_menu( 'Throw ' . wp_generate_password( 6, false ) );
+		$this->custom_item( $menu, 'Existing', 'https://example.com/existing' );
+		$agent = $this->menu_agent();
+
+		$this->on(
+			'transition_post_status',
+			static function ( string $new_status, string $old_status, \WP_Post $post ): void {
+				unset( $old_status );
+				if ( 'publish' === $new_status && 'nav_menu_item' === $post->post_type ) {
+					throw new \RuntimeException( 'Simulated failure in a listener.' );
+				}
+			},
+			10,
+			3
+		);
+
+		$result = $this->execute_ability( self::ABILITY, $this->custom_add( $menu ) );
+
+		$this->assertWPError( $result );
+		$this->assertSame( 'steadhand_update_partial', $result->get_error_code() );
+		$item = (int) ( $result->get_error_data()['item'] ?? 0 );
+		$this->assertGreaterThan( 0, $item, 'The error data must name the item the throw came after.' );
+		$this->assertStringContainsString( (string) $item, $result->get_error_message() );
+		// The throw comes from the publish transition, which runs after the status is stored, so the item is live when the call fails.
+		$this->assertStringContainsString( 'live on the public site', $result->get_error_message(), 'The message must match the state read back.' );
+		$this->assertSame( 'publish', $this->raw_row( $item )->post_status );
+
+		$row = $this->latest_row( $agent );
+		$this->assertSame( Entry::RESULT_ERROR, $row['result'] );
+		$this->assertSame( $item, (int) $row['object_id'], 'The change log must name the item, not 0.' );
+	}
+
+	/**
+	 * A hide's put-back shows the item, and then the item's parent is hidden by another request in the gap. The put-back is not allowed to
+	 * leave a visible item under a hidden parent: the item is hidden once more, and the call reports that it stayed hidden because its
+	 * parent is hidden. There is no loop: one put-back and one correction.
+	 *
+	 * The child of the item is shown during the hide's save, so the hide must be put back. The parent is hidden in the gap, which the
+	 * test runs at the put-back's save. The child item stays visible: this tree rule cannot be repaired with one put-back and one correction
+	 * without a third write, and the message says the child may show at the top level.
+	 */
+	public function test_a_hide_put_back_whose_parent_is_hidden_in_the_gap_leaves_the_item_hidden(): void {
+		$menu   = $this->classic_menu( 'Put back ' . wp_generate_password( 6, false ) );
+		$parent = $this->custom_item( $menu, 'Parent', 'https://example.com/parent' );
+		$item   = $this->custom_item( $menu, 'Item', 'https://example.com/item', $parent );
+		$child  = $this->custom_item( $menu, 'Child', 'https://example.com/child', $item );
+		$this->menu_agent();
+		$this->assertIsArray( $this->execute_ability( self::ABILITY, $this->args_for( $menu, 'hide', $child ) ) );
+
+		$saves = 0;
+		$this->on(
+			'wp_insert_post_data',
+			function ( array $data, array $postarr ) use ( &$saves, $item, $child, $parent ): array {
+				if ( (int) ( $postarr['ID'] ?? 0 ) === $item ) {
+					++$saves;
+					if ( 'draft' === ( $data['post_status'] ?? '' ) && 1 === $saves ) {
+						// The hide's save: a visible child appears in the gap.
+						wp_update_post(
+							array(
+								'ID'          => $child,
+								'post_status' => 'publish',
+							)
+						);
+					} elseif ( 'publish' === ( $data['post_status'] ?? '' ) && 2 === $saves ) {
+						// The put-back's save: the grandparent of the child is hidden in the gap.
+						wp_update_post(
+							array(
+								'ID'          => $parent,
+								'post_status' => 'draft',
+							)
+						);
+					}
+				}
+
+				return $data;
+			},
+			10,
+			2
+		);
+
+		$result = $this->execute_ability( self::ABILITY, $this->args_for( $menu, 'hide', $item ) );
+
+		$this->assert_refused( $result, 'steadhand_update_partial' );
+		$this->assertStringContainsString( 'stayed hidden', $result->get_error_message() );
+		$this->assertSame( 'draft', $this->raw_row( $item )->post_status, 'The item must stay hidden: its parent is hidden.' );
+		$this->assertSame( 'draft', $this->raw_row( $parent )->post_status );
+		$this->assertSame( 3, $saves, 'One hide, one put-back and one correction, and no more writes to the item.' );
+		$this->assertSame( 1, $this->rows_of( $item, MenuRules::HIDDEN_META ), 'The correction stores the hide record, so show can recognise the item.' );
 	}
 
 	/**

@@ -18,22 +18,23 @@ defined( 'ABSPATH' ) || exit;
  *
  * Writes are narrow. A change to an existing item is one wp_update_post() call, bracketed by PostWriter::keep_text_for(), so the
  * stored title, content and excerpt come back byte for byte (a rename keeps the content and excerpt, and changes the title). After
- * each save the writer compares the title, content and excerpt with what they must be, and reports a partial failure on any
- * difference. An item is never saved through wp_update_nav_menu_item(), because that rewrites eight meta keys from its arguments.
- * That function is used only to create an item. Nothing here deletes a post, a menu, a theme location or a theme mod, and nothing
- * calls wp_delete_post().
+ * each save the writer compares the title, content, excerpt and filtered content with what they must be, and reports a partial failure
+ * on any difference. An item is never saved through wp_update_nav_menu_item(), because that rewrites eight meta keys from its
+ * arguments. That function is used only to create an item. Nothing here deletes a post, a menu, a theme location or a theme mod,
+ * nothing calls wp_delete_post(), and nothing writes core's orphan mark: a leftover row is reported, never changed.
  *
  * Tree rule: no published item of a menu has a parent that is a draft item of that menu. The ability checks it before a call, and
  * the writer checks it again after each write, because another request can change the menu in between:
  * - after show and after add's publish, the item's parent must be 0 or a published item of this menu; if not, the item is set back to draft;
- * - after hide, the item must have no published direct child; if one has appeared, the item is set back to published.
- * Each put-back is reported as steadhand_update_partial, and says whether the put-back itself worked.
+ * - after hide, the item must have no published direct child; if one has appeared, the item is set back to published, and then
+ *   that item's own parent must be visible, or it is set back to draft once more. There is at most one put-back and one correction.
+ * Each put-back is reported as steadhand_update_partial, and says whether it worked.
  *
  * Hiding is done with the draft status. A hidden item carries three meta keys (MenuRules::HIDDEN_KEYS): the agent's user ID, the
  * item's own ID, and the item's post_modified_gmt as the hide left it. show needs all three, each with one row, and the state the
  * hide left (MenuRules::hide_recorded()). The keys are removed whenever an item is published by a route that fires
  * transition_post_status while Steadhand is loaded: Plugin::boot() hooks became_published() to that action, and every hide starts by
- * removing them.
+ * removing them. A hide that stored its status but failed the text check still keeps its keys, so the item can be shown again.
  *
  * Every function calls do_action( 'wp_update_nav_menu' ) after a change, as wp-admin and REST do, so page caches flush.
  *
@@ -41,8 +42,8 @@ defined( 'ABSPATH' ) || exit;
  * - steadhand_forbidden (403): the item is not in the menu, or the caller's check failed on it now.
  * - steadhand_refused_content_changed (409): the stored state differs from the state the caller read.
  * - steadhand_update_failed (500): WordPress reported an error and the item is as it was.
- * - steadhand_update_partial (500): the item was changed, but not as asked, or could not be read back. An add that created the
- *   item says so in its message, and its error data carries the item's ID as 'item'.
+ * - steadhand_update_partial (500): the item was changed, but not as asked, or could not be read back. An add whose item exists says so
+ *   in its message, and its error data carries the item's ID as 'item'.
  */
 final class MenuWriter {
 
@@ -69,9 +70,10 @@ final class MenuWriter {
 
 	/**
 	 * Creates a menu item. It is created as a draft with the hidden keys stored, and then published, so the public site never shows
-	 * a half-built item. When the item exists and a later step fails, the failure is a steadhand_update_partial error whose data
-	 * carries the item's ID as 'item', and whose message names the item and says what state it was left in (see added_partial()).
-	 * A failure before any row exists is steadhand_update_failed, and nothing was created.
+	 * a half-built item. Once the item's ID is known, any later failure, including an exception, is a steadhand_update_partial error
+	 * whose data carries the item's ID as 'item', and whose message names the item and says what state it was left in (see
+	 * added_partial()). A failure before any row exists is steadhand_update_failed, and nothing was created. An exception before any
+	 * row exists is not caught.
 	 *
 	 * $spec: type (post_type or custom), object (the post type, or custom), object_id (the post ID, or 0 for a custom link), url
 	 * (a custom link's URL, or empty), title (plain, as validated; for a custom link it is required), parent (0 for the top level),
@@ -86,7 +88,7 @@ final class MenuWriter {
 	 * @param array{count: int, max_order: int, parent_state: array<string, mixed>|null}                                  $expected       What the caller read.
 	 * @param callable                                                                                                    $still_allowed  Called with null (there is no item yet). Returns true when the caller may still add.
 	 * @return array{id: int}|\WP_Error The new item's ID, or the refusal or failure.
-	 * @throws \LogicException When called outside a write.
+	 * @throws \Throwable Rethrown when raised before the new item's ID is known. Also \LogicException when called outside a write.
 	 */
 	public static function add( \WP_Term $menu, array $spec, array $expected, callable $still_allowed ): array|\WP_Error {
 		self::assert_writing();
@@ -139,6 +141,13 @@ final class MenuWriter {
 					'menu-item-status'    => 'draft',
 				)
 			);
+		} catch ( \Throwable $thrown ) {
+			// Before the row exists there is nothing to name, so the exception is not caught.
+			if ( $captured < 1 ) {
+				throw $thrown;
+			}
+
+			return self::added_partial( $captured, $menu_id, self::added_failed( $captured ) );
 		} finally {
 			remove_action( 'wp_add_nav_menu_item', $listener, 10 );
 		}
@@ -152,6 +161,23 @@ final class MenuWriter {
 			return self::update_failed();
 		}
 
+		try {
+			return self::finish_add( $id, $menu_id, $spec );
+		} catch ( \Throwable ) {
+			return self::added_partial( $id, $menu_id, self::added_failed( $id ) );
+		}
+	}
+
+	/**
+	 * The steps of an add after its row exists: the stored row is checked, the hidden keys are stored, the item is published, and the
+	 * tree rule is checked again. Any exception from here is caught by add(), which names the item.
+	 *
+	 * @param int                                                                                                         $id      The new item's ID.
+	 * @param int                                                                                                         $menu_id The menu.
+	 * @param array{type: string, object: string, object_id: int, url: string, title: string, parent: int, position: int} $spec    The item the call asked for.
+	 * @return array{id: int}|\WP_Error
+	 */
+	private static function finish_add( int $id, int $menu_id, array $spec ): array|\WP_Error {
 		if ( ! self::stored_as( $id, $menu_id, $spec ) ) {
 			return self::added_partial( $id, $menu_id, self::added_failed( $id ) );
 		}
@@ -195,11 +221,12 @@ final class MenuWriter {
 	 * content stay as they are stored. A title that is already the stored one changes nothing and returns changed false.
 	 *
 	 * If the item is one a hide left (its keys are intact), the modified key is refreshed after the rename, so that show still
-	 * recognises it. A rename is Steadhand's own change and is not an outside edit.
+	 * recognises it. A rename is Steadhand's own change and is not an outside edit. An item whose keys are stale (edited by other code
+	 * after the hide) is not refreshed, so show stays refused for it.
 	 *
 	 * @param int                  $item_id        Item post ID.
 	 * @param \WP_Term             $menu           The classic menu the item must be in.
-	 * @param string               $title          The new title, plain and validated, not slashed. May be empty for a post or taxonomy link.
+	 * @param string               $title          The new title, plain and validated, not slashed. May be empty where the rules allow it.
 	 * @param array<string, mixed> $expected       The state the caller read: any of menu, status, title, parent and order.
 	 * @param callable             $still_allowed  Receives the fresh post, returns true when the caller may still rename it.
 	 * @return array{id: int, changed: bool}|\WP_Error
@@ -268,8 +295,7 @@ final class MenuWriter {
 	 * change, so they carry the modified time the hide left. A show needs the keys the hide left, and removes them.
 	 *
 	 * The caller's checks (has children, is hidden by Steadhand, parent visible, link target published, and so on) are the ability's.
-	 * This function checks that the item is still the state the caller read, and then the tree rule (see the class comment): a show
-	 * whose parent is hidden is set back to hidden, and a hide that a visible child has come under is set back to visible.
+	 * This function checks that the item is still the state the caller read, and then the tree rule (see the class comment).
 	 *
 	 * @param int                  $item_id        Item post ID.
 	 * @param \WP_Term             $menu           The classic menu the item must be in.
@@ -383,7 +409,9 @@ final class MenuWriter {
 
 	/**
 	 * Sets an item to draft (a hide) or publish (a show), with the text kept, and checks the result. Returns null on success, or the
-	 * failure. A hide clears the old hidden keys first and stores new ones after the save, so they carry the modified time it left.
+	 * failure. A hide stores the hidden keys after the save, whatever the text check finds, because the status did change: the item
+	 * is then hidden, and show can bring it back. A show removes the keys before its text check, so a show that failed the check leaves
+	 * the item visible without them.
 	 *
 	 * @param array<string, mixed> $fresh The fresh state, from MenuRules::fresh_state().
 	 * @param string               $to    'draft' or 'publish'.
@@ -420,24 +448,31 @@ final class MenuWriter {
 			return is_wp_error( $saved ) || $after['status'] === $fresh['status'] ? self::update_failed() : self::partial();
 		}
 
-		if ( ! self::text_kept( $fresh['post'], $after['post'], (string) $fresh['post']->post_title ) ) {
-			return self::partial();
-		}
+		$text_kept = self::text_kept( $fresh['post'], $after['post'], (string) $fresh['post']->post_title );
 
 		if ( 'draft' === $to ) {
 			self::remember_hidden( $item_id );
+
+			if ( ! $text_kept ) {
+				return self::text_partial( true );
+			}
 
 			return MenuRules::hide_recorded( $item_id ) ? null : self::partial();
 		}
 
 		self::forget_hidden( $item_id );
 
+		if ( ! $text_kept ) {
+			return self::text_partial( false );
+		}
+
 		return self::has_hidden_keys( $item_id ) ? self::partial() : null;
 	}
 
 	/**
 	 * Checks the tree rule after a status write, reading the menu fresh. Returns null when the rule holds, or the partial failure after
-	 * the put-back. A show whose parent is no longer visible is set back to draft; a hide with a published child is set back to published.
+	 * the put-back. A show whose parent is no longer visible is set back to draft. A hide with a published child is set back to
+	 * published; if that item's own parent is then hidden, it is set back to draft once more, and the call stops there.
 	 *
 	 * @param int      $item_id Item post ID.
 	 * @param \WP_Term $menu    The menu.
@@ -456,8 +491,17 @@ final class MenuWriter {
 			}
 
 			$back = self::write_status( $now, 'draft' );
+			if ( null === $back ) {
+				return self::tree_partial( self::show_put_back() );
+			}
 
-			return self::tree_partial( null === $back ? self::show_put_back() : self::show_stuck() );
+			$after = MenuRules::fresh_state( $item_id );
+			if ( null !== $after && 'draft' === $after['status'] ) {
+				// Hidden, but the text check failed, or the hide record was not stored: say which.
+				return self::tree_partial( MenuRules::hide_recorded( $item_id ) ? self::show_half_text() : self::show_half_record() );
+			}
+
+			return self::tree_partial( self::show_stuck() );
 		}
 
 		if ( ! self::has_visible_child( $item_id, $menu ) ) {
@@ -465,8 +509,30 @@ final class MenuWriter {
 		}
 
 		$back = self::write_status( $now, 'publish' );
+		if ( null !== $back ) {
+			$after = MenuRules::fresh_state( $item_id );
 
-		return self::tree_partial( null === $back ? self::hide_put_back() : self::hide_stuck() );
+			return self::tree_partial( null !== $after && 'publish' === $after['status'] ? self::hide_back_text() : self::hide_stuck() );
+		}
+
+		// The item is visible again. Its own parent must be visible too, or the item is hidden once more: one correction, no loop.
+		$shown = MenuRules::fresh_state( $item_id );
+		if ( null === $shown ) {
+			return self::partial();
+		}
+
+		if ( self::parent_is_visible( $shown, (int) $menu->term_id ) ) {
+			return self::tree_partial( self::hide_put_back() );
+		}
+
+		$again = self::write_status( $shown, 'draft' );
+		if ( null === $again ) {
+			return self::tree_partial( self::hide_parent_hidden() );
+		}
+
+		$last = MenuRules::fresh_state( $item_id );
+
+		return self::tree_partial( null !== $last && 'publish' === $last['status'] ? self::hide_parent_stuck() : self::hide_parent_hidden() );
 	}
 
 	/**
@@ -503,8 +569,8 @@ final class MenuWriter {
 	}
 
 	/**
-	 * Whether the title, content and excerpt of a saved item are the ones they must be: the title the save was meant to store, and the
-	 * content and the excerpt as they were before it.
+	 * Whether the title, content, excerpt and filtered content of a saved item are the ones they must be: the title the save was meant
+	 * to store, and the other three as they were before it.
 	 *
 	 * @param \WP_Post $before The item before the save.
 	 * @param \WP_Post $after  The item after the save, read fresh.
@@ -513,7 +579,8 @@ final class MenuWriter {
 	private static function text_kept( \WP_Post $before, \WP_Post $after, string $title ): bool {
 		return $after->post_title === $title
 			&& $after->post_content === $before->post_content
-			&& $after->post_excerpt === $before->post_excerpt;
+			&& $after->post_excerpt === $before->post_excerpt
+			&& $after->post_content_filtered === $before->post_content_filtered;
 	}
 
 	/**
@@ -685,6 +752,22 @@ final class MenuWriter {
 	}
 
 	/**
+	 * The failure of a status change whose text check failed. A hide has stored its hidden keys, so the item is hidden and can be shown
+	 * again. A show has removed them, so the item is visible without them.
+	 *
+	 * @param bool $hidden Whether the change was a hide.
+	 */
+	private static function text_partial( bool $hidden ): \WP_Error {
+		return new \WP_Error(
+			'steadhand_update_partial',
+			$hidden
+				? __( 'The menu item is hidden, but another change altered its text while it was saved, so the hide did not complete cleanly. The item IS hidden, and it can be shown again with op show. Check it with steadhand/get-menu.', 'steadhand' )
+				: __( 'The menu item is visible, but another change altered its text while it was saved, so the show did not complete cleanly. Steadhand removed its hidden record. Check it with steadhand/get-menu.', 'steadhand' ),
+			array( 'status' => 500 )
+		);
+	}
+
+	/**
 	 * The failure of a status change whose tree-rule put-back ran: the message says what was done and why.
 	 *
 	 * @param string $message The text, which says what the put-back did.
@@ -704,20 +787,24 @@ final class MenuWriter {
 	}
 
 	/**
-	 * The failure for an add whose item exists: the message names the item, then says in what state it was left, read back now. The
-	 * error data carries the item's ID as 'item', so the change log names it too. When the item is in no menu and is a draft, this
-	 * marks it as unfinished (core's orphan mark, as wp_update_nav_menu_item() sets it), so WordPress removes it later.
+	 * The failure for an add whose item exists. The message names the item, then says in what state it was left, from a fresh read. The
+	 * error data carries the item's ID as 'item', so the change log names it too. This function writes nothing: it does not mark, move or
+	 * delete the row, and a read that throws is replaced by a plain text.
 	 *
 	 * @param int    $item_id The new item's ID.
 	 * @param int    $menu_id The menu the item was added to.
 	 * @param string $cause   The sentence that says what failed, with the item's ID in it.
 	 */
 	public static function added_partial( int $item_id, int $menu_id, string $cause ): \WP_Error {
-		$state = MenuRules::fresh_state( $item_id );
+		try {
+			$text = self::added_state_text( $item_id, MenuRules::fresh_state( $item_id ), $menu_id );
+		} catch ( \Throwable ) {
+			$text = __( 'Steadhand could not read it back, so check the menu with steadhand/get-menu before you continue.', 'steadhand' );
+		}
 
 		return new \WP_Error(
 			'steadhand_update_partial',
-			trim( $cause . ' ' . self::added_state_text( $item_id, $state, $menu_id ) ),
+			trim( $cause . ' ' . $text ),
 			array(
 				'status' => 500,
 				'item'   => $item_id,
@@ -726,8 +813,8 @@ final class MenuWriter {
 	}
 
 	/**
-	 * Says where an added item is now, from a fresh read: live, a hidden draft in the menu, unfinished in no menu, or in another menu.
-	 * For an unfinished draft in no menu it sets the orphan mark, when the item does not have it yet.
+	 * Says where an added item is now, from a fresh read and the terms the row holds: live or a hidden draft in this menu; in another
+	 * menu or in more than one; in no menu (unfinished, or published and unlisted); or unknown when the terms cannot be read. Writes nothing.
 	 *
 	 * @param int                       $item_id The item's ID.
 	 * @param array<string, mixed>|null $state   The item's fresh state, or null.
@@ -738,39 +825,70 @@ final class MenuWriter {
 			return __( 'Steadhand could not read it back, so check the menu with steadhand/get-menu before you continue.', 'steadhand' );
 		}
 
-		if ( $state['menu'] === $menu_id ) {
-			if ( 'publish' === $state['status'] ) {
-				return __( 'It is live on the public site and may be incomplete. Check it with steadhand/get-menu, and hide it with op hide if it is wrong.', 'steadhand' );
-			}
+		$draft = 'draft' === $state['status'];
 
-			return __( 'It was left as a hidden draft, so it is not on the public site. Check it with steadhand/get-menu, and check it in Appearance > Menus.', 'steadhand' );
+		$terms = wp_get_object_terms( $item_id, 'nav_menu', array( 'fields' => 'ids' ) );
+		if ( is_wp_error( $terms ) ) {
+			return $draft
+				/* translators: %d: the new menu item's ID. */
+				? sprintf( __( 'The row %d is a draft, so it is not on the public site. Steadhand could not check which menu it is in. An administrator can remove it by its ID.', 'steadhand' ), $item_id )
+				/* translators: %d: the new menu item's ID. */
+				: sprintf( __( 'The row %d is published. Steadhand could not check which menu it is in, so check it with steadhand/get-menu.', 'steadhand' ), $item_id );
 		}
 
-		if ( 0 === $state['menu'] && 'draft' === $state['status'] ) {
-			// The same mark core sets on an item saved with no menu (wp-includes/nav-menu.php, wp_update_nav_menu_item()).
-			update_post_meta( $item_id, MenuRules::ORPHANED_META, (string) time() );
-			if ( metadata_exists( 'post', $item_id, MenuRules::ORPHANED_META ) ) {
-				return __( 'It is not in any menu, so no screen shows it and it is not on the public site. Steadhand marked it as unfinished. WordPress will remove the unfinished item when an administrator opens Appearance > Menus, once it is older than the site\'s EMPTY_TRASH_DAYS setting (30 days by default).', 'steadhand' );
-			}
+		$ids = array_map( 'intval', $terms );
 
-			return __( 'It is not in any menu, so no screen shows it and it is not on the public site. Steadhand could not mark it as unfinished, so WordPress will not remove it. Ask an administrator to delete it.', 'steadhand' );
+		if ( array() === $ids ) {
+			return $draft
+				/* translators: %d: the new menu item's ID. */
+				? sprintf( __( 'The row %d is unfinished, is in no menu and is not on the public site. No Steadhand tool or admin screen lists it; an administrator can remove it by its ID.', 'steadhand' ), $item_id )
+				/* translators: %d: the new menu item's ID. */
+				: sprintf( __( 'The row %d is published but in no menu, so no menu shows it. No Steadhand tool or admin screen lists it; an administrator can remove it by its ID.', 'steadhand' ), $item_id );
 		}
 
-		return __( 'It is not in this menu, so no menu shows it. Check it with steadhand/get-menu.', 'steadhand' );
+		if ( count( $ids ) > 1 ) {
+			return in_array( $menu_id, $ids, true )
+				? __( 'It is in more than one menu, including this one, so it may show in more than one place. Check it with steadhand/get-menu.', 'steadhand' )
+				: __( 'It is in more than one menu, and not in this one. Check it with steadhand/get-menu.', 'steadhand' );
+		}
+
+		if ( $ids[0] !== $menu_id ) {
+			return __( 'It is in another menu, not this one, so this menu does not show it. Check it with steadhand/get-menu.', 'steadhand' );
+		}
+
+		if ( ! $draft ) {
+			return __( 'It is live on the public site and may be incomplete. Check it with steadhand/get-menu, and hide it with op hide if it is wrong.', 'steadhand' );
+		}
+
+		return __( 'It was left as a hidden draft, so it is not on the public site. Check it with steadhand/get-menu, and check it in Appearance > Menus.', 'steadhand' );
 	}
 
 	/**
-	 * The text for a set-status put-back that worked: a show set back to hidden.
+	 * The text for a show put-back that did not work, where the item is still visible under its hidden parent.
+	 */
+	private static function show_stuck(): string {
+		return __( 'The item was shown, but its parent item was hidden at the same time, and Steadhand could not hide it again, so the item may be visible under a hidden parent. Check the menu with steadhand/get-menu, and hide the item with op hide.', 'steadhand' );
+	}
+
+	/**
+	 * The text for a show put-back that worked: the item is hidden again.
 	 */
 	private static function show_put_back(): string {
 		return __( 'The item was shown, but its parent item was hidden at the same time, so Steadhand hid it again. Show the parent first, then show this item. Nothing else was changed.', 'steadhand' );
 	}
 
 	/**
-	 * The text for a show put-back that did not work.
+	 * The text for a show put-back that hid the item, but whose text check failed. The hide record is stored, so show can bring it back.
 	 */
-	private static function show_stuck(): string {
-		return __( 'The item was shown, but its parent item was hidden at the same time, and Steadhand could not hide it again, so the item may be visible under a hidden parent. Check the menu with steadhand/get-menu, and hide the item with op hide.', 'steadhand' );
+	private static function show_half_text(): string {
+		return __( 'The item was shown, but its parent item was hidden at the same time, and Steadhand hid it again. Another change altered its text during that save, so the hide did not complete cleanly. The item IS hidden, and it can be shown again with op show once its parent is visible. Check it with steadhand/get-menu.', 'steadhand' );
+	}
+
+	/**
+	 * The text for a show put-back that hid the item, but did not store the record that lets show bring it back.
+	 */
+	private static function show_half_record(): string {
+		return __( 'The item was shown, but its parent item was hidden at the same time, and Steadhand hid it again without storing the record it needs to show the item later, so op show will refuse it. The item IS hidden. An administrator can publish it in Appearance > Menus.', 'steadhand' );
 	}
 
 	/**
@@ -781,9 +899,30 @@ final class MenuWriter {
 	}
 
 	/**
-	 * The text for a hide put-back that did not work.
+	 * The text for a hide put-back that did not work: the item is still hidden, and its child is visible.
 	 */
 	private static function hide_stuck(): string {
 		return __( 'The item was hidden, but a visible child item was found under it at the same time, and Steadhand could not show it again, so the child may show at the top level. Check the menu with steadhand/get-menu, and publish the item in Appearance > Menus.', 'steadhand' );
+	}
+
+	/**
+	 * The text for a hide put-back that showed the item, whose text check then failed: the item is visible.
+	 */
+	private static function hide_back_text(): string {
+		return __( 'The item was hidden, but a visible child item was found under it at the same time, so Steadhand showed it again. Another change altered its text during that save. Check it with steadhand/get-menu.', 'steadhand' );
+	}
+
+	/**
+	 * The text for a hide put-back whose item stayed hidden because its own parent is hidden.
+	 */
+	private static function hide_parent_hidden(): string {
+		return __( 'The item was hidden, but a visible child item was found under it at the same time. Steadhand tried to show it again, but its parent item is hidden, so the item stayed hidden. Show the parent first. The child item may show at the top level until then. Check the menu with steadhand/get-menu.', 'steadhand' );
+	}
+
+	/**
+	 * The text for a hide put-back that showed the item under a hidden parent, and could not hide it again.
+	 */
+	private static function hide_parent_stuck(): string {
+		return __( 'The item was hidden, but a visible child item was found under it at the same time. Steadhand showed it again, but its parent item is hidden, and it could not hide it again, so the item is visible under a hidden parent. Check the menu with steadhand/get-menu, and hide the item in Appearance > Menus.', 'steadhand' );
 	}
 }
