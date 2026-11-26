@@ -29,11 +29,12 @@ final class SelfCheck {
 	 * The lockdown hooks that Lockdown::register() attaches, by hook name and method.
 	 */
 	private const LOCKDOWN_HOOKS = array(
-		'authenticate'                  => 'refuse_agent_login',
-		'determine_current_user'        => 'refuse_non_application_password_identity',
-		'rest_pre_dispatch'             => 'restrict_agent_routes',
-		'rest_request_before_callbacks' => 'restrict_agent_callbacks',
-		'admin_init'                    => 'block_agents_in_admin',
+		'authenticate'                                => 'refuse_agent_login',
+		'determine_current_user'                      => 'refuse_non_application_password_identity',
+		'rest_pre_dispatch'                           => 'restrict_agent_routes',
+		'rest_request_before_callbacks'               => 'restrict_agent_callbacks',
+		'admin_init'                                  => 'block_agents_in_admin',
+		'wp_authenticate_application_password_errors' => 'refuse_agent_from_unlisted_address',
 	);
 
 	/**

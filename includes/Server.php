@@ -88,8 +88,21 @@ final class Server {
 
 		$user = wp_get_current_user();
 
-		return is_user_logged_in()
+		$connects = is_user_logged_in()
 			&& Agents::is_agent( $user )
 			&& Capabilities::user_has( $user, Capabilities::CONNECT );
+		if ( ! $connects ) {
+			return false;
+		}
+
+		// Layer 3 of the IP allowlist (SPEC §4.1): whatever set this identity, the request must come from a listed address. It is the
+		// same refusal as above, so nothing new is revealed. It covers identities that Lockdown's application-password rules never see.
+		$decision = IpAllowlist::evaluate( $user->ID );
+		if ( ! $decision['allowed'] ) {
+			Lockdown::report_ip_refusal( $user->ID, $decision['ip'] );
+			return false;
+		}
+
+		return true;
 	}
 }

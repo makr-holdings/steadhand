@@ -73,33 +73,32 @@ final class IpAllowlistTest extends TestCase {
 	 */
 	public static function refused_lines(): array {
 		return array(
-			'hostname'              => array( 'example.com' ),
-			'hostname with CIDR'    => array( 'example.com/24' ),
-			'IPv4 with port'        => array( '203.0.113.5:443' ),
-			'IPv6 in brackets'      => array( '[2001:db8::1]' ),
-			'IPv6 with port'        => array( '[2001:db8::1]:443' ),
-			'zone id'               => array( 'fe80::1%eth0' ),
-			'zero prefix'           => array( '203.0.113.0/0' ),
-			'IPv4 /7'               => array( '203.0.113.0/7' ),
-			'IPv6 /15'              => array( '2001:db8::/15' ),
-			'IPv4 /33'              => array( '203.0.113.0/33' ),
-			'IPv6 /129'             => array( '2001:db8::/129' ),
-			'space inside'          => array( '203.0.113. 5' ),
-			'trailing space'        => array( '203.0.113.5 ' ),
-			'leading space'         => array( ' 203.0.113.5' ),
-			'trailing text'         => array( '203.0.113.5 office' ),
-			'empty prefix'          => array( '203.0.113.0/' ),
-			'prefix with a letter'  => array( '203.0.113.0/2a' ),
-			'prefix with leading 0' => array( '203.0.113.0/024' ),
-			'three octets'          => array( '1.2.3' ),
-			'five octets'           => array( '1.2.3.4.5' ),
-			'octal-looking octet'   => array( '010.0.0.1' ),
-			'octal-looking in v6'   => array( '::ffff:010.0.0.1' ),
-			'mapped IPv6 entry'     => array( '::ffff:203.0.113.5' ),
-			'two slashes'           => array( '203.0.113.0/24/8' ),
-			'a 50-character line'   => array( str_repeat( '1', 50 ) ),
-			'a letter in IPv4'      => array( '203.0.113.x' ),
-			'control character'     => array( "203.0.113.5\t" ),
+			'hostname'             => array( 'example.com' ),
+			'hostname with CIDR'   => array( 'example.com/24' ),
+			'IPv4 with port'       => array( '203.0.113.5:443' ),
+			'IPv6 in brackets'     => array( '[2001:db8::1]' ),
+			'IPv6 with port'       => array( '[2001:db8::1]:443' ),
+			'zone id'              => array( 'fe80::1%eth0' ),
+			'zero prefix'          => array( '203.0.113.0/0' ),
+			'IPv4 /7'              => array( '203.0.113.0/7' ),
+			'IPv6 /15'             => array( '2001:db8::/15' ),
+			'IPv4 /33'             => array( '203.0.113.0/33' ),
+			'IPv6 /129'            => array( '2001:db8::/129' ),
+			'space inside'         => array( '203.0.113. 5' ),
+			'trailing text'        => array( '203.0.113.5 office' ),
+			'empty prefix'         => array( '203.0.113.0/' ),
+			'prefix with a letter' => array( '203.0.113.0/2a' ),
+			'three octets'         => array( '1.2.3' ),
+			'five octets'          => array( '1.2.3.4.5' ),
+			'octal-looking octet'  => array( '010.0.0.1' ),
+			'octal-looking in v6'  => array( '::ffff:010.0.0.1' ),
+			'mapped IPv6 entry'    => array( '::ffff:203.0.113.5' ),
+			'two slashes'          => array( '203.0.113.0/24/8' ),
+			'a 50-character line'  => array( str_repeat( '1', 50 ) ),
+			'a letter in IPv4'     => array( '203.0.113.x' ),
+			'control character'    => array( "203.0.113.5\x01" ),
+			'space inside a line'  => array( '203.0.113. 5' ),
+			'tab inside a line'    => array( "203.0.\t113.5" ),
 		);
 	}
 
@@ -114,6 +113,41 @@ final class IpAllowlistTest extends TestCase {
 
 		$this->assertSame( array(), $parsed['entries'], "The line '$line' must not be stored." );
 		$this->assertCount( 1, $parsed['errors'], "The line '$line' must give one error." );
+	}
+
+	/**
+	 * Spaces, tabs and CRs at the ends of a line are not part of the entry (copy-paste), so these are accepted.
+	 *
+	 * @dataProvider surrounded_lines
+	 * @param string $line  The line as typed.
+	 * @param string $entry The canonical entry it stores.
+	 */
+	public function test_whitespace_at_the_ends_of_a_line_is_trimmed( string $line, string $entry ): void {
+		$parsed = IpAllowlist::parse( $line );
+
+		$this->assertSame( array(), $parsed['errors'] );
+		$this->assertSame( array( $entry ), $parsed['entries'] );
+	}
+
+	/**
+	 * Lines with whitespace at their ends, and the entry each one stores.
+	 *
+	 * @return array<string, array{0: string, 1: string}>
+	 */
+	public static function surrounded_lines(): array {
+		return array(
+			'leading space'  => array( ' 203.0.113.5', '203.0.113.5' ),
+			'trailing space' => array( '203.0.113.5 ', '203.0.113.5' ),
+			'tab both ends'  => array( "\t203.0.113.5\t", '203.0.113.5' ),
+			'CR at the end'  => array( "203.0.113.5\r", '203.0.113.5' ),
+		);
+	}
+
+	/**
+	 * A prefix with a leading zero is digits only, so it is accepted and stored as its number.
+	 */
+	public function test_a_prefix_with_a_leading_zero_is_accepted_and_stored_as_its_number(): void {
+		$this->assertSame( array( '203.0.0.0/8' ), IpAllowlist::parse( '203.0.113.0/08' )['entries'] );
 	}
 
 	public function test_an_error_line_is_printable_and_short(): void {
@@ -195,6 +229,24 @@ final class IpAllowlistTest extends TestCase {
 		$this->assertFalse( IpAllowlist::matches( '10.0.16.0', $entries ) );
 	}
 
+	public function test_a_23_range_matches_its_first_and_last_address_and_not_the_neighbours(): void {
+		$entries = array( '198.51.100.0/23' );
+
+		$this->assertTrue( IpAllowlist::matches( '198.51.100.0', $entries ) );
+		$this->assertTrue( IpAllowlist::matches( '198.51.101.255', $entries ) );
+		$this->assertFalse( IpAllowlist::matches( '198.51.99.255', $entries ) );
+		$this->assertFalse( IpAllowlist::matches( '198.51.102.0', $entries ) );
+	}
+
+	public function test_a_61_range_matches_its_first_and_last_address_and_not_the_neighbours(): void {
+		$entries = array( '2001:db8:0:8::/61' );
+
+		$this->assertTrue( IpAllowlist::matches( '2001:db8:0:8::', $entries ) );
+		$this->assertTrue( IpAllowlist::matches( '2001:db8:0:f:ffff:ffff:ffff:ffff', $entries ) );
+		$this->assertFalse( IpAllowlist::matches( '2001:db8:0:7:ffff:ffff:ffff:ffff', $entries ) );
+		$this->assertFalse( IpAllowlist::matches( '2001:db8:0:10::', $entries ) );
+	}
+
 	public function test_an_ipv6_range_matches_its_first_and_last_address_and_not_the_neighbours(): void {
 		$entries = array( '2001:db8::/48' );
 
@@ -244,6 +296,17 @@ final class IpAllowlistTest extends TestCase {
 		$this->assertSame( array(), IpAllowlist::for_user( $user_id ) );
 	}
 
+	/**
+	 * Stored entries are judged by their value. An equivalent spelling, not the text inet_ntop() would print, is a valid list, and it matches.
+	 */
+	public function test_an_equivalent_spelling_stored_directly_is_valid_and_matches(): void {
+		$user_id = $this->make_agent();
+		update_user_meta( $user_id, IpAllowlist::META_KEY, array( '2001:0db8:0:0::1' ) );
+
+		$this->assertSame( array( '2001:0db8:0:0::1' ), IpAllowlist::for_user( $user_id ) );
+		$this->assertTrue( IpAllowlist::matches( '2001:db8::1', IpAllowlist::for_user( $user_id ) ) );
+	}
+
 	public function test_a_stored_canonical_list_is_returned_as_stored(): void {
 		$user_id = $this->make_agent();
 		update_user_meta( $user_id, IpAllowlist::META_KEY, array( '203.0.113.0/24', '2001:db8::1' ) );
@@ -263,15 +326,20 @@ final class IpAllowlistTest extends TestCase {
 		}
 
 		return array(
-			'a string'                => array( '203.0.113.5' ),
-			'an integer'              => array( 7 ),
-			'a nested array'          => array( array( array( '203.0.113.5' ) ) ),
-			'a non-canonical entry'   => array( array( '203.0.113.7/24' ) ),
-			'a hostname entry'        => array( array( 'example.com' ) ),
-			'a non-string entry'      => array( array( 42 ) ),
-			'an entry with a newline' => array( array( "203.0.113.5\n10.0.0.1" ) ),
-			'21 entries'              => array( $too_many ),
-			'an associative array'    => array( array( 'office' => '203.0.113.5' ) ),
+			'a string'                 => array( '203.0.113.5' ),
+			'an integer'               => array( 7 ),
+			'a nested array'           => array( array( array( '203.0.113.5' ) ) ),
+			'a non-canonical entry'    => array( array( '203.0.113.7/24' ) ),
+			'a hostname entry'         => array( array( 'example.com' ) ),
+			'a non-string entry'       => array( array( 42 ) ),
+			'an entry with a newline'  => array( array( "203.0.113.5\n10.0.0.1" ) ),
+			'21 entries'               => array( $too_many ),
+			'an associative array'     => array( array( 'office' => '203.0.113.5' ) ),
+			'a leading space stored'   => array( array( ' 203.0.113.5' ) ),
+			'a trailing space stored'  => array( array( '203.0.113.5 ' ) ),
+			'an unmasked range stored' => array( array( '203.0.113.7/24' ) ),
+			'a duplicate by value'     => array( array( '2001:db8::1', '2001:0db8::1' ) ),
+			'a prefix below the floor' => array( array( '203.0.113.0/7' ) ),
 		);
 	}
 

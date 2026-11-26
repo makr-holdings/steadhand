@@ -53,8 +53,9 @@ final class IpAllowlist {
 		$errors  = array();
 
 		foreach ( explode( "\n", $text ) as $line ) {
-			$line = rtrim( $line, "\r" );
-			if ( '' === trim( $line, " \t" ) ) {
+			// Copy-paste friendly: spaces, tabs and CRs at the ends of a line are not part of the entry. Whitespace inside one is refused.
+			$line = trim( $line, " \t\r" );
+			if ( '' === $line ) {
 				continue;
 			}
 
@@ -115,15 +116,17 @@ final class IpAllowlist {
 			return null;
 		}
 
+		$seen = array();
 		foreach ( $value as $entry ) {
 			if ( ! is_string( $entry ) ) {
 				return null;
 			}
 
-			$parsed = self::parse( $entry );
-			if ( array() !== $parsed['errors'] || array( $entry ) !== $parsed['entries'] ) {
+			$key = self::entry_key( $entry );
+			if ( null === $key || isset( $seen[ $key ] ) ) {
 				return null;
 			}
+			$seen[ $key ] = true;
 		}
 
 		return $value;
@@ -257,35 +260,62 @@ final class IpAllowlist {
 	/**
 	 * The canonical form of one entry line, or null when the line is refused.
 	 *
-	 * @param string $line One line, without its line break.
+	 * @param string $line One line, already trimmed.
 	 * @return string|null
 	 */
 	private static function canonical( string $line ): ?string {
-		if ( strlen( $line ) > self::MAX_ENTRY_LENGTH ) {
+		$decoded = self::decode( $line );
+		if ( null === $decoded ) {
 			return null;
 		}
 
-		// Only hex digits, colons, dots and the one slash can appear: this refuses whitespace, brackets, zone ids, ports, letters that
-		// are not hex (so hostnames) and everything else.
-		if ( 1 !== preg_match( '/^[0-9A-Fa-f:.\/]+\z/', $line ) ) {
+		$text = inet_ntop( self::masked( $decoded['packed'], $decoded['prefix'] ) );
+		if ( false === $text ) {
 			return null;
 		}
 
-		$slash = strpos( $line, '/' );
-		if ( false !== $slash && false !== strpos( $line, '/', $slash + 1 ) ) {
+		return $decoded['prefix'] === $decoded['bits'] ? $text : $text . '/' . $decoded['prefix'];
+	}
+
+	/**
+	 * The binary identity of a stored entry, or null when it is not a valid entry. An entry is valid when it decodes, its address is
+	 * already masked to its prefix, and its prefix follows the rules. The text is not compared: an equivalent spelling is valid.
+	 *
+	 * @param string $entry The stored entry.
+	 * @return string|null A key for duplicate detection, or null.
+	 */
+	private static function entry_key( string $entry ): ?string {
+		$decoded = self::decode( $entry );
+		if ( null === $decoded || self::masked( $decoded['packed'], $decoded['prefix'] ) !== $decoded['packed'] ) {
 			return null;
 		}
 
-		$address = false === $slash ? $line : substr( $line, 0, $slash );
-		$prefix  = null;
-		if ( false !== $slash ) {
-			$digits = substr( $line, $slash + 1 );
-			if ( 1 !== preg_match( '/^(0|[1-9][0-9]{0,2})\z/', $digits ) ) {
-				return null;
-			}
-			$prefix = (int) $digits;
+		return bin2hex( $decoded['packed'] ) . '/' . $decoded['prefix'];
+	}
+
+	/**
+	 * Decodes one entry: the packed address, its prefix (the full length for a bare address) and the address length in bits. Null when
+	 * the entry is refused by the syntax or the range rules.
+	 *
+	 * @param string $entry One entry, without surrounding whitespace.
+	 * @return array{packed: string, prefix: int, bits: int}|null
+	 */
+	private static function decode( string $entry ): ?array {
+		if ( strlen( $entry ) > self::MAX_ENTRY_LENGTH ) {
+			return null;
 		}
 
+		// Only hex digits, colons, dots and at most one slash. This refuses whitespace, brackets, zone ids, ports, hostnames and the rest.
+		if ( 1 !== preg_match( '/^[0-9A-Fa-f:.\/]+\z/', $entry ) ) {
+			return null;
+		}
+
+		$slash = strpos( $entry, '/' );
+		if ( false !== $slash && false !== strpos( $entry, '/', $slash + 1 ) ) {
+			return null;
+		}
+
+		$address = false === $slash ? $entry : substr( $entry, 0, $slash );
 		if ( ! self::is_strict_address( $address ) ) {
 			return null;
 		}
@@ -297,23 +327,30 @@ final class IpAllowlist {
 		}
 
 		$bits = strlen( $packed ) * 8;
-		if ( null === $prefix ) {
-			$bare = inet_ntop( $packed );
-
-			return false === $bare ? null : $bare;
+		if ( false === $slash ) {
+			return array(
+				'packed' => $packed,
+				'prefix' => $bits,
+				'bits'   => $bits,
+			);
 		}
 
-		$min = 32 === $bits ? self::MIN_PREFIX_V4 : self::MIN_PREFIX_V6;
+		$digits = substr( $entry, $slash + 1 );
+		if ( 1 !== preg_match( '/^\d{1,3}\z/', $digits ) ) {
+			return null;
+		}
+
+		$prefix = (int) $digits;
+		$min    = 32 === $bits ? self::MIN_PREFIX_V4 : self::MIN_PREFIX_V6;
 		if ( $prefix < $min || $prefix > $bits ) {
 			return null;
 		}
 
-		$text = inet_ntop( self::masked( $packed, $prefix ) );
-		if ( false === $text ) {
-			return null;
-		}
-
-		return $prefix === $bits ? $text : $text . '/' . $prefix;
+		return array(
+			'packed' => $packed,
+			'prefix' => $prefix,
+			'bits'   => $bits,
+		);
 	}
 
 	/**

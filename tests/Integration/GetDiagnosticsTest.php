@@ -609,6 +609,20 @@ final class GetDiagnosticsTest extends TestCase {
 		$this->assertTrue( $this->report()['steadhand']['lockdown_active'], 'The hook must be back after the test.' );
 	}
 
+	public function test_lockdown_active_is_false_while_the_ip_allowlist_hook_is_removed(): void {
+		wp_set_current_user( $this->make_agent() );
+		$this->assertTrue( $this->report()['steadhand']['lockdown_active'], 'The lockdown must be active before the test removes a hook.' );
+
+		$detached = $this->detach_lockdown_hook( 'wp_authenticate_application_password_errors', 'refuse_agent_from_unlisted_address' );
+		try {
+			$this->assertFalse( $this->report()['steadhand']['lockdown_active'] );
+		} finally {
+			add_filter( $detached[0], $detached[1], $detached[2], $detached[3] );
+		}
+
+		$this->assertTrue( $this->report()['steadhand']['lockdown_active'], 'The hook must be back after the test.' );
+	}
+
 	public function test_ability_category_is_reported_missing_when_it_is_not_registered(): void {
 		wp_set_current_user( $this->make_agent() );
 		$this->report();

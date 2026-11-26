@@ -1,7 +1,7 @@
 <?php
 /**
  * Lockdown and the per-agent IP allowlist: an agent's Application Password is accepted only from a listed address (SPEC §4.1, D28).
- * The negative tests come first.
+ * A refused address gets exactly the response a wrong password gets. The negative tests come first.
  *
  * @package Steadhand
  */
@@ -15,10 +15,10 @@ use Steadhand\Lockdown;
 use WP_REST_Request;
 
 /**
- * Covers the IP rule of Lockdown (rule e and its second layer, e2) and the refusal's text, code and status.
+ * Covers the IP rule of Lockdown (rule e, its second layer e2) and the transport gate (Server::can_connect(), layer 3).
  *
  * The class runs in its own process and defines REST_REQUEST, because core accepts an application password only on a REST request,
- * and the second layer of Lockdown needs the Steadhand route. The constant cannot be undefined, so no other class may share the process.
+ * and the second layer needs the Steadhand route. The constant cannot be undefined, so no other class may share the process.
  *
  * @runClassInSeparateProcess
  * @preserveGlobalState disabled
@@ -31,11 +31,11 @@ final class LockdownIpAllowlistTest extends TestCase {
 	/** An address that is not on them. */
 	private const OTHER = '203.0.113.9';
 
-	/** The generic sign-in refusal, shared with refuse_agent_login(). */
-	private const LOGIN_CODE = 'steadhand_agent_login_blocked';
+	/** The MCP endpoint route. */
+	private const MCP = '/steadhand/mcp';
 
-	/** The generic REST refusal every blocked request gets. */
-	private const REST_CODE = 'steadhand_agent_endpoint_only';
+	/** A REST route that is not the Steadhand endpoint. */
+	private const USERS_ME = '/wp/v2/users/me';
 
 	/**
 	 * The $_SERVER keys this test may change, with their values before the test.
@@ -58,6 +58,13 @@ final class LockdownIpAllowlistTest extends TestCase {
 	 */
 	private array $refusals = array();
 
+	/**
+	 * The errors-hook callback this test detached, with its priority, so tearDown can put it back.
+	 *
+	 * @var array{0: int, 1: callable}|null
+	 */
+	private ?array $detached = null;
+
 	protected function setUp(): void {
 		parent::setUp();
 
@@ -65,16 +72,16 @@ final class LockdownIpAllowlistTest extends TestCase {
 			// phpcs:ignore WordPress.NamingConventions.PrefixAllGlobals.NonPrefixedConstantFound -- Core's own constant.
 			define( 'REST_REQUEST', true );
 		}
-		$GLOBALS['wp']->query_vars['rest_route'] = '/steadhand/mcp';
+		$GLOBALS['wp']->query_vars['rest_route'] = self::MCP;
 
-		foreach ( array( 'REMOTE_ADDR', 'HTTP_X_FORWARDED_FOR', 'HTTP_X_REAL_IP', 'HTTP_CF_CONNECTING_IP', 'HTTP_FORWARDED' ) as $key ) {
+		foreach ( array( 'REMOTE_ADDR', 'HTTP_X_FORWARDED_FOR', 'HTTP_X_REAL_IP', 'HTTP_CF_CONNECTING_IP', 'HTTP_FORWARDED', 'REQUEST_METHOD' ) as $key ) {
 			// phpcs:ignore WordPress.Security.ValidatedSanitizedInput.InputNotSanitized,WordPress.Security.ValidatedSanitizedInput.MissingUnslash -- Saved and restored, never printed.
 			$this->server_before[ $key ] = $_SERVER[ $key ] ?? null;
 		}
+		$_SERVER['REQUEST_METHOD'] = 'GET';
 
 		$this->on( 'application_password_is_api_request', '__return_true' );
 		$this->on( 'wp_is_application_passwords_available', '__return_true' );
-
 		$this->on(
 			'steadhand_agent_ip_refused',
 			function ( ...$args ): void {
@@ -83,7 +90,7 @@ final class LockdownIpAllowlistTest extends TestCase {
 			10
 		);
 
-		Lockdown::forget_refused_request();
+		$this->reset_report_guard();
 	}
 
 	protected function tearDown(): void {
@@ -91,6 +98,11 @@ final class LockdownIpAllowlistTest extends TestCase {
 			remove_filter( $added[0], $added[1], $added[2] );
 		}
 		$this->added = array();
+
+		if ( null !== $this->detached ) {
+			add_action( 'wp_authenticate_application_password_errors', $this->detached[1], $this->detached[0], 2 );
+			$this->detached = null;
+		}
 
 		foreach ( $this->server_before as $key => $value ) {
 			if ( null === $value ) {
@@ -100,9 +112,9 @@ final class LockdownIpAllowlistTest extends TestCase {
 			}
 		}
 
-		unset( $GLOBALS['wp']->query_vars['rest_route'] );
+		unset( $GLOBALS['wp']->query_vars['rest_route'], $GLOBALS['HTTP_RAW_POST_DATA'] );
 		wp_set_current_user( 0 );
-		Lockdown::forget_refused_request();
+		$this->reset_report_guard();
 
 		parent::tearDown();
 	}
@@ -118,6 +130,34 @@ final class LockdownIpAllowlistTest extends TestCase {
 		$accepted = 'steadhand_client_ip' === $hook ? 2 : 10;
 		add_filter( $hook, $callback, $priority, $accepted );
 		$this->added[] = array( $hook, $callback, $priority );
+	}
+
+	/**
+	 * Clears Lockdown's once-per-request guard. Each request resets it when Plugin::boot() runs; the tests run several requests in one process.
+	 */
+	private function reset_report_guard(): void {
+		$property = new \ReflectionProperty( Lockdown::class, 'ip_refusal_reported' );
+		$property->setValue( null, false );
+	}
+
+	/**
+	 * Removes Lockdown's errors-hook callback, as a plugin that removed it would. tearDown puts it back.
+	 */
+	private function detach_errors_hook(): void {
+		global $wp_filter;
+
+		$hook = $wp_filter['wp_authenticate_application_password_errors'] ?? null;
+		foreach ( $hook->callbacks ?? array() as $priority => $callbacks ) {
+			foreach ( $callbacks as $callback ) {
+				if ( is_array( $callback['function'] ) && $callback['function'][0] instanceof Lockdown ) {
+					remove_action( 'wp_authenticate_application_password_errors', $callback['function'], $priority );
+					$this->detached = array( $priority, $callback['function'] );
+					return;
+				}
+			}
+		}
+
+		$this->fail( 'The errors-hook callback of Lockdown was not registered.' );
 	}
 
 	/**
@@ -165,6 +205,80 @@ final class LockdownIpAllowlistTest extends TestCase {
 		);
 	}
 
+	/**
+	 * Serves one request through WP_REST_Server::serve_request(), as a real request is served, with the application-password credentials
+	 * the request carries. Returns what the server would send: the status, the data and the headers.
+	 *
+	 * @param string      $method   HTTP method.
+	 * @param string      $route    REST route.
+	 * @param string      $login    The login the request carries.
+	 * @param string      $password The password the request carries.
+	 * @param string|null $body     The request body, or null for none.
+	 * @return array{status: int, data: mixed, headers: array<string, string>}
+	 */
+	private function serve( string $method, string $route, ?string $login, ?string $password, ?string $body = null ): array {
+		$_SERVER['REQUEST_METHOD'] = $method;
+		if ( null !== $login ) {
+			$_SERVER['PHP_AUTH_USER'] = $login;
+			$_SERVER['PHP_AUTH_PW']   = (string) $password;
+		}
+		// Core reads the request body from this global when it is set (rest_api.php, get_raw_data()); a test has no real body.
+		// phpcs:ignore WordPress.WP.GlobalVariablesOverride.Prohibited -- Core's own input for the request body, set for this request only.
+		$GLOBALS['HTTP_RAW_POST_DATA']           = (string) $body;
+		$GLOBALS['wp']->query_vars['rest_route'] = $route;
+
+		$sent   = null;
+		$served = static function ( $done, $result ) use ( &$sent ) {
+			$sent = $result;
+			return true;
+		};
+		add_filter( 'rest_pre_serve_request', $served, PHP_INT_MAX, 2 );
+		// No user is cached, so the credentials are evaluated inside the request, as on a real request. A cached user would skip that.
+		// phpcs:ignore WordPress.WP.GlobalVariablesOverride.Prohibited -- Clears core's cached current user for this request only.
+		$GLOBALS['current_user'] = null;
+
+		try {
+			rest_get_server()->serve_request( $route );
+		} finally {
+			remove_filter( 'rest_pre_serve_request', $served, PHP_INT_MAX );
+			// phpcs:ignore WordPress.WP.GlobalVariablesOverride.Prohibited -- Clears the request's user again, as core's own tests do.
+			$GLOBALS['current_user'] = null;
+			unset( $_SERVER['PHP_AUTH_USER'], $_SERVER['PHP_AUTH_PW'], $GLOBALS['HTTP_RAW_POST_DATA'] );
+			$_SERVER['REQUEST_METHOD'] = 'GET';
+		}
+
+		$this->assertInstanceOf( \WP_REST_Response::class, $sent, 'The server must answer with a response object.' );
+
+		return array(
+			'status'  => $sent->get_status(),
+			'data'    => $sent->get_data(),
+			'headers' => $sent->get_headers(),
+		);
+	}
+
+	/**
+	 * A JSON-RPC initialize message, sent to the MCP endpoint.
+	 *
+	 * @return string
+	 */
+	private function initialize_body(): string {
+		return (string) wp_json_encode(
+			array(
+				'jsonrpc' => '2.0',
+				'id'      => 1,
+				'method'  => 'initialize',
+				'params'  => array(
+					'protocolVersion' => '2025-11-25',
+					'capabilities'    => new \stdClass(),
+					'clientInfo'      => array(
+						'name'    => 'steadhand-tests',
+						'version' => '1',
+					),
+				),
+			)
+		);
+	}
+
 	public function test_a_listed_address_authenticates_the_agent(): void {
 		list( $id, $password ) = $this->agent();
 		$this->from( self::LISTED );
@@ -193,17 +307,70 @@ final class LockdownIpAllowlistTest extends TestCase {
 		$this->assertSame( array( array( $id, self::OTHER ) ), $this->refusals, 'The action fires once, with the agent and the address seen.' );
 	}
 
-	public function test_the_sign_in_refusal_is_the_generic_one_and_does_not_name_the_rule(): void {
+	/**
+	 * The refusal is core's own wrong-password error, with the same code, text and data. A wrong password gives it too.
+	 */
+	public function test_a_refused_address_gives_core_s_wrong_password_error_with_the_same_code_text_and_data(): void {
 		list( $id, $password ) = $this->agent();
+		$user                  = new \WP_User( $id );
+
 		$this->from( self::OTHER );
-		$user = new \WP_User( $id );
+		$refused = wp_authenticate_application_password( null, $user->user_login, $password );
+		$wrong   = wp_authenticate_application_password( null, $user->user_login, 'not-the-password' );
 
-		$result = wp_authenticate_application_password( null, $user->user_login, $password );
+		$this->assertInstanceOf( \WP_Error::class, $refused );
+		$this->assertSame( 'incorrect_password', $refused->get_error_code() );
+		$this->assertSame( $wrong->get_error_code(), $refused->get_error_code() );
+		$this->assertSame( $wrong->get_error_message(), $refused->get_error_message() );
+		$this->assertSame( $wrong->get_error_data(), $refused->get_error_data() );
+		$this->assertStringNotContainsString( self::OTHER, $refused->get_error_message() );
+	}
 
-		$this->assertInstanceOf( \WP_Error::class, $result );
-		$this->assertSame( self::LOGIN_CODE, $result->get_error_code(), 'The refusal must be the same code as the password sign-in refusal.' );
-		$this->assertSame( 'This account cannot sign in here.', $result->get_error_message() );
-		$this->assertStringNotContainsString( self::OTHER, $result->get_error_message() );
+	/**
+	 * Over HTTP, a refused address and a wrong password are the same response: status, code, message, data and headers. Checked on the
+	 * MCP endpoint and on a route that is not the endpoint.
+	 */
+	public function test_over_http_a_refused_address_and_a_wrong_password_send_the_same_response_on_every_route(): void {
+		list( $id, $password ) = $this->agent();
+		$login                 = ( new \WP_User( $id ) )->user_login;
+		$this->from( self::OTHER );
+
+		$cases = array(
+			array( 'POST', self::MCP, $this->initialize_body() ),
+			array( 'GET', self::USERS_ME, null ),
+		);
+		foreach ( $cases as list( $method, $route, $body ) ) {
+			$wrong   = $this->serve( $method, $route, $login, 'not-the-password', $body );
+			$refused = $this->serve( $method, $route, $login, $password, $body );
+
+			$this->assertSame( 401, $wrong['status'], "$route: a wrong password is answered with 401." );
+			$this->assertSame( $wrong, $refused, "$route: a refused address must look exactly like a wrong password." );
+		}
+	}
+
+	/**
+	 * On a route that is not the Steadhand endpoint, a listed agent's password does nothing: the request is answered as an anonymous one.
+	 */
+	public function test_a_listed_agent_on_another_route_is_answered_as_an_anonymous_visitor(): void {
+		list( $id, $password ) = $this->agent();
+		$login                 = ( new \WP_User( $id ) )->user_login;
+		$this->from( self::LISTED );
+
+		$anonymous     = $this->serve( 'GET', self::USERS_ME, null, null );
+		$with_password = $this->serve( 'GET', self::USERS_ME, $login, $password );
+
+		$this->assertSame( $anonymous, $with_password );
+	}
+
+	public function test_over_http_a_listed_agent_reaches_the_steadhand_endpoint(): void {
+		list( $id, $password ) = $this->agent();
+		$login                 = ( new \WP_User( $id ) )->user_login;
+		$this->from( self::LISTED );
+
+		$response = $this->serve( 'POST', self::MCP, $login, $password, $this->initialize_body() );
+
+		$this->assertSame( 200, $response['status'] );
+		$this->assertSame( array(), $this->refusals );
 	}
 
 	public function test_a_request_without_a_remote_addr_is_refused(): void {
@@ -229,7 +396,7 @@ final class LockdownIpAllowlistTest extends TestCase {
 
 		foreach ( array( 'HTTP_X_FORWARDED_FOR', 'HTTP_X_REAL_IP', 'HTTP_CF_CONNECTING_IP', 'HTTP_FORWARDED' ) as $header ) {
 			$_SERVER[ $header ] = self::LISTED;
-			Lockdown::forget_refused_request();
+			$this->reset_report_guard();
 
 			$this->assertEmpty( $this->authenticate_with_app_password( new \WP_User( $id ), $password ), "$header must not be trusted." );
 			unset( $_SERVER[ $header ] );
@@ -270,9 +437,8 @@ final class LockdownIpAllowlistTest extends TestCase {
 		);
 
 		foreach ( $results as $name => $callback ) {
-			$this->added[] = array( 'steadhand_client_ip', $callback, PHP_INT_MAX );
+			$this->reset_report_guard();
 			add_filter( 'steadhand_client_ip', $callback, PHP_INT_MAX, 2 );
-			Lockdown::forget_refused_request();
 
 			$this->assertEmpty( $this->authenticate_with_app_password( new \WP_User( $id ), $password ), "A filter that returns $name must refuse." );
 			remove_filter( 'steadhand_client_ip', $callback, PHP_INT_MAX );
@@ -358,43 +524,9 @@ final class LockdownIpAllowlistTest extends TestCase {
 		$this->assertNotContains( self::LISTED, $this->refusals[0], 'The list is never passed.' );
 	}
 
-	public function test_a_refused_agent_gets_the_same_refusal_on_the_steadhand_endpoint_as_on_any_other_route(): void {
-		list( $id, $password ) = $this->agent();
-		$this->from( self::OTHER );
-		$this->authenticate_with_app_password( new \WP_User( $id ), $password );
-
-		$mcp  = rest_do_request( new WP_REST_Request( 'POST', '/steadhand/mcp' ) );
-		$rest = rest_do_request( new WP_REST_Request( 'GET', '/wp/v2/users/me' ) );
-
-		$this->assertSame( 403, $mcp->get_status() );
-		$this->assertSame( 403, $rest->get_status() );
-		$this->assertSame( $rest->get_data(), $mcp->get_data(), 'The endpoint must answer the same body as any other refused route.' );
-		$this->assertSame( self::REST_CODE, ( (array) $mcp->get_data() )['code'] ?? null );
-	}
-
-	public function test_a_listed_agent_still_reaches_the_steadhand_endpoint(): void {
-		list( $id, $password ) = $this->agent();
-		$this->from( self::LISTED );
-		wp_set_current_user( $this->authenticate_with_app_password( new \WP_User( $id ), $password ) );
-
-		$response = $this->mcp(
-			'initialize',
-			array(
-				'protocolVersion' => '2025-11-25',
-				'capabilities'    => new \stdClass(),
-				'clientInfo'      => array(
-					'name'    => 'steadhand-tests',
-					'version' => '1',
-				),
-			)
-		);
-
-		$this->assertSame( 200, $response->get_status() );
-	}
-
 	/**
-	 * Guards the second layer (e2): an agent identity that came from another path is checked against the address again on a
-	 * Steadhand REST request. The first check (the password) passes here and the second refuses, so only the second layer can refuse.
+	 * The second layer (e2): an identity that came from another path is checked against the address again. The password check sees a
+	 * listed address and the second check an unlisted one, so only the second layer can refuse.
 	 */
 	public function test_the_second_layer_refuses_an_identity_that_came_from_another_path(): void {
 		list( $id, $password ) = $this->agent();
@@ -414,5 +546,94 @@ final class LockdownIpAllowlistTest extends TestCase {
 		$this->assertEmpty( $this->authenticate_with_app_password( new \WP_User( $id ), $password ) );
 		$this->assertSame( 2, $calls, 'The password check and the second layer each look at the address.' );
 		$this->assertSame( array( array( $id, self::OTHER ) ), $this->refusals );
+	}
+
+	/**
+	 * With the errors hook removed, the second layer alone refuses a listed-address-less password, and over HTTP the answer is still core's
+	 * wrong-password response.
+	 */
+	public function test_with_the_errors_hook_removed_the_second_layer_still_sends_the_wrong_password_response(): void {
+		list( $id, $password ) = $this->agent();
+		$login                 = ( new \WP_User( $id ) )->user_login;
+		$this->from( self::OTHER );
+		$wrong = $this->serve( 'POST', self::MCP, $login, 'not-the-password', $this->initialize_body() );
+
+		$this->detach_errors_hook();
+		$refused = $this->serve( 'POST', self::MCP, $login, $password, $this->initialize_body() );
+
+		$this->assertSame( $wrong, $refused );
+		$this->assertSame( array( array( $id, self::OTHER ) ), $this->refusals );
+	}
+
+	/**
+	 * Layer 3: an identity set by other code (wp_set_current_user()) is refused at the Steadhand endpoint from an unlisted address, with the
+	 * refusal Server::can_connect() already gives. The same response as an agent that is disabled.
+	 */
+	public function test_layer_three_refuses_an_identity_set_by_other_code_from_an_unlisted_address(): void {
+		list( $id )          = $this->agent();
+		list( $disabled_id ) = $this->agent();
+		get_userdata( $disabled_id )->remove_cap( \Steadhand\Capabilities::CONNECT );
+		$this->from( self::OTHER );
+
+		wp_set_current_user( $id );
+		$refused = $this->mcp( 'initialize' );
+		wp_set_current_user( $disabled_id );
+		$disabled = $this->mcp( 'initialize' );
+
+		$this->assertSame( $disabled->get_status(), $refused->get_status() );
+		$this->assertSame( $disabled->get_data(), $refused->get_data(), 'The refusal is the one can_connect() already gives.' );
+		$this->assertSame( array( array( $id, self::OTHER ) ), $this->refusals );
+	}
+
+	public function test_layer_three_refuses_even_with_the_errors_hook_removed(): void {
+		list( $id ) = $this->agent();
+		$this->from( self::OTHER );
+		$this->detach_errors_hook();
+
+		wp_set_current_user( $id );
+		$response = $this->mcp( 'initialize' );
+
+		$this->assertNotSame( 200, $response->get_status() );
+		$this->assertSame( array( array( $id, self::OTHER ) ), $this->refusals );
+	}
+
+	public function test_layer_three_allows_a_listed_address_and_an_agent_without_a_list(): void {
+		list( $listed ) = $this->agent();
+		list( $open )   = $this->agent( null );
+		$this->from( self::LISTED );
+
+		wp_set_current_user( $listed );
+		$this->assertSame( 200, $this->mcp( 'initialize' )->get_status() );
+
+		$this->from( self::OTHER );
+		wp_set_current_user( $open );
+		$this->assertSame( 200, $this->mcp( 'initialize' )->get_status(), 'An agent with no list is unaffected.' );
+		$this->assertSame( array(), $this->refusals );
+	}
+
+	public function test_layer_three_reports_at_most_once_per_request(): void {
+		list( $id ) = $this->agent();
+		$this->from( self::OTHER );
+
+		wp_set_current_user( $id );
+		$this->mcp( 'initialize' );
+		$this->mcp( 'initialize' );
+
+		$this->assertCount( 1, $this->refusals );
+	}
+
+	public function test_a_throwing_listener_does_not_change_the_layer_three_refusal(): void {
+		list( $id ) = $this->agent();
+		$this->from( self::OTHER );
+		$this->on(
+			'steadhand_agent_ip_refused',
+			static function (): void {
+				throw new \RuntimeException( 'The alert could not be sent.' );
+			},
+			1
+		);
+
+		wp_set_current_user( $id );
+		$this->assertNotSame( 200, $this->mcp( 'initialize' )->get_status() );
 	}
 }

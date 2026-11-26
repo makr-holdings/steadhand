@@ -600,4 +600,166 @@ final class AgentsIpAllowlistTest extends TestCase {
 			$this->assertStringNotContainsString( 'allowed_ips', $encoded, $tool );
 		}
 	}
+
+	public function test_a_refused_first_write_of_a_list_never_leaves_the_agent_without_a_list(): void {
+		$agent = $this->agent();
+		$this->as_administrator();
+		$this->on(
+			'update_user_metadata',
+			static fn( $check, $id, $key, $value ) => is_array( $value ) ? false : $check,
+			10
+		);
+
+		$result = $this->handler->set_ips( $this->nonce( AgentsHandler::ACTION_IPS, $agent ), $agent, '198.51.100.1' );
+
+		$this->assertSame( 'ips_failed', $result['code'] );
+		$this->assertNull( IpAllowlist::for_user( $agent ), 'The save failed, so the agent must be refused, not read as having no list.' );
+	}
+
+	public function test_a_refused_update_keeps_the_previous_list_in_place(): void {
+		$agent = $this->agent( array( '203.0.113.0/24' ) );
+		$this->as_administrator();
+		$this->on( 'update_user_metadata', static fn() => false, 10 );
+
+		$result = $this->handler->set_ips( $this->nonce( AgentsHandler::ACTION_IPS, $agent ), $agent, '198.51.100.1' );
+
+		$this->assertSame( 'ips_failed', $result['code'] );
+		$this->assertSame( array( '203.0.113.0/24' ), IpAllowlist::for_user( $agent ) );
+	}
+
+	public function test_a_throwing_listener_on_the_write_does_not_leave_the_agent_open(): void {
+		$agent = $this->agent();
+		$this->as_administrator();
+		$throw = static function (): void {
+			throw new \RuntimeException( 'The audit listener broke.' );
+		};
+		$this->on( 'added_user_meta', $throw, 10 );
+		$this->on( 'updated_user_meta', $throw, 10 );
+
+		$this->handler->set_ips( $this->nonce( AgentsHandler::ACTION_IPS, $agent ), $agent, '198.51.100.1' );
+
+		$this->assertSame( array( '198.51.100.1' ), IpAllowlist::for_user( $agent ), 'The write landed, so the agent holds the new list.' );
+	}
+
+	public function test_a_refused_removal_keeps_the_list_and_is_reported_as_failed(): void {
+		$agent = $this->agent( array( '203.0.113.0/24' ) );
+		$this->as_administrator();
+		$this->on( 'delete_user_metadata', static fn() => false, 10 );
+
+		$result = $this->handler->set_ips( $this->nonce( AgentsHandler::ACTION_IPS, $agent ), $agent, '' );
+
+		$this->assertSame( 'ips_failed', $result['code'] );
+		$this->assertSame( array( '203.0.113.0/24' ), IpAllowlist::for_user( $agent ) );
+	}
+
+	public function test_a_save_over_two_stored_rows_is_never_read_as_open(): void {
+		$agent = $this->agent();
+		$this->as_administrator();
+		add_user_meta( $agent, self::META, array( '203.0.113.0/24' ) );
+		add_user_meta( $agent, self::META, array( '203.0.113.0/24' ) );
+
+		$result = $this->handler->set_ips( $this->nonce( AgentsHandler::ACTION_IPS, $agent ), $agent, '198.51.100.1' );
+
+		$this->assertNotSame( array(), IpAllowlist::for_user( $agent ), 'Two rows must never read as no list.' );
+		$this->assertSame( 'ips_failed', $result['code'] );
+		$this->assertNull( IpAllowlist::for_user( $agent ), 'Two rows are unreadable, so the agent is refused.' );
+	}
+
+	public function test_empty_text_does_not_remove_an_unreadable_list_without_the_clear_box(): void {
+		$agent = $this->agent();
+		update_user_meta( $agent, self::META, 'junk' );
+		$this->as_administrator();
+
+		$result = $this->handler->set_ips( $this->nonce( AgentsHandler::ACTION_IPS, $agent ), $agent, '' );
+
+		$this->assertSame( 'ips_invalid', $result['code'] );
+		$this->assertNull( IpAllowlist::for_user( $agent ), 'An unreadable list stays unreadable, so the agent stays refused.' );
+	}
+
+	public function test_the_clear_box_removes_an_unreadable_list(): void {
+		$agent = $this->agent();
+		update_user_meta( $agent, self::META, 'junk' );
+		$this->as_administrator();
+
+		$result = $this->handler->set_ips( $this->nonce( AgentsHandler::ACTION_IPS, $agent ), $agent, '', true );
+
+		$this->assertSame( 'ips_saved', $result['code'] );
+		$this->assertSame( array(), IpAllowlist::for_user( $agent ) );
+	}
+
+	public function test_empty_text_still_clears_a_healthy_list_without_the_box(): void {
+		$agent = $this->agent( array( '203.0.113.0/24' ) );
+		$this->as_administrator();
+
+		$result = $this->handler->set_ips( $this->nonce( AgentsHandler::ACTION_IPS, $agent ), $agent, '' );
+
+		$this->assertSame( 'ips_saved', $result['code'] );
+		$this->assertSame( array(), IpAllowlist::for_user( $agent ) );
+	}
+
+	public function test_the_form_offers_the_clear_box_only_for_an_unreadable_list(): void {
+		$agent = $this->agent();
+		update_user_meta( $agent, self::META, 'junk' );
+		$this->as_administrator();
+		$_GET = array(
+			'page'  => AgentsScreen::SLUG,
+			'agent' => (string) $agent,
+		);
+		$this->assertStringContainsString( 'name="ips_clear"', $this->render() );
+
+		update_user_meta( $agent, self::META, array( '203.0.113.0/24' ) );
+		$this->assertStringNotContainsString( 'name="ips_clear"', $this->render() );
+	}
+
+	public function test_a_viewer_who_cannot_edit_sees_an_unreadable_list_as_unreadable_not_as_any_address(): void {
+		$agent = $this->agent();
+		update_user_meta( $agent, self::META, 'junk' );
+		add_role(
+			'steadhand_test_viewer',
+			'Viewer',
+			array(
+				'read'           => true,
+				'manage_options' => true,
+				'list_users'     => true,
+			)
+		);
+		try {
+			wp_set_current_user( self::factory()->user->create( array( 'role' => 'steadhand_test_viewer' ) ) );
+			$_GET = array(
+				'page'  => AgentsScreen::SLUG,
+				'agent' => (string) $agent,
+			);
+
+			$html = $this->render();
+		} finally {
+			remove_role( 'steadhand_test_viewer' );
+		}
+
+		$this->assertStringContainsString( 'cannot be read', $html );
+		$this->assertStringNotContainsString( 'Any address', $html );
+		$this->assertStringNotContainsString( 'name="ips"', $html );
+	}
+
+	public function test_the_own_address_is_looked_up_with_user_id_zero_not_the_agent(): void {
+		$agent = $this->agent( array( '203.0.113.0/24' ) );
+		$seen  = array();
+		$this->on(
+			'steadhand_client_ip',
+			static function ( $ip, $user_id ) use ( &$seen ) {
+				$seen[] = $user_id;
+				return $ip;
+			},
+			PHP_INT_MAX
+		);
+		$this->as_administrator();
+		$_GET = array(
+			'page'  => AgentsScreen::SLUG,
+			'agent' => (string) $agent,
+		);
+
+		$this->render();
+
+		$this->assertNotEmpty( $seen );
+		$this->assertSame( array_fill( 0, count( $seen ), 0 ), $seen, 'The screen shows the administrator\'s own address, so the filter gets 0.' );
+	}
 }

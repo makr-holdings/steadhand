@@ -163,7 +163,8 @@ final class AgentsScreen {
 		} elseif ( AgentsHandler::ACTION_IPS === $action ) {
 			// The raw value, as sent: the handler unslashes it once, so a backslash typed by the administrator is not lost.
 			$ips    = isset( $_POST['ips'] ) && is_string( $_POST['ips'] ) ? $_POST['ips'] : ''; // phpcs:ignore WordPress.Security.NonceVerification.Missing,WordPress.Security.ValidatedSanitizedInput.InputNotSanitized,WordPress.Security.ValidatedSanitizedInput.MissingUnslash -- The handler checks the nonce first, then reads the list with IpAllowlist::parse().
-			$result = $this->handler->set_ips( $nonce, $id, $ips );
+			$clear  = isset( $post['ips_clear'] ) && '1' === $post['ips_clear'];
+			$result = $this->handler->set_ips( $nonce, $id, $ips, $clear );
 		} else {
 			wp_die( esc_html__( 'That action is not valid.', 'steadhand' ), esc_html__( 'Not allowed', 'steadhand' ), array( 'response' => 400 ) );
 		}
@@ -563,7 +564,8 @@ final class AgentsScreen {
 			$this->notice( 'warning', __( 'The saved list of addresses could not be read, so this agent is refused from every address until the list is saved again.', 'steadhand' ) );
 		}
 
-		$own = IpAllowlist::client_ip( $agent->ID );
+		// The administrator's own request, so the filter gets user ID 0 (docs/HOOKS.md), not the agent's ID.
+		$own = IpAllowlist::client_ip( 0 );
 		if ( null === $own ) {
 			printf( '<p>%s</p>', esc_html__( 'The address this server sees for your own request could not be determined.', 'steadhand' ) );
 		} else {
@@ -575,7 +577,13 @@ final class AgentsScreen {
 		);
 
 		if ( ! $can_edit ) {
-			$shown = null === $stored || array() === $stored ? __( 'Any address', 'steadhand' ) : implode( ', ', $stored );
+			if ( null === $stored ) {
+				$shown = __( 'The list cannot be read, so the agent is refused from every address.', 'steadhand' );
+			} elseif ( array() === $stored ) {
+				$shown = __( 'Any address', 'steadhand' );
+			} else {
+				$shown = implode( ', ', $stored );
+			}
 			printf( '<p>%s</p>', esc_html( $shown ) );
 			return;
 		}
@@ -586,6 +594,13 @@ final class AgentsScreen {
 			esc_html__( 'Allowed IP addresses, one per line', 'steadhand' ),
 			esc_textarea( null === $stored ? '' : implode( "\n", $stored ) )
 		);
+		if ( null === $stored ) {
+			// An unreadable list is kept when the box is empty. Only this box removes it.
+			printf(
+				'<p><label><input type="checkbox" name="ips_clear" value="1"> %s</label></p>',
+				esc_html__( 'Remove the list and allow any address', 'steadhand' )
+			);
+		}
 		submit_button( __( 'Save addresses', 'steadhand' ), 'secondary', 'submit', false );
 		echo '</form>';
 	}
@@ -677,7 +692,7 @@ final class AgentsScreen {
 			'delete_has_content_revoked'     => array( 'error', __( 'The agent now has posts or links attributed to it, so it was not deleted. Its connections were already revoked, and Steadhand changed nothing else. Steadhand never deletes content.', 'steadhand' ) ),
 			'agent_disabled_no_password'     => array( 'error', __( 'This agent is disabled. Enable it before adding a connection.', 'steadhand' ) ),
 			'ips_saved'                      => array( 'success', __( 'The allowed IP addresses were saved.', 'steadhand' ) ),
-			'ips_invalid'                    => array( 'error', __( 'The allowed IP addresses were not saved. Each line must be one IPv4 or IPv6 address, or a range such as 203.0.113.0/24 or 2001:db8::/48, with at most 20 entries in all. Nothing was changed.', 'steadhand' ) ),
+			'ips_invalid'                    => array( 'error', __( 'The allowed IP addresses were not saved. Each line must be one IPv4 or IPv6 address, or a range such as 203.0.113.0/24 or 2001:db8::/48, with at most 20 entries in all. If the saved list cannot be read, an empty box does not remove it: tick the box to remove the list and allow any address. Nothing was changed.', 'steadhand' ) ),
 			'ips_failed'                     => array( 'error', __( 'The allowed IP addresses could not be confirmed as saved. Check the list on this page before the agent is used.', 'steadhand' ) ),
 		);
 	}
