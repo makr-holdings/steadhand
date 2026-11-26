@@ -12,6 +12,7 @@ namespace Steadhand\Admin;
 
 use Steadhand\Agents;
 use Steadhand\Capabilities;
+use Steadhand\IpAllowlist;
 use Steadhand\Roles;
 
 defined( 'ABSPATH' ) || exit;
@@ -159,6 +160,11 @@ final class AgentsScreen {
 			// Only the value '1' of the checkbox confirms the delete. Anything else is not confirmed.
 			$confirmed = isset( $post['confirm_delete'] ) && '1' === $post['confirm_delete'];
 			$result    = $this->handler->delete( $nonce, $id, $confirmed );
+		} elseif ( AgentsHandler::ACTION_IPS === $action ) {
+			// The raw value, as sent: the handler unslashes it once, so a backslash typed by the administrator is not lost.
+			$ips    = isset( $_POST['ips'] ) && is_string( $_POST['ips'] ) ? $_POST['ips'] : ''; // phpcs:ignore WordPress.Security.NonceVerification.Missing,WordPress.Security.ValidatedSanitizedInput.InputNotSanitized,WordPress.Security.ValidatedSanitizedInput.MissingUnslash -- The handler checks the nonce first, then reads the list with IpAllowlist::parse().
+			$clear  = isset( $post['ips_clear'] ) && '1' === $post['ips_clear'];
+			$result = $this->handler->set_ips( $nonce, $id, $ips, $clear );
 		} else {
 			wp_die( esc_html__( 'That action is not valid.', 'steadhand' ), esc_html__( 'Not allowed', 'steadhand' ), array( 'response' => 400 ) );
 		}
@@ -537,6 +543,69 @@ final class AgentsScreen {
 	}
 
 	/**
+	 * The allowed IP addresses of an agent (SPEC §4.1, D28): the list, the form that saves it, and the address this server sees for the
+	 * viewer's own request. An empty box means any address. A corrupt stored list is shown as a warning, and the agent is refused from
+	 * every address until the list is saved again.
+	 *
+	 * @param \WP_User $agent    The dedicated agent.
+	 * @param bool     $can_edit Whether the viewer may edit the agent.
+	 * @return void
+	 */
+	private function allowed_ips_section( \WP_User $agent, bool $can_edit ): void {
+		$stored = IpAllowlist::for_user( $agent->ID );
+
+		echo '<h3>' . esc_html__( 'Allowed IP addresses', 'steadhand' ) . '</h3>';
+		printf(
+			'<p>%s</p>',
+			esc_html__( 'When this list has entries, the agent\'s Application Passwords are accepted only from a client address on the list. An empty box means any address.', 'steadhand' )
+		);
+
+		if ( null === $stored ) {
+			$this->notice( 'warning', __( 'The saved list of addresses could not be read, so this agent is refused from every address until the list is saved again.', 'steadhand' ) );
+		}
+
+		// The administrator's own request, so the filter gets user ID 0 (docs/HOOKS.md), not the agent's ID.
+		$own = IpAllowlist::client_ip( 0 );
+		if ( null === $own ) {
+			printf( '<p>%s</p>', esc_html__( 'The address this server sees for your own request could not be determined.', 'steadhand' ) );
+		} else {
+			printf( '<p>%s <code>%s</code></p>', esc_html__( 'This server sees your own request coming from:', 'steadhand' ), esc_html( $own ) );
+		}
+		printf(
+			'<p class="description">%s</p>',
+			esc_html__( 'If every visitor shows the same address, the site is behind a reverse proxy. The list would then match the proxy, not the agent. See the steadhand_client_ip filter in docs/HOOKS.md.', 'steadhand' )
+		);
+
+		if ( ! $can_edit ) {
+			if ( null === $stored ) {
+				$shown = __( 'The list cannot be read, so the agent is refused from every address.', 'steadhand' );
+			} elseif ( array() === $stored ) {
+				$shown = __( 'Any address', 'steadhand' );
+			} else {
+				$shown = implode( ', ', $stored );
+			}
+			printf( '<p>%s</p>', esc_html( $shown ) );
+			return;
+		}
+
+		$this->open_form( AgentsHandler::ACTION_IPS, AgentsHandler::nonce_action( AgentsHandler::ACTION_IPS, $agent->ID ), $agent->ID );
+		printf(
+			'<p><label for="steadhand-ips">%s</label></p><p><textarea id="steadhand-ips" name="ips" rows="5" cols="40" class="large-text code">%s</textarea></p>',
+			esc_html__( 'Allowed IP addresses, one per line', 'steadhand' ),
+			esc_textarea( null === $stored ? '' : implode( "\n", $stored ) )
+		);
+		if ( null === $stored ) {
+			// An unreadable list is kept when the box is empty. Only this box removes it.
+			printf(
+				'<p><label><input type="checkbox" name="ips_clear" value="1"> %s</label></p>',
+				esc_html__( 'Remove the list and allow any address', 'steadhand' )
+			);
+		}
+		submit_button( __( 'Save addresses', 'steadhand' ), 'secondary', 'submit', false );
+		echo '</form>';
+	}
+
+	/**
 	 * Shows the notice of this request's action, or of the code in the query string. Only a code from the fixed list is printed.
 	 * A code in the query string must be one a redirect can carry (AgentsHandler::REDIRECT_CODES). The one-time panel's codes, such as
 	 * created and password_added, are shown only from this request's own outcome.
@@ -622,6 +691,9 @@ final class AgentsScreen {
 			'delete_failed'                  => array( 'error', __( 'The agent could not be deleted. Its Application Passwords were revoked, so it cannot connect.', 'steadhand' ) ),
 			'delete_has_content_revoked'     => array( 'error', __( 'The agent now has posts or links attributed to it, so it was not deleted. Its connections were already revoked, and Steadhand changed nothing else. Steadhand never deletes content.', 'steadhand' ) ),
 			'agent_disabled_no_password'     => array( 'error', __( 'This agent is disabled. Enable it before adding a connection.', 'steadhand' ) ),
+			'ips_saved'                      => array( 'success', __( 'The allowed IP addresses were saved.', 'steadhand' ) ),
+			'ips_invalid'                    => array( 'error', __( 'The allowed IP addresses were not saved. Each line must be one IPv4 or IPv6 address, or a range such as 203.0.113.0/24 or 2001:db8::/48, with at most 20 entries in all. If the saved list cannot be read, an empty box does not remove it: tick the box to remove the list and allow any address. Nothing was changed.', 'steadhand' ) ),
+			'ips_failed'                     => array( 'error', __( 'The allowed IP addresses could not be confirmed as saved. Check the list on this page before the agent is used. If the page says the list cannot be read, remove it with the checkbox first, then save the new list.', 'steadhand' ) ),
 		);
 	}
 
@@ -805,6 +877,7 @@ final class AgentsScreen {
 
 		$this->capabilities_section( $agent, $can_edit );
 		$this->connections_section( $agent, $can_edit, $available );
+		$this->allowed_ips_section( $agent, $can_edit );
 
 		printf(
 			'<p><a href="%s">%s</a></p>',

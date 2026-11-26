@@ -4,9 +4,9 @@
 
 ## Current extension points
 
-Steadhand defines five filters, documented in [Filters](#filters), and twelve actions, documented in [Actions](#actions). The [Guardrail API](#guardrail-api) section documents the public classes that third-party guardrail rules use.
+Steadhand defines six filters, documented in [Filters](#filters), and fourteen actions, documented in [Actions](#actions). The [Guardrail API](#guardrail-api) section documents the public classes that third-party guardrail rules use.
 
-To check, run this from the repository root. It lists the call sites of Steadhand's own hooks: the filters `steadhand_allowed_options`, `steadhand_allowed_post_types`, `steadhand_log_read_calls`, `steadhand_log_retention_days` and `steadhand_rate_limit_per_minute`, and the actions `steadhand_admin_agent_row`, `steadhand_admin_guardrails`, `steadhand_admin_log_entry`, `steadhand_admin_log_toolbar`, `steadhand_agent_capabilities_changed`, `steadhand_agent_created`, `steadhand_agent_deleted`, `steadhand_agent_disabled`, `steadhand_agent_enabled`, `steadhand_log_entry_stored`, `steadhand_presets_changed` and `steadhand_register_guardrails`. It also lists the WordPress hooks that Steadhand calls rather than attaches to: `the_content` (which `get-rendered` runs on purpose), `wp_get_nav_menu_items` (the classic menu reader), `image_memory_limit` (the media tools), `wp_check_post_lock_window` (the edit-lock rule) and `wp_update_nav_menu` (which the menu writer fires, as wp-admin does). Today the output has twenty-three lines: one for each of the seventeen Steadhand hook calls (five filters and twelve actions), one for each of the other WordPress hook calls, and one comment line that mentions `wp_update_nav_menu`. Any other `apply_filters()` or `do_action()` call in this output is a mistake, or a new extension point that needs a section here:
+To check, run this from the repository root. It lists the call sites of Steadhand's own hooks: the filters `steadhand_allowed_options`, `steadhand_allowed_post_types`, `steadhand_client_ip`, `steadhand_log_read_calls`, `steadhand_log_retention_days` and `steadhand_rate_limit_per_minute`, and the actions `steadhand_admin_agent_row`, `steadhand_admin_guardrails`, `steadhand_admin_log_entry`, `steadhand_admin_log_toolbar`, `steadhand_agent_capabilities_changed`, `steadhand_agent_created`, `steadhand_agent_deleted`, `steadhand_agent_disabled`, `steadhand_agent_enabled`, `steadhand_agent_ip_refused`, `steadhand_agent_ips_changed`, `steadhand_log_entry_stored`, `steadhand_presets_changed` and `steadhand_register_guardrails`. It also lists the WordPress hooks that Steadhand calls rather than attaches to: `the_content` (which `get-rendered` runs on purpose), `wp_get_nav_menu_items` (the classic menu reader), `image_memory_limit` (the media tools), `wp_check_post_lock_window` (the edit-lock rule) `wp_update_nav_menu` (which the menu writer fires, as wp-admin does) and `application_password_failed_authentication` (which the IP allowlist's second layer fires, as core does for a wrong password). Today the output has twenty-seven lines: one for each of the twenty Steadhand hook calls (six filters and fourteen actions), one for each of the six other WordPress hook calls, and one comment line that mentions `wp_update_nav_menu`. Any other `apply_filters()` or `do_action()` call in this output is a mistake, or a new extension point that needs a section here:
 
 ```
 grep -rnE "apply_filters\(|do_action\(" includes steadhand.php uninstall.php --exclude-dir=vendor
@@ -95,6 +95,45 @@ add_filter(
 ```
 
 This filter is public API. The [stability policy](#stability-policy) above applies: it will not be renamed, removed or changed in signature without a deprecation notice and a [CHANGELOG.md](../CHANGELOG.md) entry. Any new parameter will go at the end.
+
+### `steadhand_client_ip`
+
+Sets the client address that an agent's IP allowlist (SPEC §4.1) is checked against. It is called in three places, and only when the check has something to decide:
+
+- for an Application Password of an agent that has a list, when the password is checked (the first layer) and again on the identity (the second layer);
+- for an identity set by other code (`wp_set_current_user()`) of an agent that has a list, when the request reaches the Steadhand endpoint (the third layer, which is `Server::can_connect()`);
+- when the Agents screen shows the administrator the address of their own request, with `$user_id` 0.
+
+An agent with no list never calls it.
+
+- **Since:** Unreleased.
+- **Type:** filter.
+- **Parameters:**
+  - `$ip` (`string`), the address from `REMOTE_ADDR`, or `''` when `REMOTE_ADDR` is missing or is not an IP address. Steadhand reads no other header.
+  - `$user_id` (`int`): the agent whose list is checked, in the three cases above. It is `0` when the Agents screen shows the administrator the address of their own request, which is the only case where no agent is being checked.
+- **Return:** `string`, an IP address that `inet_pton()` accepts. Anything else is refused: a value that is not a string, a string that is not an address, and an array all give no address, and a listed address is then refused. A callback that throws gives no address too.
+- **Default:** `$ip` unchanged.
+- **The address is never sent to the client.** It goes to the allowlist check and to the `steadhand_agent_ip_refused` action, and the Agents screen shows it to the administrator only.
+- **Warning.** A site behind a reverse proxy sees the proxy's address in `REMOTE_ADDR`. Every visitor then has the same address, so an allowlist matches the proxy, not the agent. A callback may return the real client address from a header such as `X-Forwarded-For` **only if the web server makes it impossible for a client to set that header directly** (for example, the proxy overwrites it and the site accepts connections only from the proxy). Otherwise any client can send the header and pass the allowlist. Return only an address your own infrastructure has written.
+
+This example takes the client address from the one proxy the site trusts, and refuses anything else:
+
+```php
+add_filter(
+	'steadhand_client_ip',
+	static function ( string $ip, int $user_id ): string {
+		// The web server overwrites X-Real-IP, and the site accepts connections only from 10.0.0.5.
+		if ( '10.0.0.5' !== $ip ) {
+			return '';
+		}
+		return isset( $_SERVER['HTTP_X_REAL_IP'] ) ? (string) $_SERVER['HTTP_X_REAL_IP'] : '';
+	},
+	10,
+	2
+);
+```
+
+This filter is public API. The [stability policy](#stability-policy) above applies. Any new parameter will go at the end.
 
 ### `steadhand_log_read_calls`
 
@@ -396,6 +435,35 @@ Runs after the Agents screen deletes a dedicated agent's user account.
 
 This action is public API. The [stability policy](#stability-policy) above applies. Any new parameter will go at the end.
 
+### `steadhand_agent_ip_refused`
+
+Runs when an agent is refused because the request came from an address that is not on the agent's IP allowlist.
+
+- **Since:** Unreleased.
+- **Type:** action.
+- **Parameters:** `$user_id` (`int`), the agent; `$ip` (`string`), the address Steadhand saw, or `''` when none could be determined. The password, the list and every header are never passed.
+- **When it runs:** at the first refusal of the request by any of the three layers (SPEC §4.1), and at most once per request. The layers are:
+  - the first layer, in core's `wp_authenticate_application_password_errors`: the Application Password matched, and the address is not listed. Core has not yet recorded the password's last-used time and address, so a refused attempt records neither;
+  - the second layer, in the identity rule: an Application-Password identity that got past the first layer and is refused on the second check. Core has already recorded the password's last-used data, because the password matched;
+  - the third layer, `Server::can_connect()`: any identity on the Steadhand endpoint, including one set by other code with `wp_set_current_user()`. This layer runs without a password, so a listener must not take a call to it as proof that a valid credential was used. Only code on the site can cause that call.
+- **If a listener throws:** the exception is caught and ignored. The refusal stands.
+- **What it does not do:** it cannot allow the request, and it has no return value. Steadhand writes nothing to the database for the refusal. A site that wants an alert must send it from this action.
+
+This action is public API. The [stability policy](#stability-policy) above applies. Any new parameter will go at the end.
+
+### `steadhand_agent_ips_changed`
+
+Runs after the Agents screen saves an agent's allowed IP addresses, when the stored list changed.
+
+- **Since:** Unreleased.
+- **Type:** action.
+- **Parameters:** `$user_id` (`int`), the agent; `$entries` (`string[]`), the saved entries in canonical form, which is empty when the check was turned off; `$previous` (`string[]`), the entries before the save, which is empty when there was no list or the stored list was corrupt.
+- **When it runs:** after the new list is saved and read back as saved. It does not run when the save is refused, or when the list is the same as before.
+- **If a listener throws:** the exception is caught and ignored. The list stays saved.
+- **What it does not do:** it cannot change the list. It has no return value.
+
+This action is public API. The [stability policy](#stability-policy) above applies. Any new parameter will go at the end.
+
 ### `steadhand_admin_agent_row`
 
 Runs on the Agents screen's detail view of one dedicated agent (a user whose only role is `steadhand_agent`), after that agent's sections: its capabilities, its connections and the link to its change-log entries.
@@ -627,6 +695,8 @@ These are WordPress core hooks. All of them except `wp_before_execute_ability` w
 
 These are REST filters that Steadhand's lockdown uses. The lockdown answers them, so other code can change its result only at the same priority or later:
 
+- `wp_authenticate_application_password_errors` (action, core; present in WordPress 7.1.5, the copy checked, but not checked on 6.9): Steadhand's IP allowlist check runs at `PHP_INT_MAX`, after the password matched and before core records its use. It adds core's own wrong-password error (`incorrect_password`, with core's text), so a refused address is answered as a wrong password is. A callback added at the same priority after Steadhand has booted runs after it, and could clear the error Steadhand added. That is the same limit as `rest_request_before_callbacks` below.
+- `application_password_failed_authentication` (action, core): the second layer fires it with the same wrong-password error, so core's REST check answers a refused identity as it answers a wrong password. The second layer runs only after core has already fired `application_password_did_authenticate` for the same password, so a listener sees a success followed by this failure for that request.
 - `rest_pre_dispatch` (filter, core): Steadhand's first check runs at `PHP_INT_MIN`, before any other callback here. A callback that runs after it can cancel that check by returning null or dropping the refusal. The second check still refuses the request, because it runs later (next item).
 - `rest_request_before_callbacks` (filter, core): Steadhand's second check runs at `PHP_INT_MAX`. A callback at a lower priority runs before it and cannot lift it. A callback added at `PHP_INT_MAX` after Steadhand has booted runs after it and can undo it. This was checked with a test probe: a null-returning callback at that priority turned the refused request into a 200. Steadhand cannot prevent that, and it is one of the places where code running in the same PHP process is trusted.
 

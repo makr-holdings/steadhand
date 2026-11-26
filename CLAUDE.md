@@ -27,6 +27,7 @@ includes/
   Capabilities.php       # Steadhand capability names and agent-role defaults
   Redactor.php           # redaction helper: text() and value() (pure; the change log will use it too)
   Roles.php              # steadhand_agent role: install and uninstall
+  IpAllowlist.php        # per-agent IP allowlist: entries, storage, matching, client address (SPEC §4.1, D28)
   Requirements.php       # dependency checks and the missing-dependency notice
   Abilities/             # one class per ability; UndoRules.php (the undo rules shared by undo-change and the administrator's undo)
   Diagnostics/           # get-diagnostics helpers: PHP error log reader and parser, cron, Site Health, plugins, environment, self-check

@@ -12,12 +12,13 @@ namespace Steadhand\Admin;
 use Steadhand\Abilities\Registry;
 use Steadhand\Agents;
 use Steadhand\Capabilities;
+use Steadhand\IpAllowlist;
 use Steadhand\Roles;
 
 defined( 'ABSPATH' ) || exit;
 
 /**
- * Runs the eight actions of the Agents screen. Every action checks, in this order: the nonce, that the site is not a multisite network,
+ * Runs the nine actions of the Agents screen. Every action checks, in this order: the nonce, that the site is not a multisite network,
  * manage_options, that the caller holds no agent role, list_users, and the native WordPress capability for the act (create_users, or
  * edit_user for the target, and delete_user too for a delete). A target must then be a dedicated agent (Agents::is_agent()). Nothing is
  * changed before every check passes.
@@ -44,9 +45,13 @@ final class AgentsHandler {
 	public const ACTION_DISABLE      = 'disable';
 	public const ACTION_ENABLE       = 'enable';
 	public const ACTION_DELETE       = 'delete';
+	public const ACTION_IPS          = 'set_ips';
 
 	/** The most Application Passwords one agent may hold. */
 	public const MAX_PASSWORDS = 10;
+
+	/** The longest allowed-addresses text that is read, in bytes, before it is parsed. A longer one is refused and nothing is saved. */
+	public const IPS_MAX_BYTES = 2000;
 
 	/** The longest label (an Application Password name), in characters (code points, counted with mb_strlen()). */
 	public const LABEL_MAX = 60;
@@ -68,6 +73,7 @@ final class AgentsHandler {
 		'agent_enabled',
 		'agent_enabled_with_connections',
 		'agent_deleted',
+		'ips_saved',
 	);
 
 	/**
@@ -111,6 +117,9 @@ final class AgentsHandler {
 		'not_agent_revoked',
 		'agent_disabled_no_password',
 		'agent_enabled_with_connections',
+		'ips_saved',
+		'ips_invalid',
+		'ips_failed',
 	);
 
 	/**
@@ -140,6 +149,9 @@ final class AgentsHandler {
 		'delete_has_content_revoked',
 		'not_agent_revoked',
 		'agent_enabled_with_connections',
+		'ips_saved',
+		'ips_invalid',
+		'ips_failed',
 	);
 
 	/** How a rollback ended: the user was deleted. */
@@ -616,6 +628,126 @@ final class AgentsHandler {
 		}
 
 		return $this->result( 'capabilities_saved', $user_id );
+	}
+
+	/**
+	 * Saves an agent's allowed IP addresses (SPEC §4.1, D28). The text has one entry per line and is read as a whole: when any line is
+	 * refused, or there are more entries than a list may hold, nothing is saved.
+	 *
+	 * Saving never fails open. A non-empty list is written with one update, and the stored value is read back. When it does not match,
+	 * a list that is now missing is replaced by a value that reads as unreadable, so the agent is refused and not left with no list.
+	 * Empty text removes the list, which turns the check off. When the stored list is unreadable, empty text removes it only if $clear is
+	 * true (the form's "Remove the list and allow any address" box). The steadhand_agent_ips_changed action fires only when the stored
+	 * list changed.
+	 *
+	 * @param string $nonce   The nonce from the form.
+	 * @param int    $user_id The agent.
+	 * @param string $raw     The ips field as it was sent, before wp_unslash(). It is unslashed here, once.
+	 * @param bool   $clear   Whether the administrator asked to remove an unreadable list.
+	 * @return array{code: string, ok: bool, user_id: int, secret: null}
+	 */
+	public function set_ips( string $nonce, int $user_id, string $raw, bool $clear = false ): array {
+		$refused = $this->guard( $nonce, self::nonce_action( self::ACTION_IPS, $user_id ), 'edit_user', $user_id );
+		if ( null !== $refused ) {
+			return $refused;
+		}
+
+		if ( null === $this->agent( $user_id ) ) {
+			return $this->result( 'not_agent' );
+		}
+
+		if ( strlen( $raw ) > self::IPS_MAX_BYTES ) {
+			return $this->result( 'ips_invalid', $user_id );
+		}
+
+		$parsed = IpAllowlist::parse( wp_unslash( $raw ) );
+		if ( array() !== $parsed['errors'] ) {
+			return $this->result( 'ips_invalid', $user_id );
+		}
+
+		$entries = $parsed['entries'];
+		// Null when the stored value is unreadable. The unreadable list is removed only when the administrator asked for that.
+		$before = $this->stored_ips( $user_id );
+		if ( array() === $entries && null === $before && ! $clear ) {
+			return $this->result( 'ips_invalid', $user_id );
+		}
+
+		$this->write_ips( $user_id, $entries );
+		$stored = $this->stored_ips( $user_id );
+
+		if ( $stored !== $entries ) {
+			// A non-empty list that did not land must not leave the agent with no list. Any other stored state (the previous list, or an
+			// unreadable value) is already restrictive, and is left as it is.
+			if ( array() !== $entries && array() === $stored ) {
+				$this->write_unreadable( $user_id );
+			}
+
+			return $this->result( 'ips_failed', $user_id );
+		}
+
+		if ( null === $before || $before !== $entries ) {
+			try {
+				/**
+				 * Fires after an agent's allowed IP addresses were saved and the stored list changed.
+				 *
+				 * @param int      $user_id  The agent.
+				 * @param string[] $entries The saved entries, in canonical form. Empty when the list was turned off.
+				 * @param string[] $previous The entries before the save. Empty when there was no list, or it was unreadable.
+				 */
+				do_action( 'steadhand_agent_ips_changed', $user_id, $entries, $before ?? array() );
+			} catch ( \Throwable ) { // phpcs:ignore Generic.CodeAnalysis.EmptyStatement.DetectedCatch -- The save stands whatever a listener does.
+				// A listener must not break the action. The list is saved either way.
+			}
+		}
+
+		return $this->result( 'ips_saved', $user_id );
+	}
+
+	/**
+	 * The stored list read back, or null when it is unreadable or the read itself throws. Null refuses the agent, so it is never read as "no list".
+	 *
+	 * @param int $user_id The agent.
+	 * @return string[]|null
+	 */
+	private function stored_ips( int $user_id ): ?array {
+		try {
+			return IpAllowlist::for_user( $user_id );
+		} catch ( \Throwable ) {
+			return null;
+		}
+	}
+
+	/**
+	 * Writes the list: one update for a non-empty list, and a delete for an empty one. A listener that throws is caught here; the caller reads the
+	 * stored value back and decides from that.
+	 *
+	 * @param int      $user_id The agent.
+	 * @param string[] $entries The canonical entries, or an empty array to remove the list.
+	 */
+	private function write_ips( int $user_id, array $entries ): void {
+		try {
+			if ( array() === $entries ) {
+				delete_user_meta( $user_id, IpAllowlist::META_KEY );
+			} else {
+				update_user_meta( $user_id, IpAllowlist::META_KEY, $entries );
+			}
+		} catch ( \Throwable ) { // phpcs:ignore Generic.CodeAnalysis.EmptyStatement.DetectedCatch -- The read-back decides what is stored.
+			// Nothing is claimed here. The caller reads the stored value back.
+		}
+	}
+
+	/**
+	 * Stores a value that IpAllowlist::for_user() reads as unreadable, so that a failed save refuses the agent. The value is a string,
+	 * which is not a list.
+	 *
+	 * @param int $user_id The agent.
+	 */
+	private function write_unreadable( int $user_id ): void {
+		try {
+			update_user_meta( $user_id, IpAllowlist::META_KEY, 'unreadable' );
+		} catch ( \Throwable ) { // phpcs:ignore Generic.CodeAnalysis.EmptyStatement.DetectedCatch -- Nothing more can be done if the store refuses.
+			// Nothing more can be done here.
+		}
 	}
 
 	/**
