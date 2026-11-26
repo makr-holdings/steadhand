@@ -368,8 +368,9 @@ final class MenuRules {
 	/**
 	 * Whether the three keys a hide stores are all there, each with exactly one row, and say what the hide left: the hidden-by
 	 * key is a user ID, the item-ID key is this item's own ID, and the modified key is the item's current post_modified_gmt.
-	 * Every read is uncached. show needs this as well as the draft status: a direct database write clears no key, but it does
-	 * change the modified time, so it is refused.
+	 * Every read is uncached. show needs this as well as the draft status. A direct database write clears no key, and it changes the
+	 * modified time only when the writer sets it, so the modified key catches an edit made through WordPress's save functions, not
+	 * every direct write.
 	 *
 	 * @param int $item_id Item post ID.
 	 */
