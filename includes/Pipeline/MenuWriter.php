@@ -341,6 +341,272 @@ final class MenuWriter {
 	}
 
 	/**
+	 * Moves an item to a new parent and a new place among its new siblings, and rewrites the menu_order of the rows that the move changes.
+	 * The caller's plan (MenuRules::plan_move()) is passed in $expected, with the state of every row the plan touches. This function reads
+	 * the menu again, compares the states and the plan with what the caller read, and then runs the rules on the fresh rows; nothing is
+	 * written if any of that differs or refuses.
+	 *
+	 * Order of the writes: the parent meta first (only when the parent changes), then one wp_update_post() per changed row, in ascending
+	 * position, each with the text kept. Stopping midway is safe in the sense that no item is lost or deleted, and no status changes; the
+	 * order may be wrong until the rest is written, which is what the partial failure says. The parent goes first so that, if the order
+	 * writes stop, the item is already under its new parent, and the tree rule can be checked on it afterwards.
+	 *
+	 * After the writes the menu is read again. Its order must be the target order, with the new values, the item's parent must be the new
+	 * one, and every row that was written must keep its title, content, excerpt and filtered content. If the moved item is visible under a
+	 * parent that has become hidden in the meantime, the parent meta goes back to the previous parent. Any of these failing is
+	 * steadhand_update_partial. Hidden items whose modified time the order write changes keep their hide record valid, but only where the
+	 * record was valid before the call.
+	 *
+	 * $expected: 'target' (the target flat order), 'orders' (new menu_order by ID), and 'states' (for each row the plan touches, the state the
+	 * caller read: menu, status, title, parent and order).
+	 *
+	 * @param \WP_Term             $menu          The classic menu.
+	 * @param int                  $item_id       The item that moves.
+	 * @param int                  $parent_id     The new parent, or 0.
+	 * @param int                  $after_id      The new predecessor, or 0.
+	 * @param array<string, mixed> $expected      The plan and the states the caller read.
+	 * @param callable             $still_allowed Receives the fresh post of the item, returns true when the caller may still move it.
+	 * @return array{id: int, changed: bool}|\WP_Error
+	 * @throws \Throwable Rethrown when raised before the first write. Also \LogicException when called outside a write.
+	 */
+	public static function move( \WP_Term $menu, int $item_id, int $parent_id, int $after_id, array $expected, callable $still_allowed ): array|\WP_Error {
+		self::assert_writing();
+
+		$fresh = self::current( $item_id, $menu, array(), $still_allowed );
+		if ( $fresh instanceof \WP_Error ) {
+			return $fresh;
+		}
+
+		$menu_id = (int) $menu->term_id;
+		foreach ( (array) ( $expected['states'] ?? array() ) as $id => $state ) {
+			$now = MenuRules::fresh_state( (int) $id );
+			if ( null === $now || ! self::same( (array) $state, $now ) ) {
+				return self::changed();
+			}
+		}
+
+		$rows = MenuRules::items_raw( $menu );
+		$plan = MenuRules::plan_move( $rows, $item_id, $parent_id, $after_id );
+		if ( null !== $plan['refusal'] ) {
+			return self::move_refusal( (string) $plan['refusal'] );
+		}
+
+		$expected_target = $expected['target'] ?? array();
+		$expected_orders = $expected['orders'] ?? array();
+		if ( $plan['target'] !== $expected_target || $plan['orders'] !== $expected_orders ) {
+			return self::changed();
+		}
+
+		$old_parent = (int) $fresh['parent'];
+		if ( $old_parent === $parent_id && array() === $plan['orders'] ) {
+			return array(
+				'id'      => $item_id,
+				'changed' => false,
+			);
+		}
+
+		// Every row that is written, and the parent and the predecessor, must be one this menu may change, before anything is written.
+		$touched = array_merge( array( $item_id ), array_keys( $plan['orders'] ) );
+		if ( 0 !== $parent_id ) {
+			$touched[] = $parent_id;
+		}
+		if ( 0 !== $after_id ) {
+			$touched[] = $after_id;
+		}
+
+		$guard = self::move_guard( $menu, $rows, $touched );
+		if ( null !== $guard ) {
+			return $guard;
+		}
+
+		$posts    = array();
+		$recorded = array();
+		foreach ( $rows as $row ) {
+			$posts[ $row['id'] ] = $row['post'];
+			if ( isset( $plan['orders'][ $row['id'] ] ) && 'draft' === $row['status'] && MenuRules::hide_recorded( $row['id'] ) ) {
+				$recorded[ $row['id'] ] = true;
+			}
+		}
+
+		$wrote  = false;
+		$failed = false;
+		try {
+			if ( $old_parent !== $parent_id ) {
+				update_post_meta( $item_id, MenuRules::PARENT_META, (string) $parent_id );
+				$wrote = true;
+			}
+
+			foreach ( $plan['orders'] as $id => $order ) {
+				$saved = PostWriter::keep_text_for(
+					$posts[ $id ],
+					static fn(): mixed => wp_update_post(
+						wp_slash(
+							array(
+								'ID'         => $id,
+								'menu_order' => $order,
+							)
+						),
+						true
+					),
+					self::ALL_TEXT
+				);
+				if ( is_wp_error( $saved ) ) {
+					$failed = true;
+					break;
+				}
+
+				$wrote = true;
+				if ( isset( $recorded[ $id ] ) ) {
+					update_post_meta( $id, MenuRules::HIDDEN_MODIFIED_META, (string) TrashRules::current_modified_gmt( $id ) );
+				}
+			}
+		} catch ( \Throwable $thrown ) {
+			// Before any write there is nothing to report as partial, so the exception is not caught.
+			if ( ! $wrote ) {
+				throw $thrown;
+			}
+
+			self::announce( $menu_id );
+
+			return self::move_partial( $item_id );
+		}
+
+		if ( $wrote ) {
+			self::announce( $menu_id );
+		}
+
+		if ( $failed ) {
+			return $wrote ? self::move_partial( $item_id ) : self::update_failed();
+		}
+
+		// The tree rule first: a parent hidden in the gap is put back before the order is judged.
+		$now = MenuRules::fresh_state( $item_id );
+		if ( null === $now ) {
+			return self::move_partial( $item_id );
+		}
+
+		if ( 'publish' === $now['status'] && ! self::parent_is_visible( $now, $menu_id ) ) {
+			if ( $old_parent === $parent_id ) {
+				// The parent was visible when the plan was made and was hidden in the gap. Nothing here moved it, so the item stays where it is.
+				return self::tree_partial( __( 'The menu item is visible under its parent item, which was hidden at the same time, and Steadhand did not move it. Check the menu with steadhand/get-menu, and hide the item with op hide.', 'steadhand' ) );
+			}
+
+			update_post_meta( $item_id, MenuRules::PARENT_META, (string) $old_parent );
+
+			// The put-back, then one correction: the old parent must be visible (or the top level), or the item is hidden instead.
+			$back = MenuRules::fresh_state( $item_id );
+			if ( null !== $back && self::parent_is_visible( $back, $menu_id ) ) {
+				return self::tree_partial( __( 'The menu item was moved, but its new parent item was hidden at the same time, so Steadhand moved it back under its previous parent. The order of the menu may also have changed. Check the menu with steadhand/get-menu, and fix the order in Appearance > Menus if it is wrong.', 'steadhand' ) );
+			}
+
+			if ( null === $back ) {
+				return self::tree_partial( __( 'The menu item was moved, but its new parent item was hidden at the same time, and Steadhand could not check the menu afterwards. Check the menu with steadhand/get-menu.', 'steadhand' ) );
+			}
+
+			if ( self::has_visible_child( $item_id, $menu ) ) {
+				return self::tree_partial( __( 'The menu item was moved under a parent item that is hidden now, and Steadhand moved it back, but the old parent is hidden too. Steadhand did not hide the item, because it has visible children. The item may be visible under a hidden parent. Check the menu with steadhand/get-menu.', 'steadhand' ) );
+			}
+
+			$hidden = self::write_status( $back, 'draft' );
+			self::announce( $menu_id );
+
+			return self::tree_partial(
+				null === $hidden
+					? __( 'The menu item was moved, but its new parent item was hidden at the same time. Its old parent is hidden too, so Steadhand hid the moved item instead. Show the parent first, then show the item with op show. Check the menu with steadhand/get-menu.', 'steadhand' )
+					: __( 'The menu item was moved, but its new parent item was hidden at the same time, and Steadhand could neither move it back nor hide it, so it may be visible under a hidden parent. Check the menu with steadhand/get-menu.', 'steadhand' )
+			);
+		}
+
+		$after_rows = MenuRules::items_raw( $menu );
+		if ( ! self::moved_as_planned( $rows, $after_rows, $plan, $item_id, $parent_id ) ) {
+			return self::move_partial( $item_id );
+		}
+
+		return array(
+			'id'      => $item_id,
+			'changed' => true,
+		);
+	}
+
+	/**
+	 * Checks, before any write, every row a move would touch: the moved item, the new parent, the predecessor, and each row whose order
+	 * changes. A row that is also in another menu is refused, because its place would change in a second menu as well. A row that the
+	 * caller may not edit under the native check (edit_post, which MetaCaps maps inside this call) is refused with the generic text.
+	 *
+	 * @param \WP_Term                                                                                            $menu The menu.
+	 * @param array<int, array{id: int, parent: int, order: int, status: string, orphaned: bool, post: \WP_Post}> $rows The menu's rows.
+	 * @param int[]                                                                                               $ids  The rows to check.
+	 * @return \WP_Error|null
+	 */
+	public static function move_guard( \WP_Term $menu, array $rows, array $ids ): ?\WP_Error {
+		$by_id = array();
+		foreach ( $rows as $row ) {
+			$by_id[ $row['id'] ] = $row;
+		}
+
+		foreach ( array_unique( $ids ) as $id ) {
+			if ( ! isset( $by_id[ $id ] ) ) {
+				return self::forbidden();
+			}
+
+			if ( null === MenuRules::menu_of( $by_id[ $id ]['post'] ) ) {
+				return new \WP_Error(
+					'steadhand_refused_unsupported_item',
+					__( 'An item of this menu is also in another menu, so Steadhand cannot change its place. Nothing was changed. An administrator can change it in Appearance > Menus.', 'steadhand' ),
+					array( 'status' => 409 )
+				);
+			}
+
+			if ( ! current_user_can( 'edit_post', $id ) ) {
+				return self::forbidden();
+			}
+		}
+
+		return null;
+	}
+
+	/**
+	 * Whether a re-read of the menu after the move's writes is the planned menu: the same rows in the target order, every row with the
+	 * order and parent the plan gives it, the same status everywhere, and the text of each row the writes touched unchanged.
+	 *
+	 * @param array<int, array{id: int, parent: int, order: int, status: string, orphaned: bool, post: \WP_Post}> $before    Rows before the writes.
+	 * @param array<int, array{id: int, parent: int, order: int, status: string, orphaned: bool, post: \WP_Post}> $after     Rows after the writes.
+	 * @param array{refusal: string|null, target: int[], orders: array<int, int>}                                 $plan      The plan.
+	 * @param int                                                                                                 $item_id   The moved item.
+	 * @param int                                                                                                 $parent_id The new parent.
+	 */
+	private static function moved_as_planned( array $before, array $after, array $plan, int $item_id, int $parent_id ): bool {
+		if ( array_column( $after, 'id' ) !== $plan['target'] || count( $after ) !== count( $before ) ) {
+			return false;
+		}
+
+		$was = array();
+		foreach ( $before as $row ) {
+			$was[ $row['id'] ] = $row;
+		}
+
+		foreach ( $after as $row ) {
+			$old = $was[ $row['id'] ] ?? null;
+			if ( null === $old || $row['status'] !== $old['status'] ) {
+				return false;
+			}
+
+			$order  = $plan['orders'][ $row['id'] ] ?? $old['order'];
+			$parent = $row['id'] === $item_id ? $parent_id : $old['parent'];
+			if ( $row['order'] !== $order || $row['parent'] !== $parent ) {
+				return false;
+			}
+
+			$touched = $row['id'] === $item_id || isset( $plan['orders'][ $row['id'] ] );
+			if ( $touched && ! self::text_kept( $old['post'], $row['post'], (string) $old['post']->post_title ) ) {
+				return false;
+			}
+		}
+
+		return true;
+	}
+
+	/**
 	 * Removes the hidden keys from an item that was published by a route that fires transition_post_status while Steadhand is loaded.
 	 * Hooked to that action (Plugin::boot()), so a Save Menu in wp-admin, a status change by an administrator and a show all clear
 	 * them. Nothing happens unless the new status is publish and the post is a nav_menu_item. When the item has none of the keys, it
@@ -774,6 +1040,72 @@ final class MenuWriter {
 	 */
 	private static function tree_partial( string $message ): \WP_Error {
 		return new \WP_Error( 'steadhand_update_partial', $message, array( 'status' => 500 ) );
+	}
+
+	/**
+	 * The refusal for a move whose rules say no, with the code MenuRules::plan_move() gave. Nothing was changed.
+	 *
+	 * @param string $code One of the MenuRules::MOVE_ codes.
+	 */
+	public static function move_refusal( string $code ): \WP_Error {
+		switch ( $code ) {
+			case MenuRules::MOVE_INVALID:
+				return new \WP_Error(
+					$code,
+					__( 'The move is not possible. The parent must be 0 or an item of this menu. The after item must be 0 or an item of this menu that is a child of the parent. An item cannot move under itself or under one of its own children. Nothing was changed.', 'steadhand' ),
+					array( 'status' => 400 )
+				);
+
+			case MenuRules::MOVE_HIDDEN:
+				return new \WP_Error( $code, __( 'The new parent item is hidden, so the item would show at the top level of the menu. Show the parent first, or choose a visible parent. Nothing was changed.', 'steadhand' ), array( 'status' => 409 ) );
+
+			case MenuRules::MOVE_DEPTH:
+				return new \WP_Error(
+					$code,
+					/* translators: %d: the most levels a menu may have. */
+					sprintf( __( 'The item and its own children would be deeper than the %d levels a menu may have at the new place. Nothing was changed.', 'steadhand' ), MenuRules::MAX_DEPTH ),
+					array( 'status' => 409 )
+				);
+
+			case MenuRules::MOVE_ORDER:
+				return new \WP_Error(
+					$code,
+					__( 'The menu order is not consistent with its tree, or the order values this move would rewrite are not distinct positive integers, so the result would be ambiguous. Nothing was changed. An administrator can fix the order by saving the menu in Appearance > Menus.', 'steadhand' ),
+					array( 'status' => 409 )
+				);
+
+			case MenuRules::MOVE_MENU_TOO_LARGE:
+				return new \WP_Error( $code, __( 'This menu has more than 500 items, so Steadhand will not change it. Nothing was changed.', 'steadhand' ), array( 'status' => 409 ) );
+
+			case MenuRules::MOVE_TOO_LARGE:
+				return new \WP_Error(
+					$code,
+					/* translators: %d: the most menu items one move may change. */
+					sprintf( __( 'This move would change the order of more than %d menu items, so Steadhand will not make it. Nothing was changed. Move the item in smaller steps, or reorder the menu in Appearance > Menus.', 'steadhand' ), MenuRules::MAX_MOVE_ROWS ),
+					array( 'status' => 409 )
+				);
+
+			default:
+				return new \WP_Error( MenuRules::MOVE_UNSUPPORTED, __( 'This item, its new parent or its predecessor is not in a state Steadhand moves items from or to. Nothing was changed.', 'steadhand' ), array( 'status' => 409 ) );
+		}
+	}
+
+	/**
+	 * The failure of a move that wrote some rows, or whose result could not be confirmed. It names the moved item, says the order may be wrong,
+	 * and tells the agent and the administrator what to do. No item is lost: the move writes no delete.
+	 *
+	 * @param int $item_id The moved item.
+	 */
+	private static function move_partial( int $item_id ): \WP_Error {
+		return new \WP_Error(
+			'steadhand_update_partial',
+			/* translators: %d: the moved menu item's ID. */
+			sprintf( __( 'Menu item %d was moved, but the change was not completed cleanly, so the menu order may be wrong. No item was deleted. Call steadhand/get-menu to read the menu before you continue. An administrator can fix the order by saving the menu in Appearance > Menus.', 'steadhand' ), $item_id ),
+			array(
+				'status' => 500,
+				'item'   => $item_id,
+			)
+		);
 	}
 
 	/**

@@ -10,6 +10,7 @@ declare( strict_types=1 );
 
 namespace Steadhand\Tests\Integration;
 
+use Steadhand\Abilities\PostReader;
 use Steadhand\Capabilities;
 use Steadhand\Log\Entry;
 use Steadhand\Pipeline\MenuRules;
@@ -596,8 +597,16 @@ final class UpdateMenuTest extends MenuWriteTestCase {
 		$this->assertFalse( $input['additionalProperties'] );
 		$this->assertSame( array( 'kind', 'menu', 'op' ), $input['required'] );
 		$this->assertSame( array( 'classic', 'block' ), $input['properties']['kind']['enum'] );
-		$this->assertSame( array( 'add', 'update', 'hide', 'show' ), $input['properties']['op']['enum'] );
-		$this->assertArrayNotHasKey( 'after', $input['properties'], 'Step 2 has no move, so no after field.' );
+		$this->assertSame( array( 'add', 'update', 'hide', 'show', 'move' ), $input['properties']['op']['enum'] );
+		$this->assertSame(
+			array(
+				'type'    => 'integer',
+				'minimum' => 0,
+				'maximum' => PostReader::MAX_ID,
+			),
+			$input['properties']['after'],
+			'after is the predecessor of a move: 0 for first, at most MAX_ID.'
+		);
 
 		$output = $ability->get_output_schema();
 		$this->assertFalse( $output['additionalProperties'] );
@@ -605,6 +614,16 @@ final class UpdateMenuTest extends MenuWriteTestCase {
 			array( 'kind', 'menu', 'op', 'item', 'previous', 'changed', 'warnings', 'guardrail_notes' ),
 			$output['required']
 		);
+		// previous.after is only present after a move, so it is an optional property and not a required one.
+		$previous = $output['properties']['previous']['properties'];
+		$this->assertSame(
+			array(
+				'type'    => 'integer',
+				'minimum' => 0,
+			),
+			$previous['after']
+		);
+		$this->assertNotContains( 'after', $output['properties']['previous']['required'] );
 
 		$meta = $ability->get_meta();
 		$this->assertFalse( $meta['annotations']['readonly'] );

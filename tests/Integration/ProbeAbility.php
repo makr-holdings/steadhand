@@ -83,11 +83,13 @@ final class ProbeAbility extends Ability {
 	 * @param string                    $capability          Steadhand capability the call requires.
 	 * @param Closure|null              $on_execute          Runs inside execute(); receives the sanitised input and returns the output.
 	 * @param array<string, mixed>|null $annotation_override Annotations to return instead of the read-only default. Null keeps the default.
+	 * @param string                    $ability_name        The name the call runs under. A menu test sets steadhand/update-menu.
 	 */
 	public function __construct(
 		private string $capability = Capabilities::READ,
 		private ?Closure $on_execute = null,
-		private ?array $annotation_override = null
+		private ?array $annotation_override = null,
+		private string $ability_name = 'steadhand/probe-read'
 	) {}
 
 	/**
@@ -96,7 +98,7 @@ final class ProbeAbility extends Ability {
 	 * @return string
 	 */
 	public function name(): string {
-		return 'steadhand/probe-read';
+		return $this->ability_name;
 	}
 
 	/**

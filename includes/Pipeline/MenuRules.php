@@ -91,9 +91,24 @@ final class MenuRules {
 	private const STATUSES = array( 'publish', 'draft' );
 
 	/**
-	 * The meta key that stores an item's parent, as core's wp_setup_nav_menu_item() reads it.
+	 * The meta key that stores an item's parent, as core's wp_setup_nav_menu_item() reads it. Public so the writer stores it the way it is read.
 	 */
-	private const PARENT_META = '_menu_item_menu_item_parent';
+	public const PARENT_META = '_menu_item_menu_item_parent';
+
+	/**
+	 * The refusal codes plan_move() returns. Each is the code the call gets, so the ability and the writer map them one to one.
+	 */
+	public const MOVE_INVALID     = 'steadhand_invalid_input';
+	public const MOVE_UNSUPPORTED = 'steadhand_refused_unsupported_item';
+	public const MOVE_HIDDEN      = 'steadhand_refused_hidden_parent';
+	public const MOVE_DEPTH       = 'steadhand_refused_menu_depth';
+	public const MOVE_ORDER       = 'steadhand_refused_menu_order';
+	public const MOVE_TOO_LARGE   = 'steadhand_refused_move_too_large';
+
+	/**
+	 * The refusal for a menu over MAX_ITEMS, which a move checks before any other planning work. The same code and status as the ability's own check.
+	 */
+	public const MOVE_MENU_TOO_LARGE = 'steadhand_refused_menu_too_large';
 
 	/**
 	 * A string of digits: a whole number as WordPress stores it in meta.
@@ -287,10 +302,11 @@ final class MenuRules {
 			return null;
 		}
 
-		$height = 0;
-		$count  = 0;
-		$seen   = array();
-		$stack  = array( array( $id, 1 ) );
+		$children = self::child_map( $rows );
+		$height   = 0;
+		$count    = 0;
+		$seen     = array();
+		$stack    = array( array( $id, 1 ) );
 
 		while ( array() !== $stack ) {
 			list( $current, $level ) = array_pop( $stack );
@@ -303,8 +319,8 @@ final class MenuRules {
 			$seen[ $current ] = true;
 			$height           = max( $height, $level );
 
-			foreach ( self::children( $rows, $current ) as $child ) {
-				$stack[] = array( $child['id'], $level + 1 );
+			foreach ( $children[ $current ] ?? array() as $child ) {
+				$stack[] = array( $child, $level + 1 );
 			}
 		}
 
@@ -446,6 +462,412 @@ final class MenuRules {
 		}
 
 		return metadata_exists( 'post', $item_id, self::ORPHANED_META );
+	}
+
+	/**
+	 * The IDs of an item and all its descendants, found from the parent links and never from the order. Returned in the order of the rows.
+	 * The walk visits each ID once, so a loop in the data ends the walk; the result is then the set reached. An ID that is not in the
+	 * rows gives an empty list.
+	 *
+	 * @param array<int, array{id: int, parent: int, order: int, status: string, orphaned: bool, post: \WP_Post}> $rows Rows from items_raw().
+	 * @param int                                                                                                 $id   The subtree's root.
+	 * @return int[]
+	 */
+	public static function subtree_ids( array $rows, int $id ): array {
+		if ( ! isset( self::index( $rows )[ $id ] ) ) {
+			return array();
+		}
+
+		$children = self::child_map( $rows );
+		$found    = array( $id => true );
+		$queue    = array( $id );
+		while ( array() !== $queue ) {
+			$current = array_shift( $queue );
+			foreach ( $children[ $current ] ?? array() as $child ) {
+				if ( ! isset( $found[ $child ] ) ) {
+					$found[ $child ] = true;
+					$queue[]         = $child;
+				}
+			}
+		}
+
+		$ids = array();
+		foreach ( $rows as $row ) {
+			if ( isset( $found[ $row['id'] ] ) ) {
+				$ids[] = $row['id'];
+			}
+		}
+
+		return $ids;
+	}
+
+	/**
+	 * Whether the stored order is consistent with the tree: every item comes after its parent (when the parent is in the rows), and the
+	 * items of every subtree are next to each other in menu order. Core's Save Menu always leaves both true; a menu that does not is
+	 * refused by a move, because the target order cannot be written safely over it.
+	 *
+	 * @param array<int, array{id: int, parent: int, order: int, status: string, orphaned: bool, post: \WP_Post}> $rows Rows from items_raw().
+	 */
+	public static function consistent_with_tree( array $rows ): bool {
+		$position = array();
+		foreach ( $rows as $index => $row ) {
+			$position[ $row['id'] ] = $index;
+		}
+
+		foreach ( $rows as $row ) {
+			if ( 0 !== $row['parent'] && isset( $position[ $row['parent'] ] ) && $position[ $row['parent'] ] > $position[ $row['id'] ] ) {
+				return false;
+			}
+		}
+
+		// One pass from the roots: every subtree's lowest and highest position and its size are gathered from its children, so a
+		// subtree is contiguous when its span holds exactly its members. A row that no root reaches (a loop) makes the order inconsistent.
+		$children = self::child_map( $rows );
+		$roots    = array();
+		foreach ( $rows as $row ) {
+			if ( 0 === $row['parent'] || ! isset( $position[ $row['parent'] ] ) ) {
+				$roots[] = $row['id'];
+			}
+		}
+
+		$low     = array();
+		$high    = array();
+		$size    = array();
+		$visited = array();
+		$stack   = array();
+		foreach ( array_reverse( $roots ) as $root ) {
+			$stack[] = array( $root, false );
+		}
+
+		while ( array() !== $stack ) {
+			list( $id, $done ) = array_pop( $stack );
+
+			if ( $done ) {
+				$lo = $position[ $id ];
+				$hi = $lo;
+				$n  = 1;
+				foreach ( $children[ $id ] ?? array() as $child ) {
+					$lo = min( $lo, $low[ $child ] );
+					$hi = max( $hi, $high[ $child ] );
+					$n += $size[ $child ];
+				}
+
+				if ( $hi - $lo + 1 !== $n ) {
+					return false;
+				}
+
+				$low[ $id ]  = $lo;
+				$high[ $id ] = $hi;
+				$size[ $id ] = $n;
+				continue;
+			}
+
+			if ( isset( $visited[ $id ] ) ) {
+				return false;
+			}
+
+			$visited[ $id ] = true;
+			$stack[]        = array( $id, true );
+			foreach ( $children[ $id ] ?? array() as $child ) {
+				if ( isset( $visited[ $child ] ) ) {
+					return false;
+				}
+
+				$stack[] = array( $child, false );
+			}
+		}
+
+		return count( $visited ) === count( $rows );
+	}
+
+	/**
+	 * The flat order of the whole menu after a move. The item's subtree is taken out of the current flat order (menu_order, then ID) and
+	 * put back as one block, in its own current order: directly after the subtree of $after_id when $after_id is not 0; directly after
+	 * $parent_id itself when $after_id is 0 and $parent_id is not 0 (so the item is the first child); and at the very start when both are 0.
+	 *
+	 * The caller has checked the move (see plan_move()): $after_id, when not 0, is a child of $parent_id outside the item's subtree, and
+	 * $parent_id is not in the subtree. A parent or after that is not in the rows is not placed.
+	 *
+	 * @param array<int, array{id: int, parent: int, order: int, status: string, orphaned: bool, post: \WP_Post}> $rows      Rows from items_raw().
+	 * @param int                                                                                                 $item_id   The item that moves.
+	 * @param int                                                                                                 $parent_id The new parent, or 0.
+	 * @param int                                                                                                 $after_id  The new predecessor among the new siblings, or 0 for first.
+	 * @return int[] Every ID of the menu, in the new flat order.
+	 */
+	public static function target_order( array $rows, int $item_id, int $parent_id, int $after_id ): array {
+		$in_block = array_flip( self::subtree_ids( $rows, $item_id ) );
+		$parents  = array();
+		$block    = array();
+		$rest     = array();
+		foreach ( $rows as $row ) {
+			$parents[ $row['id'] ] = $row['parent'];
+			if ( isset( $in_block[ $row['id'] ] ) ) {
+				$block[] = $row['id'];
+			} else {
+				$rest[] = $row['id'];
+			}
+		}
+
+		$insert = 0;
+		if ( 0 !== $after_id ) {
+			$in_after = array_flip( self::subtree_ids( $rows, $after_id ) );
+			foreach ( $rest as $index => $id ) {
+				if ( isset( $in_after[ $id ] ) ) {
+					$insert = $index + 1;
+				}
+			}
+		} elseif ( 0 !== $parent_id ) {
+			$index  = array_search( $parent_id, $rest, true );
+			$insert = false === $index ? 0 : $index + 1;
+		} else {
+			// First at the top level: directly before the first top-level item, so an item that dangles (its parent is not in the menu)
+			// stays where it was. With no top-level item left, the block goes to the start.
+			foreach ( $rest as $index => $id ) {
+				if ( 0 === $parents[ $id ] ) {
+					$insert = $index;
+					break;
+				}
+			}
+		}
+
+		return array_merge( array_slice( $rest, 0, $insert ), $block, array_slice( $rest, $insert ) );
+	}
+
+	/**
+	 * The new menu_order values a move writes, for a target order from target_order(). Only the span from the first to the last position
+	 * that differs is rewritten, and each position takes the order value it had before, so no value is invented and the items outside the
+	 * span keep theirs. The values of the span must be positive and strictly increasing, and the values either side of it must be strictly
+	 * smaller and larger; otherwise the new order would be ambiguous and the result is null.
+	 *
+	 * @param array<int, array{id: int, parent: int, order: int, status: string, orphaned: bool, post: \WP_Post}> $rows   Rows from items_raw().
+	 * @param int[]                                                                                               $target The target flat order.
+	 * @return array<int, int>|null The new order of each row that changes, keyed by ID (empty when nothing changes), or null.
+	 */
+	public static function order_changes( array $rows, array $target ): ?array {
+		$flat   = array();
+		$orders = array();
+		foreach ( $rows as $row ) {
+			$flat[]   = $row['id'];
+			$orders[] = $row['order'];
+		}
+
+		$count = count( $flat );
+		$low   = null;
+		$high  = null;
+		for ( $index = 0; $index < $count; ++$index ) {
+			if ( $target[ $index ] !== $flat[ $index ] ) {
+				$low  = $low ?? $index;
+				$high = $index;
+			}
+		}
+
+		if ( null === $low || null === $high ) {
+			return array();
+		}
+
+		if ( ( $low > 0 && $orders[ $low - 1 ] >= $orders[ $low ] ) || ( $high + 1 < $count && $orders[ $high + 1 ] <= $orders[ $high ] ) ) {
+			return null;
+		}
+
+		$changes = array();
+		for ( $index = $low; $index <= $high; ++$index ) {
+			if ( $orders[ $index ] < 1 || ( $index > $low && $orders[ $index ] <= $orders[ $index - 1 ] ) ) {
+				return null;
+			}
+
+			if ( $target[ $index ] !== $flat[ $index ] ) {
+				$changes[ $target[ $index ] ] = $orders[ $index ];
+			}
+		}
+
+		return $changes;
+	}
+
+	/**
+	 * Checks a move on the rows, in the order the rules are listed in the update-menu spec, and returns the plan. Reads nothing from the
+	 * database. The ability calls it in execute() and the writer calls it again on fresh rows, so both give the same answer for the same rows.
+	 *
+	 * Returns array{refusal: string|null, target: int[], orders: array<int, int>}. When refusal is one of the MOVE_ codes, target and orders
+	 * are empty and nothing is to be written. Otherwise target is the new flat order and orders the new menu_order of each row that changes
+	 * (see order_changes()). A move to where the item already is has no orders, and the caller compares the parent for the rest.
+	 *
+	 * @param array<int, array{id: int, parent: int, order: int, status: string, orphaned: bool, post: \WP_Post}> $rows      Rows from items_raw().
+	 * @param int                                                                                                 $item_id   The item that moves.
+	 * @param int                                                                                                 $parent_id The new parent, or 0.
+	 * @param int                                                                                                 $after_id  The new predecessor, or 0.
+	 * @return array{refusal: string|null, target: int[], orders: array<int, int>}
+	 */
+	public static function plan_move( array $rows, int $item_id, int $parent_id, int $after_id ): array {
+		$none = array(
+			'target' => array(),
+			'orders' => array(),
+		);
+
+		// Before any other planning work: a menu over the limit is refused as too large, whatever the move.
+		if ( count( $rows ) > self::MAX_ITEMS ) {
+			return array( 'refusal' => self::MOVE_MENU_TOO_LARGE ) + $none;
+		}
+
+		$by_id = self::index( $rows );
+
+		if ( ! isset( $by_id[ $item_id ] )
+			|| $item_id === $parent_id
+			|| $item_id === $after_id
+			|| ( 0 !== $parent_id && ! isset( $by_id[ $parent_id ] ) )
+			|| ( 0 !== $after_id && ! isset( $by_id[ $after_id ] ) )
+			|| ( 0 !== $after_id && $by_id[ $after_id ]['parent'] !== $parent_id )
+			|| self::would_cycle( $rows, $item_id, $parent_id )
+		) {
+			return array( 'refusal' => self::MOVE_INVALID ) + $none;
+		}
+
+		foreach ( array( $item_id, $parent_id, $after_id ) as $id ) {
+			if ( 0 !== $id && ( $by_id[ $id ]['orphaned'] || null === self::depth( $rows, $id ) ) ) {
+				return array( 'refusal' => self::MOVE_UNSUPPORTED ) + $none;
+			}
+		}
+
+		// A hidden new parent is refused only when the moved subtree holds a published item: a subtree that is all hidden may go under a
+		// hidden parent, which is how its own inverse call puts it back.
+		$block = self::subtree_ids( $rows, $item_id );
+		if ( 0 !== $parent_id && 'publish' !== $by_id[ $parent_id ]['status'] && self::has_published( $by_id, $block ) ) {
+			return array( 'refusal' => self::MOVE_HIDDEN ) + $none;
+		}
+
+		$height = self::subtree_height( $rows, $item_id );
+		if ( null === $height ) {
+			return array( 'refusal' => self::MOVE_UNSUPPORTED ) + $none;
+		}
+
+		$parent_depth = 0 === $parent_id ? 0 : (int) self::depth( $rows, $parent_id );
+		if ( $parent_depth + $height > self::MAX_DEPTH ) {
+			return array( 'refusal' => self::MOVE_DEPTH ) + $none;
+		}
+
+		if ( ! self::consistent_with_tree( $rows ) ) {
+			return array( 'refusal' => self::MOVE_ORDER ) + $none;
+		}
+
+		$target  = self::target_order( $rows, $item_id, $parent_id, $after_id );
+		$changes = self::order_changes( $rows, $target );
+		if ( null === $changes || ! self::inverse_restores( $rows, $item_id, $parent_id, $target, $changes ) ) {
+			return array( 'refusal' => self::MOVE_ORDER ) + $none;
+		}
+
+		if ( count( $changes ) > self::MAX_MOVE_ROWS ) {
+			return array( 'refusal' => self::MOVE_TOO_LARGE ) + $none;
+		}
+
+		return array(
+			'refusal' => null,
+			'target'  => $target,
+			'orders'  => $changes,
+		);
+	}
+
+	/**
+	 * The children of every ID, in row order, built once from the rows. The key 0 holds the top level; a parent that is not in the rows
+	 * has its own key too.
+	 *
+	 * @param array<int, array{id: int, parent: int, order: int, status: string, orphaned: bool, post: \WP_Post}> $rows Rows from items_raw().
+	 * @return array<int, int[]>
+	 */
+	public static function child_map( array $rows ): array {
+		$children = array();
+		foreach ( $rows as $row ) {
+			$children[ $row['parent'] ][] = $row['id'];
+		}
+
+		return $children;
+	}
+
+	/**
+	 * The ID that comes before an item among its siblings in the rows, or 0 when it is first among them.
+	 *
+	 * @param array<int, array{id: int, parent: int, order: int, status: string, orphaned: bool, post: \WP_Post}> $rows    Rows from items_raw().
+	 * @param int                                                                                                 $item_id The item.
+	 */
+	public static function predecessor( array $rows, int $item_id ): int {
+		$row = self::index( $rows )[ $item_id ] ?? null;
+		if ( null === $row ) {
+			return 0;
+		}
+
+		$previous = 0;
+		foreach ( self::children( $rows, $row['parent'] ) as $sibling ) {
+			if ( $sibling['id'] === $item_id ) {
+				return $previous;
+			}
+
+			$previous = $sibling['id'];
+		}
+
+		return 0;
+	}
+
+	/**
+	 * Whether any of the given IDs is a published row.
+	 *
+	 * @param array<int, array{id: int, parent: int, order: int, status: string, orphaned: bool, post: \WP_Post}> $by_id Rows keyed by ID.
+	 * @param int[]                                                                                               $ids   IDs.
+	 */
+	private static function has_published( array $by_id, array $ids ): bool {
+		foreach ( $ids as $id ) {
+			if ( isset( $by_id[ $id ] ) && 'publish' === $by_id[ $id ]['status'] ) {
+				return true;
+			}
+		}
+
+		return false;
+	}
+
+	/**
+	 * Whether the inverse of a move gives back the original menu exactly: the item under its old parent after its old predecessor, with
+	 * every row's order as it was. The check is made on the rows as the move leaves them. A move that could not be undone this way (for
+	 * example one that puts the item on the other side of a dangling row) is refused, rather than accepted without an exact inverse.
+	 *
+	 * @param array<int, array{id: int, parent: int, order: int, status: string, orphaned: bool, post: \WP_Post}> $rows      Rows before the move.
+	 * @param int                                                                                                 $item_id   The item.
+	 * @param int                                                                                                 $parent_id The new parent.
+	 * @param int[]                                                                                               $target    The target flat order.
+	 * @param array<int, int>                                                                                     $changes   The new orders.
+	 */
+	private static function inverse_restores( array $rows, int $item_id, int $parent_id, array $target, array $changes ): bool {
+		$by_id      = self::index( $rows );
+		$old_parent = $by_id[ $item_id ]['parent'];
+		$old_after  = self::predecessor( $rows, $item_id );
+
+		$moved = array();
+		foreach ( $target as $id ) {
+			$row = $by_id[ $id ];
+			if ( $id === $item_id ) {
+				$row['parent'] = $parent_id;
+			}
+
+			$row['order'] = $changes[ $id ] ?? $row['order'];
+			$moved[]      = $row;
+		}
+
+		$back_target  = self::target_order( $moved, $item_id, $old_parent, $old_after );
+		$back_changes = self::order_changes( $moved, $back_target );
+		if ( null === $back_changes ) {
+			return false;
+		}
+
+		$moved_by_id = self::index( $moved );
+		$original    = array_column( $rows, 'id' );
+		if ( $back_target !== $original ) {
+			return false;
+		}
+
+		foreach ( $rows as $row ) {
+			$order = $back_changes[ $row['id'] ] ?? $moved_by_id[ $row['id'] ]['order'];
+			if ( $order !== $row['order'] ) {
+				return false;
+			}
+		}
+
+		return true;
 	}
 
 	/**
