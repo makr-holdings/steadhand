@@ -611,7 +611,8 @@ final class UpdateMenuTest extends MenuWriteTestCase {
 		$this->assertTrue( $meta['annotations']['destructive'] );
 		$this->assertFalse( $meta['annotations']['idempotent'] );
 		$this->assertFalse( $meta['mcp']['public'] );
-		$this->assertFalse( $meta['public'], 'Core defaults meta.public to false, and the ability must stay that way.' );
+		// WordPress 7.1 defaults meta.public to false. WordPress 6.9 has no such key at all.
+		$this->assertFalse( (bool) ( $meta['public'] ?? false ), 'The ability must not be marked public.' );
 	}
 
 	/**
