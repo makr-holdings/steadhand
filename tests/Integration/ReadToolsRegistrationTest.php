@@ -1,6 +1,6 @@
 <?php
 /**
- * Registration of the thirteen read tools and the nine write tools: the MCP tool list, annotations, strict schemas and exposure.
+ * Registration of the thirteen read tools and the ten write tools: the MCP tool list, annotations, strict schemas and exposure.
  *
  * @package Steadhand
  */
@@ -52,7 +52,7 @@ final class ReadToolsRegistrationTest extends TestCase {
 	);
 
 	/**
-	 * The nine write tools, which come after the read tools in the registry.
+	 * The ten write tools, which come after the read tools in the registry.
 	 */
 	private const WRITE_ABILITIES = array(
 		'steadhand/create-post',
@@ -63,6 +63,7 @@ final class ReadToolsRegistrationTest extends TestCase {
 		'steadhand/set-featured-image',
 		'steadhand/trash-post',
 		'steadhand/restore-post',
+		'steadhand/update-menu',
 		'steadhand/undo-change',
 	);
 
@@ -75,6 +76,7 @@ final class ReadToolsRegistrationTest extends TestCase {
 		'steadhand-set-featured-image',
 		'steadhand-trash-post',
 		'steadhand-restore-post',
+		'steadhand-update-menu',
 		'steadhand-undo-change',
 	);
 
@@ -103,6 +105,7 @@ final class ReadToolsRegistrationTest extends TestCase {
 		'steadhand/set-featured-image',
 		'steadhand/trash-post',
 		'steadhand/restore-post',
+		'steadhand/update-menu',
 		'steadhand/undo-change',
 	);
 

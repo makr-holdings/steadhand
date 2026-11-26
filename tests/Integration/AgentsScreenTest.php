@@ -734,23 +734,37 @@ final class AgentsScreenTest extends TestCase {
 
 		$this->assertContains( Capabilities::CONNECT, $offered );
 		$this->assertContains( Capabilities::PUBLISH, $offered );
-		$this->assertNotContains( Capabilities::MENUS, $offered, 'Not built yet, so not offered.' );
+		$this->assertContains( Capabilities::MENUS, $offered, 'Built now (update-menu), so offered.' );
 		$this->assertContains( Capabilities::TRASH, $offered, 'Trash and restore is built, so it is offered.' );
 		$this->assertNotContains( Capabilities::SETTINGS, $offered );
 		$this->assertNotContains( Capabilities::NO_GRANT, $offered );
 
-		$posted = array( Capabilities::CONNECT, Capabilities::PUBLISH, Capabilities::TRASH, Capabilities::MENUS, Capabilities::NO_GRANT, 'manage_options', 'edit_posts', 'administrator' );
+		$posted = array( Capabilities::CONNECT, Capabilities::PUBLISH, Capabilities::TRASH, Capabilities::SETTINGS, Capabilities::NO_GRANT, 'manage_options', 'edit_posts', 'administrator' );
 		$result = $this->handler->set_capabilities( $this->nonce( AgentsHandler::ACTION_CAPABILITIES, $agent ), $agent, $posted );
 
 		$this->assertSame( 'capabilities_saved', $result['code'] );
 		$user = get_userdata( $agent );
 		$this->assertTrue( Capabilities::user_has( $user, Capabilities::PUBLISH ) );
 		$this->assertTrue( Capabilities::user_has( $user, Capabilities::TRASH ) );
-		$this->assertFalse( Capabilities::user_has( $user, Capabilities::MENUS ) );
+		$this->assertFalse( Capabilities::user_has( $user, Capabilities::SETTINGS ) );
 		$this->assertFalse( Capabilities::user_has( $user, Capabilities::NO_GRANT ) );
-		foreach ( array( 'manage_options', 'edit_posts', 'administrator', Capabilities::MENUS, Capabilities::NO_GRANT ) as $name ) {
+		foreach ( array( 'manage_options', 'edit_posts', 'administrator', Capabilities::SETTINGS, Capabilities::NO_GRANT ) as $name ) {
 			$this->assertArrayNotHasKey( $name, $user->caps, $name );
 		}
+	}
+
+	public function test_the_menus_capability_is_offered_with_the_public_site_sentence_and_is_unticked_by_default(): void {
+		$agent = $this->agent( '', 1 );
+		$this->as_user( $this->admin() );
+		$_GET = array( 'agent' => (string) $agent );
+
+		$html = $this->render();
+
+		$this->assertStringContainsString( 'value="steadhand_menus"', $html );
+		$this->assertStringNotContainsString( 'value="steadhand_menus" checked', $html, 'Menus is off by default.' );
+		$this->assertStringContainsString( 'This changes the public site at once, and it needs steadhand_publish as well.', $html );
+		$this->assertStringContainsString( 'It cannot delete items or menus, or change theme locations.', $html );
+		$this->assertArrayNotHasKey( Capabilities::MENUS, Capabilities::agent_defaults() );
 	}
 
 	public function test_the_trash_capability_is_offered_with_its_text_and_is_unticked_by_default(): void {
@@ -781,12 +795,12 @@ final class AgentsScreenTest extends TestCase {
 
 	public function test_a_capability_that_is_not_offered_keeps_its_stored_value(): void {
 		$agent = $this->agent( '', 1 );
-		get_userdata( $agent )->add_cap( Capabilities::MENUS, true );
+		get_userdata( $agent )->add_cap( Capabilities::SETTINGS, true );
 		$this->as_user( $this->admin() );
 
 		$this->handler->set_capabilities( $this->nonce( AgentsHandler::ACTION_CAPABILITIES, $agent ), $agent, array() );
 
-		$this->assertTrue( get_userdata( $agent )->caps[ Capabilities::MENUS ] );
+		$this->assertTrue( get_userdata( $agent )->caps[ Capabilities::SETTINGS ] );
 	}
 
 	public function test_set_capabilities_redirects_with_a_code(): void {

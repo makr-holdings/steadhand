@@ -310,9 +310,8 @@ final class AgentsCreateCapabilitiesTest extends TestCase {
 
 	public function test_non_offered_non_steadhand_names_are_never_stored_and_non_offered_steadhand_names_are_stored_false(): void {
 		$this->assertNotContains( Capabilities::SETTINGS, $this->handler->offered_capabilities(), 'Precondition: settings is not offered.' );
-		$this->assertNotContains( Capabilities::MENUS, $this->handler->offered_capabilities(), 'Precondition: menus is not offered.' );
 
-		$posted = array( Capabilities::CONNECT, Capabilities::READ, 'manage_options', 'administrator', 'edit_posts', Capabilities::SETTINGS, Capabilities::MENUS, Capabilities::NO_GRANT, Roles::ROLE );
+		$posted = array( Capabilities::CONNECT, Capabilities::READ, 'manage_options', 'administrator', 'edit_posts', Capabilities::SETTINGS, Capabilities::NO_GRANT, Roles::ROLE );
 		$result = $this->create( 'refused-names', $posted );
 
 		$this->assertSame( 'created', $result['code'] );
@@ -323,7 +322,6 @@ final class AgentsCreateCapabilitiesTest extends TestCase {
 		}
 		// Steadhand names that are not offered are stored as an explicit false, never as a grant.
 		$this->assertFalse( $user->caps[ Capabilities::SETTINGS ] );
-		$this->assertFalse( $user->caps[ Capabilities::MENUS ] );
 		$this->assertSame( array( Roles::ROLE ), array_values( $user->roles ) );
 		$this->assertFalse( user_can( $result['user_id'], 'manage_options' ) );
 		$this->assertFalse( user_can( $result['user_id'], 'edit_posts' ) );
@@ -433,23 +431,23 @@ final class AgentsCreateCapabilitiesTest extends TestCase {
 	public function test_a_steadhand_capability_granted_to_the_role_is_not_held_by_a_chosen_agent(): void {
 		$role = get_role( Roles::ROLE );
 		$this->assertNotNull( $role );
-		$role->add_cap( Capabilities::MENUS, true );
+		$role->add_cap( Capabilities::SETTINGS, true );
 
 		try {
 			$result = $this->create( 'menus-role', array( Capabilities::CONNECT, Capabilities::READ ) );
 
 			$this->assertSame( 'created', $result['code'] );
-			$this->assertFalse( Capabilities::user_has( get_userdata( $result['user_id'] ), Capabilities::MENUS ), 'The role grant is overridden by the stored false.' );
+			$this->assertFalse( Capabilities::user_has( get_userdata( $result['user_id'] ), Capabilities::SETTINGS ), 'The role grant is overridden by the stored false.' );
 			$this->assert_stored( $result['user_id'], array( Capabilities::CONNECT, Capabilities::READ ) );
 		} finally {
-			$role->remove_cap( Capabilities::MENUS );
+			$role->remove_cap( Capabilities::SETTINGS );
 		}
 	}
 
 	public function test_null_stores_only_the_role_key_even_when_the_role_grants_more(): void {
 		$role = get_role( Roles::ROLE );
 		$this->assertNotNull( $role );
-		$role->add_cap( Capabilities::MENUS, true );
+		$role->add_cap( Capabilities::SETTINGS, true );
 
 		try {
 			$result = $this->create( 'null-role', null );
@@ -457,9 +455,9 @@ final class AgentsCreateCapabilitiesTest extends TestCase {
 			$this->assertSame( 'created', $result['code'] );
 			$user = get_userdata( $result['user_id'] );
 			$this->assertSame( array( Roles::ROLE => true ), $user->caps, 'Null writes no user-level capability.' );
-			$this->assertTrue( Capabilities::user_has( $user, Capabilities::MENUS ), 'With null, the role grant applies, as the role defaults say.' );
+			$this->assertTrue( Capabilities::user_has( $user, Capabilities::SETTINGS ), 'With null, the role grant applies, as the role defaults say.' );
 		} finally {
-			$role->remove_cap( Capabilities::MENUS );
+			$role->remove_cap( Capabilities::SETTINGS );
 		}
 	}
 
@@ -527,11 +525,11 @@ final class AgentsCreateCapabilitiesTest extends TestCase {
 	}
 
 	public function test_a_listener_that_sets_a_non_offered_steadhand_capability_true_refuses_and_rolls_back(): void {
-		$this->assertNotContains( Capabilities::MENUS, $this->handler->offered_capabilities(), 'Precondition: menus is not offered.' );
+		$this->assertNotContains( Capabilities::SETTINGS, $this->handler->offered_capabilities(), 'Precondition: settings is not offered.' );
 		$this->on(
 			'steadhand_agent_created',
 			static function ( $user_id ): void {
-				get_userdata( $user_id )->add_cap( Capabilities::MENUS, true );
+				get_userdata( $user_id )->add_cap( Capabilities::SETTINGS, true );
 			}
 		);
 

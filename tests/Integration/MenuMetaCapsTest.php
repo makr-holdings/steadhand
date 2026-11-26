@@ -580,4 +580,84 @@ final class MenuMetaCapsTest extends MenuToolTestCase {
 		$this->assertTrue( $answers['add'], 'add_post_meta on an ordinary draft, which the agent may edit.' );
 		$this->assertNotEmpty( $fixture['menu'] );
 	}
+
+	/**
+	 * A comment on a classic menu item is refused for a dedicated agent inside steadhand/update-menu, for every comment capability core
+	 * derives from edit_post. The menu grant would otherwise reach the comment, so each of them must be refused.
+	 */
+	public function test_comment_capabilities_on_a_menu_item_are_refused_inside_update_menu(): void {
+		$fixture = $this->fixture();
+		$comment = (int) self::factory()->comment->create(
+			array(
+				'comment_post_ID'  => $fixture['live'],
+				'comment_approved' => '1',
+			)
+		);
+		$this->act_as_agent(
+			array(
+				Capabilities::MENUS   => true,
+				Capabilities::PUBLISH => true,
+			)
+		);
+
+		$answers = $this->inside(
+			self::UPDATE,
+			static fn(): array => array(
+				'edit_comment'        => current_user_can( 'edit_comment', $comment ),
+				'edit_comment_meta'   => current_user_can( 'edit_comment_meta', $comment, 'steadhand_note' ),
+				'add_comment_meta'    => current_user_can( 'add_comment_meta', $comment, 'steadhand_note' ),
+				'delete_comment_meta' => current_user_can( 'delete_comment_meta', $comment, 'steadhand_note' ),
+			)
+		);
+
+		foreach ( $answers as $capability => $answer ) {
+			$this->assertFalse( $answer, "$capability on a comment of a menu item must be refused inside update-menu." );
+		}
+	}
+
+	/**
+	 * A comment on an ordinary post keeps its answer inside steadhand/update-menu: the agent may edit a draft's comment, as it may edit the draft.
+	 */
+	public function test_comment_capabilities_on_an_ordinary_post_keep_core_answers_inside_update_menu(): void {
+		$this->fixture();
+		$post    = $this->admin_post( array( 'post_status' => 'draft' ) );
+		$comment = (int) self::factory()->comment->create(
+			array(
+				'comment_post_ID'  => $post,
+				'comment_approved' => '1',
+			)
+		);
+		$this->act_as_agent(
+			array(
+				Capabilities::MENUS   => true,
+				Capabilities::PUBLISH => true,
+			)
+		);
+
+		$answer = $this->inside( self::UPDATE, static fn(): bool => current_user_can( 'edit_comment', $comment ) );
+
+		$this->assertTrue( $answer, 'edit_comment on an ordinary draft must keep the answer the draft gives.' );
+	}
+
+	/**
+	 * A user who is not a dedicated agent keeps core's answer for a menu item's comment: core derives edit_comment from edit_post on the
+	 * comment's post, and this mapping adds nothing for a non-agent. A non-agent cannot run a Steadhand call at all (the pipeline refuses
+	 * it), so this is asked outside a call, where the mapping is off.
+	 */
+	public function test_comment_capabilities_for_a_non_agent_keep_core_answers(): void {
+		$fixture = $this->fixture();
+		$comment = (int) self::factory()->comment->create(
+			array(
+				'comment_post_ID'  => $fixture['live'],
+				'comment_approved' => '1',
+			)
+		);
+		$admin   = $this->admin_id();
+
+		$this->assertSame(
+			map_meta_cap( 'edit_post', $admin, $fixture['live'] ),
+			map_meta_cap( 'edit_comment', $admin, $comment ),
+			'edit_comment for a non-agent must be core\'s derivation from edit_post.'
+		);
+	}
 }

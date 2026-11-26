@@ -18,4 +18,7 @@ if ( is_readable( __DIR__ . '/vendor/autoload.php' ) ) {
 	// removed from the current site's posts only, as the rest of uninstall is (SPEC D13). Like the rest, they are removed only when
 	// the autoloader is present, so a source checkout without vendor/ removes none of them.
 	array_map( 'delete_post_meta_by_key', \Steadhand\Pipeline\TrashRules::MARKER_KEYS );
+
+	// The keys a menu hide stores on a classic menu item (MenuRules::HIDDEN_KEYS), removed the same way.
+	array_map( 'delete_post_meta_by_key', \Steadhand\Pipeline\MenuRules::HIDDEN_KEYS );
 }

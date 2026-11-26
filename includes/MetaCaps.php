@@ -67,7 +67,8 @@ defined( 'ABSPATH' ) || exit;
  * Every other capability on a menu or a menu item keeps the refusal it had: edit_term and delete_term on a menu,
  * read_post, publish_post and delete_post on a menu item, and edit_theme_options itself. A trashed menu item is refused.
  * edit_post_meta, add_post_meta and delete_post_meta on a menu item are refused for a dedicated agent during any Steadhand call, for
- * every key, because core derives them from edit_post.
+ * every key, because core derives them from edit_post. So are edit_comment and the comment meta capabilities on a comment of a menu
+ * item (map_menu_comment()), which core derives from edit_post on the comment's post.
  *
  * Core's extra requirements survive. The mapping replaces the post type's own capabilities (every value in
  * get_post_type_object()->cap), and never anything stricter. If core asks for anything else as well, for example
@@ -126,6 +127,13 @@ final class MetaCaps {
 	 * for a classic menu item inside a Steadhand call (see map_menu_item_meta()).
 	 */
 	private const POST_META_CAPS = array( 'edit_post_meta', 'add_post_meta', 'delete_post_meta' );
+
+	/**
+	 * The comment capabilities. Core answers each from edit_post on the comment's post (edit_comment directly, and the comment meta
+	 * capabilities through edit_comment), so the classic menu grant would reach a comment on a menu item. They are refused for such a
+	 * comment inside a Steadhand call (see map_menu_comment()).
+	 */
+	private const COMMENT_CAPS = array( 'edit_comment', 'edit_comment_meta', 'add_comment_meta', 'delete_comment_meta' );
 
 	/**
 	 * The Steadhand capability edit_post needs for a post in this status, or null when no status rule covers it. This is the
@@ -187,6 +195,11 @@ final class MetaCaps {
 		// Post meta on a classic menu item is refused for an agent during a call, whatever the key. See map_menu_item_meta().
 		if ( in_array( $cap, self::POST_META_CAPS, true ) ) {
 			return $this->map_menu_item_meta( $caps, $user_id, $args );
+		}
+
+		// A comment on a classic menu item is refused for an agent during a call, for every comment capability. See map_menu_comment().
+		if ( in_array( $cap, self::COMMENT_CAPS, true ) ) {
+			return $this->map_menu_comment( $caps, $user_id, $args );
 		}
 
 		if ( ! in_array( $cap, self::MAPPED, true ) ) {
@@ -329,6 +342,37 @@ final class MetaCaps {
 		$post_id = (int) ( $args[0] ?? 0 );
 		$post    = $post_id > 0 ? get_post( $post_id ) : null;
 
+		if ( $post instanceof \WP_Post && 'nav_menu_item' === $post->post_type ) {
+			return array( 'do_not_allow' );
+		}
+
+		return $caps;
+	}
+
+	/**
+	 * Refuses edit_comment, edit_comment_meta, add_comment_meta and delete_comment_meta on a comment whose post is a classic menu item, for
+	 * a dedicated agent inside a Steadhand call. Core answers each one from edit_post on the comment's post, which the classic menu grant
+	 * maps, so without this refusal the grant would reach the comments of every menu item. A comment on any other post, any other user and
+	 * any answer outside a call keep core's answer. An earlier do_not_allow never reaches this method (map() returns it first).
+	 *
+	 * @param array $caps    Core's answer.
+	 * @param int   $user_id The user the check is about.
+	 * @param array $args    Extra arguments; the first is the comment ID.
+	 * @return array
+	 */
+	private function map_menu_comment( array $caps, int $user_id, array $args ): array {
+		$user = get_userdata( $user_id );
+		if ( ! $user instanceof \WP_User || ! Agents::is_agent( $user ) ) {
+			return $caps;
+		}
+
+		$comment_id = (int) ( $args[0] ?? 0 );
+		$comment    = $comment_id > 0 ? get_comment( $comment_id ) : null;
+		if ( ! $comment instanceof \WP_Comment ) {
+			return $caps;
+		}
+
+		$post = get_post( (int) $comment->comment_post_ID );
 		if ( $post instanceof \WP_Post && 'nav_menu_item' === $post->post_type ) {
 			return array( 'do_not_allow' );
 		}

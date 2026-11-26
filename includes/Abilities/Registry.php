@@ -72,6 +72,7 @@ final class Registry {
 			new SetFeaturedImage(),
 			new TrashPost(),
 			new RestorePost(),
+			new UpdateMenu(),
 			new UndoChange( $this->change_log ),
 		);
 	}

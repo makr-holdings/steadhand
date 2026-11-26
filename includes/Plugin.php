@@ -132,6 +132,10 @@ final class Plugin {
 		add_action( 'transition_post_status', array( Pipeline\PostWriter::class, 'left_trash' ), 10, 3 );
 		add_action( 'untrashed_post', array( Pipeline\PostWriter::class, 'untrashed' ), 10, 1 );
 
+		// The hidden keys of a classic menu item are cleared when the item is published by any route, including a Save Menu in wp-admin.
+		// Registered whatever the requirements, like the trash listeners above.
+		add_action( 'transition_post_status', array( Pipeline\MenuWriter::class, 'became_published' ), 10, 3 );
+
 		if ( ! $requirements->are_met() ) {
 			add_action( 'admin_notices', array( $requirements, 'render_notice' ) );
 			return false;

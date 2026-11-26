@@ -7,6 +7,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). The
 ## [Unreleased]
 
 ### Added
+- `steadhand/update-menu` (SPEC section 5, D25): adds, renames, hides and shows the items of a classic navigation menu, one operation per call. It needs `steadhand_menus`, `steadhand_read` and `steadhand_publish`, because a change is live on every page at once. It never deletes an item or a menu and never changes a theme location. `hide` sets an item to draft, which takes it off the public menu, and `show` brings back only an item that Steadhand hid. Saving the menu in Appearance > Menus shows a hidden item again, and the tool warns of that. Block navigation is refused. Moving an item is not built yet. Its changes cannot be undone with `steadhand/undo-change`; each operation has an opposite call.
+- The Agents screen offers `steadhand_menus`, with a sentence saying it changes the public site at once and needs `steadhand_publish`.
+- Uninstall removes the three menu marker keys from every menu item.
 - `steadhand/get-menu` returns hidden items of a classic menu, and every item has a `hidden` field. A hidden item is one in the draft status, which the public menu does not print. This is the first step towards `steadhand/update-menu` (SPEC section 5, D25), which is not built yet.
 
 ### Changed
@@ -14,7 +17,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). The
 - In `steadhand/get-menu`, an item's `order` now counts hidden items too.
 
 ### Security
-- The capability mapping for `steadhand/update-menu` is in place ahead of the ability (SPEC section 14.1). It applies only inside a call of that ability, which is not registered yet, so nothing can reach it. It never grants `edit_theme_options`.
+- The capability mapping for `steadhand/update-menu` applies only inside a call of that ability (SPEC section 14.1). It grants `assign_term` on a menu and `edit_post` on a menu item, each only with `steadhand_menus` and `steadhand_publish`, and never `edit_theme_options`. The post meta capabilities on a menu item, and the comment capabilities for a comment on one, stay refused.
+- A menu item's stored title, content and excerpt are kept byte for byte when an agent hides or shows it, so an administrator's markup in a title is not rewritten by the agent's save.
 - `SECURITY.md` gives one way to report a vulnerability, GitHub private vulnerability reporting, now that the repository is public.
 - `README.md` and `readme.txt` say to reconnect the MCP client after an update. A client that connected before the update keeps the old list of tools, so it does not see new tools and may reject a result that has a new field.
 

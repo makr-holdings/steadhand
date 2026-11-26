@@ -343,7 +343,7 @@ final class GetDiagnosticsTest extends TestCase {
 		$this->assertSame( STEADHAND_VERSION, $steadhand['version'] );
 		$this->assertSame( McpAdapter::VERSION, $steadhand['mcp_adapter_version'] );
 		$this->assertTrue( $steadhand['ability_category_registered'] );
-		$this->assertSame( 22, $steadhand['abilities_registered'] );
+		$this->assertSame( 23, $steadhand['abilities_registered'] );
 		$this->assertTrue( $steadhand['server_registered'] );
 		$this->assertTrue( $steadhand['lockdown_active'] );
 		$this->assertTrue( $steadhand['change_log_ready'] );
