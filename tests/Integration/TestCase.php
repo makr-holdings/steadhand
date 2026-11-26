@@ -25,8 +25,13 @@ abstract class TestCase extends WP_UnitTestCase {
 	/**
 	 * Clears the state that core and these tests leave behind: the application password global that
 	 * rest_get_authenticated_app_password() reads, and the filters the application password tests add.
+	 *
+	 * It also deletes the files a test uploaded. The database rolls back after each test, but files do not, and
+	 * thousands of leftover copies of one fixture image make wp_unique_filename() take seconds per upload. Core's
+	 * remove_added_uploads() keeps the files that were in the uploads folder before the first test of the run.
 	 */
 	protected function tearDown(): void {
+		$this->remove_added_uploads();
 		unset( $GLOBALS['wp_rest_application_password_uuid'], $GLOBALS['wp_rest_application_password_status'] );
 		remove_filter( 'application_password_is_api_request', '__return_true' );
 		remove_filter( 'wp_is_application_passwords_available', '__return_true' );
