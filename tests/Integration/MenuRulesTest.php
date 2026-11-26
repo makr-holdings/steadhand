@@ -121,6 +121,22 @@ final class MenuRulesTest extends MenuToolTestCase {
 	 * Control and regression: core's wp_get_nav_menu_items() returns nothing for a menu whose items are all drafts, because the stored
 	 * count counts published items only. items_raw() must still return them.
 	 */
+	public function test_items_raw_is_not_changed_by_a_query_filter(): void {
+		$menu = $this->classic_menu( 'Rules query filter' );
+		$live = $this->custom_item( $menu, 'Live', 'https://example.test/live', 0, 1 );
+
+		$hide_everything = static fn( string $where ): string => $where . ' AND 1 = 0';
+		add_filter( 'posts_where', $hide_everything );
+		try {
+			$ids = $this->ids( $this->rows( $menu ) );
+		} finally {
+			remove_filter( 'posts_where', $hide_everything );
+		}
+
+		$this->assertSame( array( $live ), $ids, 'A query filter must not hide a stored row from the rules.' );
+		$this->assertArrayNotHasKey( 'suppress_filters', MenuRules::query_args( $this->term( $menu ) ), 'The arguments passed on to core\'s menu filter carry no such key, as core\'s own do not.' );
+	}
+
 	public function test_items_raw_returns_drafts_of_a_menu_that_has_no_published_item(): void {
 		$menu  = $this->classic_menu( 'Rules drafts only' );
 		$draft = wp_update_nav_menu_item(

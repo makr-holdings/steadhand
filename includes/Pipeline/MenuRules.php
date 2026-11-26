@@ -102,7 +102,6 @@ final class MenuRules {
 			'output_key'             => 'menu_order',
 			'nopaging'               => true,
 			'no_found_rows'          => true,
-			'suppress_filters'       => true,
 			'ignore_sticky_posts'    => true,
 			'update_post_term_cache' => false,
 			'update_post_meta_cache' => true,
@@ -131,6 +130,8 @@ final class MenuRules {
 	 * @return array<int, array{id: int, parent: int, order: int, status: string, orphaned: bool, post: \WP_Post}>
 	 */
 	public static function items_raw( \WP_Term $menu ): array {
+		// get_posts() runs the query with its query filters off unless asked otherwise, as core's own menu read does. The
+		// rules need every stored row of the menu, so a plugin's query filter must not hide one.
 		$items = get_posts( self::query_args( $menu ) );
 
 		$rows = array();
