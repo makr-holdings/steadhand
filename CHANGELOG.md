@@ -6,6 +6,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). The
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-11-26
+
 ### Added
 - An optional IP allowlist for each agent (SPEC section 4.1, D3, D28). On the Agents screen, an agent's detail view has an **Allowed IP addresses** section. While the list has entries, the agent's Application Passwords are accepted only from a listed address (IPv4 or IPv6, or a range of /8 to /32 or /16 to /128), at most 20 entries. Off by default. The check uses `REMOTE_ADDR` only. A refused attempt gets the same response as a wrong password and writes nothing. A list that cannot be read refuses the agent from every address, and a failed save never leaves the agent without a list.
 - The filter `steadhand_client_ip`, for a site behind a reverse proxy, and the actions `steadhand_agent_ip_refused` (at a refusal, once per request) and `steadhand_agent_ips_changed` (after a save that changed the list). All three are documented in `docs/HOOKS.md`.

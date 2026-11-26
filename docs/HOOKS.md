@@ -27,7 +27,7 @@ These rules apply to every extension point listed here once it exists:
 
 Chooses which site options `steadhand/update-option` may change. It is applied by `Steadhand\Pipeline\OptionRules::allowed()`. That function reads the filter on every call of the ability and of the writer, so the allowlist that decides a call is always current, and it fails closed both ways: a result it cannot use gives the built-in list, and a name it does not keep is refused. The tool's input schema lists the allowlist when the tool is registered, so a name added after registration is refused by the schema the tool was registered with, and a name removed after registration is refused by the call.
 
-- **Since:** unreleased (the release after 0.4.0).
+- **Since:** 0.5.0.
 - **Type:** filter.
 - **Parameter:** `$options` (`array<string, array{max_length: int, min_length: int}>`). The default is `array( 'blogname' => array( 'max_length' => 200, 'min_length' => 1 ), 'blogdescription' => array( 'max_length' => 500, 'min_length' => 0 ) )`. Each name is an option name, and each entry gives the most and the fewest characters a value of that option may take.
 - **Return:** the same shape. Whatever the filter returns, Steadhand checks it before use:
@@ -106,7 +106,7 @@ Sets the client address that an agent's IP allowlist (SPEC §4.1) is checked aga
 
 An agent with no list never calls it.
 
-- **Since:** Unreleased.
+- **Since:** 0.5.0.
 - **Type:** filter.
 - **Parameters:**
   - `$ip` (`string`), the address from `REMOTE_ADDR`, or `''` when `REMOTE_ADDR` is missing or is not an IP address. Steadhand reads no other header.
@@ -439,7 +439,7 @@ This action is public API. The [stability policy](#stability-policy) above appli
 
 Runs when an agent is refused because the request came from an address that is not on the agent's IP allowlist.
 
-- **Since:** Unreleased.
+- **Since:** 0.5.0.
 - **Type:** action.
 - **Parameters:** `$user_id` (`int`), the agent; `$ip` (`string`), the address Steadhand saw, or `''` when none could be determined. The password, the list and every header are never passed.
 - **When it runs:** at the first refusal of the request by any of the three layers (SPEC §4.1), and at most once per request. The layers are:
@@ -455,7 +455,7 @@ This action is public API. The [stability policy](#stability-policy) above appli
 
 Runs after the Agents screen saves an agent's allowed IP addresses, when the stored list changed.
 
-- **Since:** Unreleased.
+- **Since:** 0.5.0.
 - **Type:** action.
 - **Parameters:** `$user_id` (`int`), the agent; `$entries` (`string[]`), the saved entries in canonical form, which is empty when the check was turned off; `$previous` (`string[]`), the entries before the save, which is empty when there was no list or the stored list was corrupt.
 - **When it runs:** after the new list is saved and read back as saved. It does not run when the save is refused, or when the list is the same as before.
@@ -484,7 +484,7 @@ This action is public API. The [stability policy](#stability-policy) above appli
 
 Runs on the Guardrails screen (under Steadhand in the admin menu, SPEC section 6), after the presets form and the list of rules that other plugins added. Use it to add a section to the screen.
 
-- **Since:** unreleased (the release after 0.4.0).
+- **Since:** 0.5.0.
 - **Type:** action.
 - **Parameters:** none.
 - **When it runs:** once for each render of the screen, after the capability check has passed, on a single site. It does not run on a multisite network, where the screen shows only a notice, and it does not run for a viewer who is refused.
@@ -499,7 +499,7 @@ This action is public API. The [stability policy](#stability-policy) above appli
 
 Runs after the Guardrails screen saves a change to the presets. A preset is an optional guardrail, such as the Rank Math options preset (SPEC section 6.2). The fixed list of presets is in code: no filter adds one in this version.
 
-- **Since:** unreleased (the release after 0.4.0).
+- **Since:** 0.5.0.
 - **Type:** action.
 - **Parameters:** `$current` (`array<string, bool>`), every known preset with its state after the save; `$previous` (`array<string, bool>`), every known preset with its state before the save; `$user_id` (`int`), the administrator who saved the presets.
 - **When it runs:** after the save is stored and read back, and only when at least one preset changed its value. It does not run for a save that changed nothing, for a refused request, or for a save that did not read back.
